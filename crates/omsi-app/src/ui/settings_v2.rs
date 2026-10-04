@@ -359,6 +359,11 @@ impl Ui {
                     ctl = Some([r0[0], rect[1], rx, rect[3]]);
                     r0[0]
                 }
+                // a list to open without a value to show (the destinations, the drivers): ›
+                "o" if t.value.trim().is_empty() => {
+                    self.icon_at(r, scene, "chevron_right", 22.0 * s, super::mix(TEXT_3, TEXT, a), rx - 10.0 * s, cy);
+                    rx - 22.0 * s
+                }
                 "o" => {
                     // a drop-down field: the value now and the arrow that opens the list
                     let fh = 34.0 * s;

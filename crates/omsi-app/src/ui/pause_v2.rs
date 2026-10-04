@@ -15,10 +15,10 @@ use omsi_render::{Renderer, Scene};
 fn entry(id: &str) -> (&'static str, &'static str, u8) {
     match id {
         "resume" => ("play_arrow", "", 0),
-        "options" => ("settings", "Graphics, sound, controls, AI traffic", 1),
+        "options" => ("settings", "Driving, traffic, graphics, sound, controls", 1),
         "camera" => ("videocam", "Seat, view and field of view", 1),
-        "vehicle" => ("directions_bus", "Displays, depot, service, other vehicles", 1),
-        "world" => ("public", "Time, weather and traffic", 1),
+        "vehicle" => ("directions_bus", "Destination, service, other vehicles", 1),
+        "world" => ("public", "Time, weather, traffic now", 1),
         "tobus" => ("directions_walk", "Back behind the wheel", 2),
         "map" => ("map", "Where you are, where to go", 2),
         "duty" => ("route", "Choose a line and a tour to drive", 2),

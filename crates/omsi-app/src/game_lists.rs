@@ -837,7 +837,7 @@ pub(crate) enum Move {
 type Page = (&'static str, Vec<(String, String)>);
 
 /// A row of a settings window (see `ui::MenuKind::Options` for the format).
-fn row(name: &str, kind: char, value: &str, desc: &str, frac: Option<f32>) -> String {
+pub(crate) fn row(name: &str, kind: char, value: &str, desc: &str, frac: Option<f32>) -> String {
     format!("{name}\u{1f}{kind}\u{1f}{value}\u{1f}{desc}\u{1f}{}", frac.map(|f| format!("{f:.3}")).unwrap_or_default())
 }
 
@@ -2307,7 +2307,8 @@ fn options_pages(app: &App) -> Vec<Page> {
         rows.push(button("Reset navigator position", "Reset", desc, "vr_nav_reset"));
         pages.push(("VR", rows));
     }
-    pages
+    // (laid out for the players: by what they want to do, in sections, plainly named)
+    crate::settings_layout::regroup(pages, crate::settings_layout::OPTIONS)
 }
 
 fn vehicle_pages(app: &App) -> Vec<Page> {
@@ -2353,7 +2354,7 @@ fn vehicle_pages(app: &App) -> Vec<Page> {
             service.push(opens("Teleport to a start point", "Teleport to a starting point on the map", "tplist"));
         }
     }
-    vec![("Display and driver", display), ("Vehicles", fleet), ("Service", service)]
+    crate::settings_layout::regroup(vec![("Display and driver", display), ("Vehicles", fleet), ("Service", service)], crate::settings_layout::VEHICLE)
 }
 
 fn world_pages(app: &App) -> Vec<Page> {
@@ -2442,7 +2443,7 @@ fn world_pages(app: &App) -> Vec<Page> {
     let mut people: Vec<(String, String)> = Vec::new();
     people.extend(slider_row(app, "traffic", "Traffic", "How many vehicles drive around the map.", &|v| format!("{} vehicles", v as i64)));
     people.extend(slider_row(app, "pax", "Passengers", "How many passengers wait at the stops and ride.", &pct));
-    vec![("Time", time), ("Weather", weather), ("Temperature and wind", climate), ("Traffic and people", people), ("Tools", tools)]
+    crate::settings_layout::regroup(vec![("Time", time), ("Weather", weather), ("Temperature and wind", climate), ("Traffic and people", people), ("Tools", tools)], crate::settings_layout::WORLD)
 }
 
 /// The pages of the settings window `kind` (empty ones left out) and the one shown.
