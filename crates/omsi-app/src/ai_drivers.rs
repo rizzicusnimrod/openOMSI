@@ -648,9 +648,18 @@ impl TwoStroke {
         }
         let extra = self.puff * cfg.smoke_puff + cold * cfg.smoke_cold + if self.smoker { cfg.smoke_smoker } else { 0.0 };
         let s = extra + cfg.smoke_base;
+        // A puff stays where it was let go, so a car on the move strings its cloud out: so
+        // many a second at 50 km/h lay a dotted line of puffs metres apart. As many more as
+        // keep them about as close at any speed (one more share every 5 m/s), and the trail
+        // stays one.
+        let trail = 1.0 + speed.abs() / 5.0;
+        let life = s.min(2.0) * 0.75 + 2.0;
+        // (an emitter keeps at most `MAX_PER_EMITTER` puffs and sends none while it has them
+        // all: more than that alive at once and the trail breaks up again, in bursts)
+        let most = omsi_sim::particles::MAX_PER_EMITTER as f32 * 0.9 / life;
         Smoke {
-            freq: s * cfg.smoke_density,
-            life: s.min(2.0) * 0.75 + 2.0,
+            freq: (s * cfg.smoke_density * trail).min(most),
+            life,
             alpha: (s * 0.25 + 0.45).min(1.0),
             speed: (0.4 + s * 0.3).min(1.2),
             extra,
@@ -848,8 +857,31 @@ mod tests {
     }
 
     #[test]
+    fn two_stroke_trail_stays_close_at_speed() {
+        let cfg = cfg_all(|c| c.smokers = 0.0);
+        let mut s = TwoStroke::new(1, &cfg);
+        let warm = Conditions { temp_c: 20.0, ..Default::default() };
+        // the gap between two puffs (m) at 30, 50 and 90 km/h: never much more than at 30
+        let gap = |s: &mut TwoStroke, kmh: f32| {
+            let v = kmh / 3.6;
+            v / s.step(&cfg, &warm, 0.02, v, 0.0, 1000.0).freq
+        };
+        let g30 = gap(&mut s, 30.0);
+        for kmh in [50.0, 90.0] {
+            let g = gap(&mut s, kmh);
+            assert!(g < g30 * 1.6, "{kmh} km/h: {g:.2} m against {g30:.2} m at 30");
+        }
+        // and a smoker at speed never has more puffs alive than its emitter keeps
+        let cfg = cfg_all(|c| c.smokers = 1.0);
+        let mut s = TwoStroke::new(1, &cfg);
+        let k = s.step(&cfg, &warm, 0.02, 25.0, 0.0, 0.0);
+        assert!(k.freq * k.life <= omsi_sim::particles::MAX_PER_EMITTER as f32, "{k:?}");
+    }
+
+    #[test]
     fn two_stroke_puffs_pulling_away() {
-        let cfg = Config::default();
+        // (a well tuned one: a smoker's cloud is at its emitter's most already)
+        let cfg = cfg_all(|c| c.smokers = 0.0);
         let mut s = TwoStroke::new(1, &cfg);
         let warm = Conditions { temp_c: 20.0, ..Default::default() };
         let idle = s.step(&cfg, &warm, 0.02, 0.0, 0.0, 1000.0);
