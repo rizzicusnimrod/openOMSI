@@ -27,6 +27,18 @@ const BRAKE_RATE: f32 = 20.0;
 /// The lowest brake factor Omsi.exe takes (0x5a145c).
 const BRAKE_MIN: f32 = 0.1;
 
+/// How much of their smoke the vehicles send off (exhaust, steam, spray), as a fraction
+/// (f32 bits): the game's `exhaust` setting. Scenery objects send all of theirs.
+static VEHICLE_AMOUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+pub fn set_vehicle_amount(k: f32) {
+    VEHICLE_AMOUNT.store(k.clamp(0.0, 2.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn vehicle_amount() -> f32 {
+    f32::from_bits(VEHICLE_AMOUNT.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 /// Where the camera is: emitters farther than their `calc_dist` send no new particles.
 static EYE: RwLock<Option<DVec3>> = RwLock::new(None);
 
@@ -89,6 +101,8 @@ pub struct Emitter {
 pub struct ParticleSet {
     pub emitters: Vec<Emitter>,
     rng: u64,
+    /// How much of it is sent off (see `with_amount`; none: all).
+    amount: Option<f32>,
 }
 
 fn eval(v: &PsValue, value: &dyn Fn(&str) -> f32) -> f32 {
@@ -106,7 +120,14 @@ impl ParticleSet {
                 .map(|def| Emitter { def, particles: Vec::new(), carry: 0.0, burst_done: false, ended: Vec::new() })
                 .collect(),
             rng: seed | 1,
+            amount: None,
         }
+    }
+
+    /// Send off only `k` of the particles (0.67 = two thirds; bursts as many fewer).
+    pub fn with_amount(mut self, k: f32) -> ParticleSet {
+        self.amount = Some(k.max(0.0));
+        self
     }
 
     pub fn is_empty(&self) -> bool {
@@ -178,7 +199,8 @@ impl ParticleSet {
             // where new particles start: the emitter itself, or the particles of the one it
             // is attached to - and the ground under them: the owner's under the emitter, a
             // parent particle's own
-            let freq = eval(&def.freq.0, value).max(0.0);
+            let k = self.amount.unwrap_or(1.0);
+            let freq = eval(&def.freq.0, value).max(0.0) * k;
             let mut sources: Vec<(DVec3, Vec3, f64)> = Vec::new();
             let mut burst_sources: Vec<(DVec3, Vec3, f64)> = Vec::new();
             match def.attach {
@@ -221,7 +243,7 @@ impl ParticleSet {
             }
             if let Some(b) = &def.burst {
                 for s in &burst_sources {
-                    let count = self.draw(b, value).round().max(0.0) as usize;
+                    let count = (self.draw(b, value) * k).round().max(0.0) as usize;
                     spawn.extend(std::iter::repeat(*s).take(count));
                 }
             }
@@ -359,6 +381,21 @@ mod tests {
         assert!(spins.iter().all(|a| (0.0..std::f32::consts::TAU).contains(a)), "{spins:?}");
         let (lo, hi) = spins.iter().fold((f32::MAX, f32::MIN), |(lo, hi), a| (lo.min(*a), hi.max(*a)));
         assert!(lo < 1.0 && hi > 5.0, "spins {lo}..{hi}");
+    }
+
+    #[test]
+    fn an_amount_of_two_thirds_sends_two_thirds() {
+        let count = |k: Option<f32>| {
+            let mut s = ParticleSet::new(vec![smoke(30.0)], 5);
+            if let Some(k) = k {
+                s = s.with_amount(k);
+            }
+            s.update(1.0, DVec3::ZERO, Mat4::IDENTITY, &|_| 1.0);
+            s.particles().count()
+        };
+        assert_eq!(count(None), 30);
+        assert_eq!(count(Some(2.0 / 3.0)), 20);
+        assert_eq!(count(Some(0.0)), 0);
     }
 
     #[test]
