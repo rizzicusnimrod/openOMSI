@@ -136,7 +136,8 @@ impl Default for Config {
             smoke_puff: 2.0,
             smoke_cold: 1.5,
             smoke_cold_time: 300.0,
-            smoke_density: 35.0,
+            // (the mod's 35 was too thick a cloud here: two thirds of it)
+            smoke_density: 23.3,
             smoke_base: 0.15,
             smokers: 0.3,
             smoke_smoker: 1.0,
