@@ -181,6 +181,11 @@ pub fn is_test_build(version: &str) -> bool {
     version.contains("-pr")
 }
 
+/// A build of the `custom` fork (`build.rs` marks it): no release replaces it.
+pub fn is_custom_build(version: &str) -> bool {
+    version.contains("-custom")
+}
+
 /// Whether `candidate` is a newer version than `current`.
 pub fn newer(candidate: &str, current: &str) -> bool {
     let (mut a, mut b) = (version_parts(candidate), version_parts(current));
@@ -251,6 +256,10 @@ fn parse_release(v: &serde_json::Value, current: &str) -> anyhow::Result<Option<
     let version = tag.trim_start_matches(['v', 'V']).to_string();
     if is_test_build(current) {
         log::info!("update check: {current} is a pull request's test build, {version} is not offered");
+        return Ok(None);
+    }
+    if is_custom_build(current) {
+        log::info!("update check: {current} is a custom build, {version} is not offered");
         return Ok(None);
     }
     if v["draft"].as_bool() == Some(true) || v["prerelease"].as_bool() == Some(true) || !newer(&version, current) {
@@ -689,6 +698,9 @@ mod tests {
         // a pull request's test build keeps itself, however new the release
         assert!(parse_release(&v, "0.1.7-pr12").unwrap().is_none());
         assert!(is_test_build("0.1.1313-pr1192") && !is_test_build("0.1.1313"));
+        // and so does a build of the custom fork
+        assert!(parse_release(&v, "0.1.7-custom").unwrap().is_none());
+        assert!(is_custom_build("0.1.3-custom") && !is_custom_build("0.1.1313"));
     }
 
     #[test]

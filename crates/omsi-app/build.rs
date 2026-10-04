@@ -56,7 +56,8 @@ fn steam() {
 }
 
 /// `MAJOR.MINOR` from the VERSION file, then the number of commits since that file last
-/// changed (the CI passes the same number in `OPENOMSI_VERSION`).
+/// changed (the CI passes the same number in `OPENOMSI_VERSION`). A build of this fork is
+/// marked `-custom`: the updater leaves it alone (an official release would replace it).
 fn version(git: &dyn Fn(&[&str]) -> Option<String>) -> String {
     if let Ok(v) = std::env::var("OPENOMSI_VERSION") {
         if !v.trim().is_empty() {
@@ -68,7 +69,7 @@ fn version(git: &dyn Fn(&[&str]) -> Option<String>) -> String {
         .filter(|h| !h.is_empty())
         .and_then(|h| git(&["rev-list", "--count", &format!("{h}..HEAD")]))
         .unwrap_or_else(|| "0".into());
-    format!("{base}.{n}")
+    format!("{base}.{n}-custom")
 }
 
 fn windows_icon() {
