@@ -2761,6 +2761,11 @@ impl App {
             // P changes only the simulation state, even while a menu is open.
             KeyCode::KeyP if !modified => self.toggle_pause(),
             KeyCode::Escape => self.close_game_menu(),
+            // the game menu's tiles: the arrows go to the tile that way
+            KeyCode::ArrowUp | KeyCode::KeyW if self.ui.as_ref().is_some_and(|u| u.menu_grid) => self.game_menu = Some(self.grid_step(sel, 0.0, -1.0)),
+            KeyCode::ArrowDown | KeyCode::KeyS if self.ui.as_ref().is_some_and(|u| u.menu_grid) => self.game_menu = Some(self.grid_step(sel, 0.0, 1.0)),
+            KeyCode::ArrowLeft | KeyCode::KeyA if self.ui.as_ref().is_some_and(|u| u.menu_grid) => self.game_menu = Some(self.grid_step(sel, -1.0, 0.0)),
+            KeyCode::ArrowRight | KeyCode::KeyD if self.ui.as_ref().is_some_and(|u| u.menu_grid) => self.game_menu = Some(self.grid_step(sel, 1.0, 0.0)),
             KeyCode::ArrowUp | KeyCode::KeyW => self.game_menu = Some(self.menu_step(sel, n, false)),
             KeyCode::ArrowDown | KeyCode::KeyS => self.game_menu = Some(self.menu_step(sel, n, true)),
             KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => self.menu_choose(event_loop, sel),
@@ -4411,6 +4416,79 @@ impl crate::App {
     }
 
     /// Whether line `k` of the game menu is greyed out.
+    /// What the game menu says at its top: the vehicle driven (or how one is about), and
+    /// chips for the map, the line and tour with the delay, and the time of day.
+    pub(crate) fn menu_status(&self) -> crate::ui::MenuStatus {
+        let title = match (self.player.as_ref(), self.on_foot.is_some()) {
+            (_, true) => omsi_ui::tr("On foot").into_owned(),
+            (Some(p), _) => {
+                let d = &p.vehicle.ty.def;
+                format!("{} {}", d.manufacturer.trim(), d.type_name.trim()).trim().to_string()
+            }
+            (None, _) => omsi_ui::tr("Free camera").into_owned(),
+        };
+        let mut chips: Vec<(&'static str, String)> = Vec::new();
+        if let Some(w) = self.world.as_ref() {
+            let name = if w.global.friendly_name.trim().is_empty() { w.global.name.trim() } else { w.global.friendly_name.trim() };
+            if !name.is_empty() {
+                chips.push(("map", name.to_string()));
+            }
+        }
+        match self.duty.as_ref() {
+            Some(d) => {
+                let trip = d.trips.get(d.trip_index);
+                let line = trip.map(|t| t.line.trim()).filter(|l| !l.is_empty()).unwrap_or(d.line.trim());
+                let mut text = format!("{} {line} · {} {}", omsi_ui::tr("Line"), omsi_ui::tr("Tour"), d.tour.trim());
+                if let Some(t) = trip.filter(|t| !t.terminus.trim().is_empty()) {
+                    text.push_str(&format!(" › {}", t.terminus.trim()));
+                }
+                chips.push(("route", text));
+                if let Some(p) = self.player.as_ref() {
+                    let delay = p.vehicle.host.tt_delay;
+                    if delay.abs() >= 30.0 {
+                        chips.push(("timer", format!("{}{}:{:02}", if delay < 0.0 { "−" } else { "+" }, (delay.abs() / 60.0) as i64, (delay.abs() % 60.0) as i64)));
+                    }
+                }
+            }
+            None if self.player.is_some() => chips.push(("route", omsi_ui::tr("Free drive").into_owned())),
+            None => {}
+        }
+        let t = self.clock.time;
+        chips.push(("schedule", format!("{:02}:{:02}", ((t / 3600.0) as i64).rem_euclid(24), ((t % 3600.0) / 60.0) as i64)));
+        crate::ui::MenuStatus { title, chips }
+    }
+
+    /// The game menu's tile from `from` in the direction (`dx`, `dy`) (screen axes, y down):
+    /// the nearest one that way, straight ahead before aside; `from` when there is none.
+    pub(crate) fn grid_step(&self, from: usize, dx: f32, dy: f32) -> usize {
+        let Some(u) = self.ui.as_ref() else { return from };
+        let rects = &u.menu_rects;
+        let valid = |k: usize| rects.get(k).is_some_and(|r| r[0] > -1.0e8) && !self.menu_item_off(k);
+        let mid = |r: &[f32; 4]| ((r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5);
+        let Some(cur) = rects.get(from).filter(|r| r[0] > -1.0e8) else {
+            return (0..rects.len()).find(|&k| valid(k)).unwrap_or(from);
+        };
+        let (cx, cy) = mid(cur);
+        let mut best: Option<(f32, usize)> = None;
+        for (k, r) in rects.iter().enumerate() {
+            if k == from || !valid(k) {
+                continue;
+            }
+            let (x, y) = mid(r);
+            let (vx, vy) = (x - cx, y - cy);
+            let along = vx * dx + vy * dy;
+            if along <= 1.0 {
+                continue;
+            }
+            let aside = (vx * dy - vy * dx).abs();
+            let d = along + aside * 2.5;
+            if best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, k));
+            }
+        }
+        best.map(|b| b.1).unwrap_or(from)
+    }
+
     pub(crate) fn menu_item_off(&self, k: usize) -> bool {
         self.chooser.is_none() && self.game_menu_items().get(k).is_some_and(|m| self.menu_disabled_ids().contains(&m.0))
     }

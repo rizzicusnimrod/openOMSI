@@ -1980,6 +1980,8 @@ impl ApplicationHandler for App {
                     Some(k) if self.chooser.is_some() => crate::game_lists::page_titles(self, k),
                     _ => None,
                 };
+                // (what the game menu says at its top about the session)
+                let menu_status = (self.game_menu.is_some() && self.chooser.is_none()).then(|| self.menu_status());
                 if let (true, Some(r), Some(scene)) = (
                     self.world.is_some(),
                     self.renderer.as_ref(),
@@ -2259,6 +2261,7 @@ impl ApplicationHandler for App {
                             menu_tabs,
                             dropdown,
                             menu_search: self.menu_search.as_deref().filter(|_| crate::game_lists::is_settings(self.list_kind.as_ref())),
+                            menu_status,
                             menu_kbd: self.menu_kbd,
                             menu_top: self.menu_top,
                             // (not over the city map, which has the stops and their times: it
@@ -3064,6 +3067,13 @@ impl App {
                         self.menu_scroll_drag = true;
                         return;
                     }
+                }
+
+                // The X of a settings window: back to the game.
+                if self.chooser.is_some() && self.ui.as_ref().and_then(|u| u.menu_close_rect).is_some_and(|r| self.cursor.0 >= r[0] && self.cursor.0 <= r[2] && self.cursor.1 >= r[1] && self.cursor.1 <= r[3]) {
+                    self.close_list();
+                    self.close_game_menu();
+                    return;
                 }
 
                 // The search field of a settings window: it takes the keys.

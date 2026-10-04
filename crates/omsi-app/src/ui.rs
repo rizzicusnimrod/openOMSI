@@ -10,6 +10,8 @@ use ab_glyph::{Font, FontVec, PxScale, ScaleFont, VariableFont};
 use omsi_render::{Renderer, Scene, TextureId};
 
 // the custom fork's look: its colours and sizes, and the settings windows drawn in it
+mod kit;
+mod pause_v2;
 mod settings_v2;
 mod theme;
 
@@ -478,6 +480,15 @@ pub struct Frame<'a> {
     /// The settings window's search: what is typed (empty: the field has the keys, nothing
     /// typed yet); none while the field is not in use.
     pub menu_search: Option<&'a str>,
+    /// What the game menu says at its top about the session.
+    pub menu_status: Option<MenuStatus>,
+}
+
+/// The game menu's head: what is driven, and chips of (Material icon, text) - the map, the
+/// line and tour, the time.
+pub struct MenuStatus {
+    pub title: String,
+    pub chips: Vec<(&'static str, String)>,
 }
 
 pub struct Ui {
@@ -540,6 +551,10 @@ pub struct Ui {
     pub info_rect: Option<[f32; 4]>,
     /// The settings window's search field (a click there starts a search).
     pub menu_search_rect: Option<[f32; 4]>,
+    /// The settings window's X: back to the game.
+    pub menu_close_rect: Option<[f32; 4]>,
+    /// The game menu is drawn as tiles: the keys move between them by where they are.
+    pub menu_grid: bool,
 }
 
 /// Between the information bar's parts.
@@ -619,7 +634,7 @@ impl Ui {
         self.chat.rect[2] += x;
     }
     pub fn new() -> Option<Ui> {
-        Some(Ui { origin_x: 0.0, text: TextCache::new()?, chat: ChatWidget::default(), menu_rects: Vec::new(), menu_arrows: Vec::new(), menu_scroll_thumb: None, menu_scroll_track: None, menu_ctl: Vec::new(), dd_rects: Vec::new(), dd_top: 0, dd_rows: 8, dd_scroll: None, menu_side: Vec::new(), menu_pane: Vec::new(), menu_pane_start: 0, menu_pane_go: None, menu_pane_box: None, menu_pane_scroll: None, menu_time: Vec::new(), anim: Default::default(), anim_dt: 0.0, menu_overlay_range: 0..0, vr_cursor_overlay: None, vr_tooltip_overlay: None, menu_start: 0, menu_rows: 0, menu_row_h: 1.0, images: Default::default(), info_rect: None, menu_search_rect: None })
+        Some(Ui { origin_x: 0.0, text: TextCache::new()?, chat: ChatWidget::default(), menu_rects: Vec::new(), menu_arrows: Vec::new(), menu_scroll_thumb: None, menu_scroll_track: None, menu_ctl: Vec::new(), dd_rects: Vec::new(), dd_top: 0, dd_rows: 8, dd_scroll: None, menu_side: Vec::new(), menu_pane: Vec::new(), menu_pane_start: 0, menu_pane_go: None, menu_pane_box: None, menu_pane_scroll: None, menu_time: Vec::new(), anim: Default::default(), anim_dt: 0.0, menu_overlay_range: 0..0, vr_cursor_overlay: None, vr_tooltip_overlay: None, menu_start: 0, menu_rows: 0, menu_row_h: 1.0, images: Default::default(), info_rect: None, menu_search_rect: None, menu_close_rect: None, menu_grid: false })
     }
 
     /// Draw the frame's interface: its overlays go after the HUD's in `scene.overlays`.
@@ -1462,6 +1477,8 @@ impl Ui {
         self.dd_rects.clear();
         self.dd_scroll = None;
         self.menu_search_rect = None;
+        self.menu_close_rect = None;
+        self.menu_grid = false;
         let overlay_start = scene.overlays.len();
         let Some((sel, items)) = f.menu else {
             self.menu_overlay_range = overlay_start..overlay_start;
@@ -1475,6 +1492,12 @@ impl Ui {
             } else {
                 self.draw_settings_v2(r, scene, f, sel, items);
             }
+            self.menu_overlay_range = overlay_start..scene.overlays.len();
+            return;
+        }
+        // the game menu itself: tiles (the classic list in VR and with `classic_ui`)
+        if f.menu_kind == MenuKind::Game && !f.vr && !CLASSIC_SETTINGS.load(std::sync::atomic::Ordering::Relaxed) {
+            self.draw_pause_v2(r, scene, f, sel, items);
             self.menu_overlay_range = overlay_start..scene.overlays.len();
             return;
         }
