@@ -7994,8 +7994,8 @@ mod way_user_tests {
     #[test]
     fn the_tyre_screech_is_built_in() {
         let clip = load_screech().expect("decoded");
-        assert_eq!((clip.sample_rate, clip.channels), (44100, 1));
-        assert!(clip.frames() > 44100, "{} frames", clip.frames());
+        assert_eq!((clip.sample_rate, clip.channels), (48000, 1));
+        assert!(clip.frames() > 48000, "{} frames", clip.frames());
     }
 
     #[test]
