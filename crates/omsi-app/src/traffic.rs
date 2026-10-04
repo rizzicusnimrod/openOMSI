@@ -18,7 +18,7 @@ use omsi_sim::ai_motion::{
 };
 use omsi_sim::collision::Obb;
 use omsi_sim::traffic::{
-    arrival_time, AiState, Aspect, LaneKind, Lead, Network, TrafficLightController, MAX_BRAKE,
+    arrival_time, AiState, Aspect, LaneKind, Lead, Network, TrafficLightController, MAX_BRAKE, STOP_LINE_GAP,
 };
 use omsi_sim::vehicle::AiFrame;
 use omsi_sim::{VehicleInstance, VehicleType};
@@ -653,6 +653,11 @@ pub struct Traffic {
     pub framed_spawns: Vec<(u64, DVec3)>,
     /// The player's vehicle as of the last tick (nothing is put on the road on top of it).
     player: Option<PlayerBox>,
+    /// How the player's bus speeds up or brakes (m/s², smoothed; `follow_acc`): the car
+    /// behind brakes with it at once, as behind another car, not only once the gap shrinks.
+    player_acc: Option<(f32, f32)>,
+    /// ... and the LAN players' vehicles', by session id.
+    others_acc: HashMap<u32, (f32, f32)>,
     /// The player's bus has right of way over the traffic (its script's `TrafficPriority`,
     /// OMSI: priority 1000 over the types' own): cars keep out of the way it is about
     /// to take for longer.
@@ -735,6 +740,9 @@ pub fn vehicle_bodies(v: &VehicleInstance) -> Vec<omsi_sim::collision::Obb> {
 const AIRCRAFT_KMH: f32 = 280.0;
 /// How far ahead a car looks for other vehicles at least (m).
 const LOOK_AHEAD: f32 = 70.0;
+/// The hardest braking of a car on a dry road (m/s²; `AiState::max_brake`): good tyres on
+/// dry asphalt. Lorries, buses and wet roads keep `MAX_BRAKE`.
+const EMERGENCY_BRAKE_DRY: f32 = 9.5;
 /// ... and at most, when it is fast.
 const LOOK_AHEAD_MAX: f32 = 150.0;
 
@@ -758,6 +766,21 @@ pub(crate) fn ibis_to_next_stop(v: &mut VehicleInstance, remaining: usize) {
 
 fn look_ahead(speed: f32) -> f32 {
     (speed * speed / 3.0 + speed * 2.0 + 20.0).clamp(LOOK_AHEAD, LOOK_AHEAD_MAX)
+}
+
+/// The speed (m/s) and the acceleration (m/s², smoothed over about a fifth of a second) of
+/// a vehicle the traffic sees only as a box with a speed - the player's bus, a LAN
+/// player's - after `dt` more seconds at `speed`. The car behind brakes as soon as the bus
+/// does, as it does behind another car; it reacted only once the gap had shrunk, and a bus
+/// braking hard from speed was then hit.
+fn follow_acc(before: Option<(f32, f32)>, speed: f32, dt: f32) -> (f32, f32) {
+    let Some((v0, a0)) = before else { return (speed, 0.0) };
+    if dt <= 1e-4 {
+        return (v0, a0);
+    }
+    // (a vehicle put somewhere else jumps in speed: not a braking of 100 m/s²)
+    let raw = ((speed - v0) / dt).clamp(-12.0, 12.0);
+    (speed, a0 + (raw - a0) * (dt / 0.2).min(1.0))
 }
 
 /// Ground height for an AI vehicle's wheels: the road surface (blended between raster
@@ -1557,6 +1580,8 @@ impl Traffic {
             driver_pool: Vec::new(),
             tick_split: [0.0; 3],
             others_still: HashMap::new(),
+            player_acc: None,
+            others_acc: HashMap::new(),
             geo_prev: Vec::new(),
             index_of: HashMap::new(),
             pull_out_rooms: HashMap::new(),
@@ -5030,6 +5055,29 @@ impl Traffic {
             return None;
         }
         let hw = car.half_width as f64;
+        // a car about to stop counts as far as its nose will come (within 2.5 m): one that
+        // crept out of a side road towards its give-way line stopped with its nose in the
+        // way of a car coming along the road, which saw it only once it was there, 3 m off
+        // at 33 km/h. Where it stops: at what holds it (its line, the car it queues behind),
+        // else where its braking ends. (Not one that only eases off in a turn: its nose, run
+        // on straight ahead, crossed the ways of cars it was never going to meet.)
+        let reach_on: Vec<f64> = near
+            .iter()
+            .map(|f| {
+                let o = &self.cars[f.car];
+                let st = &o.state;
+                if st.acc >= -0.3 || f.speed <= 0.2 {
+                    return 0.0;
+                }
+                let held_at = match o.why.0 {
+                    "" => f32::MAX,
+                    "lead" | "player" | "parked" => o.why.1 - st.min_gap,
+                    _ => o.why.1 - STOP_LINE_GAP,
+                };
+                let to_stop = (f.speed * f.speed / (2.0 * -st.acc)).min(held_at.max(0.0));
+                if to_stop <= 2.5 { to_stop as f64 } else { 0.0 }
+            })
+            .collect();
         let mut d = st.front + 0.2;
         let mut p3 = st.way_point(&self.net, d);
         while d <= reach {
@@ -5039,7 +5087,7 @@ impl Traffic {
             let (p, q) = (p3.truncate(), q3.truncate());
             let dir = (q - p).normalize_or_zero();
             let across = DVec2::new(dir.y, -dir.x);
-            for f in &near {
+            for (f, &stops_in) in near.iter().zip(&reach_on) {
                 // on the level of the way there, not of the car now: by the car's own
                 // height a car on a bridge counted as in the way of one on the ramp down to
                 // the road under it (they differed by under 4 m until right below it)
@@ -5053,7 +5101,8 @@ impl Traffic {
                 // each other, the sampled centre line never quite inside the grown box)
                 let gx = f.half_w + hw * across.dot(f.right).abs() - 0.1;
                 let gy = f.half_len + hw * across.dot(f.fwd).abs() - 0.1;
-                if rel.dot(f.right).abs() <= gx && rel.dot(f.fwd).abs() <= gy {
+                let x = rel.dot(f.fwd);
+                if rel.dot(f.right).abs() <= gx && x >= -gy && x <= gy + stops_in {
                     let along = (f.fwd.dot(dir) as f32 * f.speed).max(0.0);
                     let acc = if along > 0.1 {
                         self.cars[f.car].state.acc
@@ -5080,12 +5129,18 @@ impl Traffic {
     /// along that way. The bus's box is stretched along its motion for the next second and
     /// a half, so a bus pulling out of a stop, turning across or reversing is seen before
     /// it is in the lane - the lanes alone saw it only once it stood in them.
-    fn player_in_way(&self, i: usize, player: &PlayerBox) -> Option<Lead> {
+    /// `acc`: how the vehicle speeds up or brakes (m/s², `follow_acc`), passed on as far
+    /// as it moves along the car's way.
+    fn player_in_way(&self, i: usize, player: &PlayerBox, acc: f32) -> Option<Lead> {
         let car = &self.cars[i];
         if (car.vehicle.position - player.0).length() > LOOK_AHEAD_MAX as f64 + 30.0 {
             return None;
         }
-        self.player_on_way(&car.state, car.half_width, player, 0.0)
+        let mut l = self.player_on_way(&car.state, car.half_width, player, 0.0)?;
+        if l.speed > 0.1 && player.4.abs() > 0.1 {
+            l.acc = acc * l.speed / player.4;
+        }
+        Some(l)
     }
 
 
@@ -5484,6 +5539,8 @@ impl Traffic {
             others_still.insert(*id, if b.4.abs() < 0.3 { before + dt } else { 0.0 });
         }
         self.others_still = others_still;
+        self.player_acc = player.map(|p| follow_acc(self.player_acc, p.4, dt));
+        self.others_acc = others.iter().map(|(id, b)| (*id, follow_acc(self.others_acc.get(id).copied(), b.4, dt))).collect();
         // the indicator towards the traffic (left, or right on a left-hand-traffic map),
         // remembered across the dark half of the lamps' cycle
         let out_side = if self.net.left_hand { 2 } else { 1 };
@@ -5523,7 +5580,7 @@ impl Traffic {
             // nearest in the way stands for "the player's bus" in what follows)
             let (mut player, mut player_standing) = (player, player_standing);
             if let Some(p) = player.as_ref() {
-                if let Some(l) = self.player_in_way(i, p) {
+                if let Some(l) = self.player_in_way(i, p, self.player_acc.map_or(0.0, |x| x.1)) {
                     if lead.map(|x| l.gap < x.0.gap).unwrap_or(true) {
                         lead = Some((l, Some(usize::MAX)));
                     }
@@ -5536,7 +5593,7 @@ impl Traffic {
                 }
             }
             for (id, o) in &others {
-                if let Some(l) = self.player_in_way(i, o) {
+                if let Some(l) = self.player_in_way(i, o, self.others_acc.get(id).map_or(0.0, |x| x.1)) {
                     if lead.map(|x| l.gap < x.0.gap).unwrap_or(true) {
                         lead = Some((l, Some(usize::MAX)));
                         player = Some(*o);
@@ -6229,6 +6286,11 @@ impl Traffic {
                 let up: Vec<usize> = car.state.upcoming().take(4).collect();
                 log::info!("t={:.2} car {}: v {:.2} lane {} s {:.1}/{:.1} upcoming {:?} bend {:.2} desired {:.2} lead {:?} stop {:?} why {:?}", self.time, car.id, car.state.speed, car.state.lane, car.state.s, self.net.lanes[car.state.lane].length(), up, car.state.curve_speed(&self.net), car.state.desired_accel(&self.net, lead_now, stop_at), lead_now.map(|l| l.gap), stop_at.map(|x| x - car.state.front), car.why);
             }
+            // the hardest braking: a car on a dry road brakes at up to 9.5 m/s² when it must;
+            // a lorry, a bus and any car on a wet or snowy road at 8, as before
+            let wet = self.conditions.precip_kind != 0 && self.conditions.precip_rate > 0.05;
+            let heavy = car.vehicle.ty.def.mass > 6.0 || car.bus.is_some();
+            car.state.max_brake = if heavy || wet { MAX_BRAKE } else { EMERGENCY_BRAKE_DRY };
             if !car.state.drive(&self.net, dt, lead_now, stop_at) {
                 if debug {
                     log::info!("t={:.1}: car {} ran out of road at {:.1} m/s: taken off", self.time, car.id, car.state.speed);
@@ -7865,6 +7927,25 @@ mod group_density_tests {
 mod way_user_tests {
     use super::*;
     use omsi_sim::traffic::{Crossing, LaneBuilder};
+
+    #[test]
+    fn the_car_behind_sees_the_bus_brake() {
+        let dt = 1.0 / 60.0;
+        let mut s = follow_acc(None, 14.0, dt);
+        assert_eq!(s, (14.0, 0.0));
+        // braking at 6 m/s²: seen within half a second
+        let mut v = 14.0;
+        for _ in 0..30 {
+            v -= 6.0 * dt;
+            s = follow_acc(Some(s), v, dt);
+        }
+        assert!((s.1 + 6.0).abs() < 0.5, "{s:?}");
+        // the bus put somewhere else at a stroke is no braking of 800 m/s²
+        s = follow_acc(Some(s), 0.0, dt);
+        assert!(s.1 >= -12.0, "{s:?}");
+        // paused: nothing changes
+        assert_eq!(follow_acc(Some(s), 3.0, 0.0), s);
+    }
 
     fn street(start: DVec3, heading: f64, length: f64, radius: f64) -> omsi_sim::traffic::Lane {
         LaneBuilder::arc(start, heading, length, radius, 0.0, LaneKind::Street, 3.0)

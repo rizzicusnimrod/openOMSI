@@ -1825,6 +1825,8 @@ pub struct AiState {
     pub bend_decel: f32,
     /// How briskly the driver accelerates: `accel` times this (1 as ever).
     pub accel_style: f32,
+    /// The hardest the car brakes to avoid a collision (m/s²; `MAX_BRAKE` as ever).
+    pub max_brake: f32,
     /// The driver (`TPathInfo`'s rowdy_factor & co): how fast they like to go relative to
     /// the limit, the time gap they keep to the car ahead (s), the distance they stop
     /// behind it (m), the gap in the cross traffic they accept at a junction (s) and how
@@ -1914,7 +1916,7 @@ pub fn ramp_progress_for(side: f32, clear: f32) -> f32 {
 /// Hardest braking of an AI driver (m/s²): an emergency stop.
 pub const MAX_BRAKE: f32 = 8.0;
 /// Gap a car leaves before a stop line or a stop point (m).
-const STOP_LINE_GAP: f32 = 0.6;
+pub const STOP_LINE_GAP: f32 = 0.6;
 
 /// A lane change: the car moves over from its lane to `to` along `length` metres of road
 /// (by distance, not by time: a car that has to stop halfway stands still, and so does its
@@ -2002,7 +2004,7 @@ impl LaneSeq {
 
 impl AiState {
     pub fn new(lane: usize, s: f32, seed: u64) -> AiState {
-        AiState { traffic_pool: None, veh_type: 0, lane, s, speed: 0.0, max_speed_kmh: 50.0, accel: 1.2, decel: 3.0, length: 5.0, rng: seed | 1, blinker: 0, braking: false, odometer: 0.0, planned_next: None, ahead: Vec::new(), change_plan: Vec::new(), prev_lane: None, yield_time: 0.0, route: Vec::new(), route_index: 0, change: None, change_cooldown: 5.0, lateral: 0.0, lateral_target: 0.0, lateral_ramp: (0.0, 0.0, 0.0, 1.0), turn_wish: 0, signal: 0, signal_time: 0.0, lat_accel: 2.8, bend_decel: 2.0, accel_style: 1.0, desire: 1.0, headway: 1.4, min_gap: 2.0, accept_gap: 4.0, reaction: 0.7, front: 2.5, rear: 2.5, held: false, start_timer: 0.0, acc: 0.0, accel_cap: None }
+        AiState { traffic_pool: None, veh_type: 0, lane, s, speed: 0.0, max_speed_kmh: 50.0, accel: 1.2, decel: 3.0, length: 5.0, rng: seed | 1, blinker: 0, braking: false, odometer: 0.0, planned_next: None, ahead: Vec::new(), change_plan: Vec::new(), prev_lane: None, yield_time: 0.0, route: Vec::new(), route_index: 0, change: None, change_cooldown: 5.0, lateral: 0.0, lateral_target: 0.0, lateral_ramp: (0.0, 0.0, 0.0, 1.0), turn_wish: 0, signal: 0, signal_time: 0.0, lat_accel: 2.8, bend_decel: 2.0, accel_style: 1.0, max_brake: MAX_BRAKE, desire: 1.0, headway: 1.4, min_gap: 2.0, accept_gap: 4.0, reaction: 0.7, front: 2.5, rear: 2.5, held: false, start_timer: 0.0, acc: 0.0, accel_cap: None }
     }
 
     fn rand(&mut self) -> u64 {
@@ -2453,7 +2455,7 @@ impl AiState {
             let a_stop = idm + (constant - idm) * k;
             out = out.min(a_stop);
         }
-        out.clamp(-MAX_BRAKE, a)
+        out.clamp(-self.max_brake.max(1.0), a)
     }
 
     /// Advance along the network with the car ahead (`lead`) and a stop point (`stop`,
@@ -2850,6 +2852,23 @@ mod tests {
         assert!(car.speed < 0.01, "stopped: {}", car.speed);
         assert!(front <= line && front > line - 1.5, "front at {front}, line at {line}");
         assert!(hardest > -3.5, "braked at {hardest} m/s²");
+    }
+
+    #[test]
+    fn an_emergency_stop_brakes_as_hard_as_the_car_can() {
+        let net = junction();
+        let mut car = AiState::new(0, 0.0, 5);
+        car.speed = 12.0;
+        car.plan_next(&net);
+        // a car standing 6 m ahead: as hard as it goes, 8 m/s² as ever ...
+        let close = Some(Lead { gap: 6.0, speed: 0.0, acc: 0.0 });
+        assert_eq!(car.desired_accel(&net, close, None), -MAX_BRAKE);
+        // ... or up to the limit the car is given
+        car.max_brake = 9.5;
+        assert_eq!(car.desired_accel(&net, close, None), -9.5);
+        // with room to stop, no harder than it must
+        let far = Some(Lead { gap: 60.0, speed: 0.0, acc: 0.0 });
+        assert!(car.desired_accel(&net, far, None) > -3.0);
     }
 
     #[test]
