@@ -1,0 +1,861 @@
+//! The drivers of the random cars and trucks: when they switch their lights on (dusk,
+//! a dark sky, rain, snow, fog - each at a threshold of their own and after a moment of
+//! their own), the hazard lights when braking hard, the rear fog lamp, the horn when stuck
+//! or cut off, and a few bad habits (no indicating, a forgotten indicator, forgotten lights,
+//! the rear fog lamp in the rain, a broken bulb). The two-stroke cars' smoke is here too.
+//!
+//! What the AI Headlights mod for OMSI 2 does in its scripts, done by the engine for every
+//! car whose vehicle does not already run the mod's script (see `Traffic::tick`). The
+//! traffic decides as ever where a car drives, when it brakes and which way it indicates;
+//! a driver only changes what that looks and sounds like.
+//!
+//! A driver's habits are rolled from the car's seed, so a car that goes out of range and
+//! comes back is the same driver.
+
+use omsi_content::weather::Weather;
+pub use omsi_sim::ai_patch::{
+    VAR_BRAKE_L, VAR_BRAKE_R, VAR_HEAD_L, VAR_HEAD_R, VAR_REAR_FOG, VAR_SMOKE_ALPHA, VAR_SMOKE_FREQ, VAR_SMOKE_LIFE,
+    VAR_SMOKE_SPEED,
+};
+
+/// The settings (`Settings::ai_drivers`), defaults as the mod ships them. Shares are
+/// fractions (0.2 = one driver in five).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Config {
+    /// Everything here off: the cars light up and indicate as the traffic says.
+    pub enabled: bool,
+    /// Drivers who drive with their lights on all day.
+    pub always_on: f32,
+    /// How dark it must get (`Conditions::light`, 0 night … 1 day) for a driver to switch
+    /// on: each driver's threshold lies between these. Off again only when it is
+    /// `bright_hyst` brighter than that.
+    pub bright_min: f32,
+    pub bright_max: f32,
+    pub bright_hyst: f32,
+    /// How hard it must rain (`PrecipRate` 0..1) - snow counts `snow_factor` times as much.
+    pub precip_min: f32,
+    pub precip_max: f32,
+    pub snow_factor: f32,
+    /// How far one must see at most (m) to call it fog: a threshold per driver.
+    pub fog_min_m: f32,
+    pub fog_max_m: f32,
+    /// Seconds before switching on (a driver's own 0..this) and before switching off again.
+    pub on_delay_max: f32,
+    pub off_delay_min: f32,
+    pub off_delay_max: f32,
+    /// Drivers who use their rear fog lamp, and how far one must see at most (m).
+    pub rear_fog: f32,
+    pub rear_fog_m: f32,
+    /// Drivers who put their hazard lights on when braking hard (m/s²) from speed (km/h),
+    /// and for how long after stopping (s).
+    pub hazard: f32,
+    pub hazard_decel: f32,
+    pub hazard_speed: f32,
+    pub hazard_hold_min: f32,
+    pub hazard_hold_max: f32,
+    /// Impatient drivers: they honk when they have stood for longer than their patience
+    /// (s) - once, then twice, then three times, `honk_repeat` seconds apart.
+    pub honk: f32,
+    pub patience_min: f32,
+    pub patience_max: f32,
+    pub honk_repeat_min: f32,
+    pub honk_repeat_max: f32,
+    pub honk_max: u32,
+    /// Drivers who honk twice after an emergency stop (braking at `angry_decel` m/s²).
+    pub angry: f32,
+    pub angry_decel: f32,
+    /// The bad habits (all off when `flaws` is false): never indicating; leaving the
+    /// indicator on after a turn (`forget_chance` of the turns, for 15-60 s); forgetting the
+    /// lights until it is really dark (`nolights_bright`); the rear fog lamp in rain and at
+    /// night; a broken bulb.
+    pub flaws: bool,
+    pub no_indicator: f32,
+    pub forget_indicator: f32,
+    pub forget_chance: f32,
+    pub forget_min: f32,
+    pub forget_max: f32,
+    pub no_lights: f32,
+    pub no_lights_bright_min: f32,
+    pub no_lights_bright_max: f32,
+    pub rear_fog_misuse: f32,
+    pub broken_bulb: f32,
+    /// The two-stroke cars' smoke: the puff pulling away, a cold engine, the "smokers".
+    pub smoke: bool,
+    pub smoke_puff: f32,
+    pub smoke_cold: f32,
+    pub smoke_cold_time: f32,
+    pub smoke_density: f32,
+    pub smoke_base: f32,
+    pub smokers: f32,
+    pub smoke_smoker: f32,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            enabled: true,
+            always_on: 0.2,
+            bright_min: 0.3,
+            bright_max: 0.5,
+            bright_hyst: 0.05,
+            precip_min: 0.02,
+            precip_max: 0.12,
+            snow_factor: 0.5,
+            fog_min_m: 300.0,
+            fog_max_m: 1000.0,
+            on_delay_max: 15.0,
+            off_delay_min: 30.0,
+            off_delay_max: 120.0,
+            rear_fog: 0.6,
+            rear_fog_m: 150.0,
+            hazard: 0.7,
+            hazard_decel: 4.5,
+            hazard_speed: 40.0,
+            hazard_hold_min: 3.0,
+            hazard_hold_max: 8.0,
+            honk: 0.4,
+            patience_min: 100.0,
+            patience_max: 240.0,
+            honk_repeat_min: 20.0,
+            honk_repeat_max: 45.0,
+            honk_max: 3,
+            angry: 0.3,
+            angry_decel: 6.0,
+            flaws: true,
+            no_indicator: 0.05,
+            forget_indicator: 0.05,
+            forget_chance: 0.5,
+            forget_min: 15.0,
+            forget_max: 60.0,
+            no_lights: 0.04,
+            no_lights_bright_min: 0.05,
+            no_lights_bright_max: 0.15,
+            rear_fog_misuse: 0.03,
+            broken_bulb: 0.06,
+            smoke: true,
+            smoke_puff: 2.0,
+            smoke_cold: 1.5,
+            smoke_cold_time: 300.0,
+            smoke_density: 35.0,
+            smoke_base: 0.15,
+            smokers: 0.3,
+            smoke_smoker: 1.0,
+        }
+    }
+}
+
+// The settings by their names in `settings.cfg` (`ai_drivers.<name>=<value>`): a share is
+// written in percent, a switch 0/1.
+macro_rules! config_fields {
+    ($($name:ident: $kind:ident),* $(,)?) => {
+        impl Config {
+            /// Every setting's name.
+            pub const NAMES: &'static [&'static str] = &[$(stringify!($name)),*];
+
+            /// Set one by its name. False for a name it does not know or a value that is
+            /// not one.
+            pub fn set(&mut self, name: &str, value: &str) -> bool {
+                match name {
+                    $(stringify!($name) => config_fields!(@set $kind, self.$name, value),)*
+                    _ => false,
+                }
+            }
+
+            /// One by its name, as `set` takes it.
+            pub fn get(&self, name: &str) -> Option<String> {
+                match name {
+                    $(stringify!($name) => Some(config_fields!(@get $kind, self.$name)),)*
+                    _ => None,
+                }
+            }
+        }
+    };
+    (@set share, $f:expr, $v:expr) => {
+        $v.trim().trim_end_matches('%').trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| $f = (x / 100.0).clamp(0.0, 1.0)).is_some()
+    };
+    (@set num, $f:expr, $v:expr) => {
+        $v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| $f = x.max(0.0)).is_some()
+    };
+    (@set count, $f:expr, $v:expr) => {
+        $v.trim().parse::<u32>().ok().map(|x| $f = x).is_some()
+    };
+    (@set switch, $f:expr, $v:expr) => {{
+        $f = matches!($v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes");
+        true
+    }};
+    (@get share, $f:expr) => { format!("{}", ($f * 1000.0).round() / 10.0) };
+    (@get num, $f:expr) => { format!("{}", $f) };
+    (@get count, $f:expr) => { format!("{}", $f) };
+    (@get switch, $f:expr) => { (if $f { "1" } else { "0" }).to_string() };
+}
+
+config_fields! {
+    enabled: switch,
+    always_on: share,
+    bright_min: num, bright_max: num, bright_hyst: num,
+    precip_min: num, precip_max: num, snow_factor: num,
+    fog_min_m: num, fog_max_m: num,
+    on_delay_max: num, off_delay_min: num, off_delay_max: num,
+    rear_fog: share, rear_fog_m: num,
+    hazard: share, hazard_decel: num, hazard_speed: num, hazard_hold_min: num, hazard_hold_max: num,
+    honk: share, patience_min: num, patience_max: num, honk_repeat_min: num, honk_repeat_max: num, honk_max: count,
+    angry: share, angry_decel: num,
+    flaws: switch,
+    no_indicator: share, forget_indicator: share, forget_chance: share, forget_min: num, forget_max: num,
+    no_lights: share, no_lights_bright_min: num, no_lights_bright_max: num,
+    rear_fog_misuse: share, broken_bulb: share,
+    smoke: switch, smoke_puff: num, smoke_cold: num, smoke_cold_time: num, smoke_density: num, smoke_base: num,
+    smokers: share, smoke_smoker: num,
+}
+
+/// What a driver sees of the weather and the light, the same for every car.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Conditions {
+    /// The light outside, 0 night … 1 day: the daylight (`Daylight::light_a`) less what a
+    /// closed sky and the rain take of it.
+    pub light: f32,
+    /// `PrecipType` (0 none, 1 rain, 2 snow) and `PrecipRate` (0..1).
+    pub precip_kind: i32,
+    pub precip_rate: f32,
+    /// How far one sees (m).
+    pub visibility_m: f32,
+    /// °C.
+    pub temp_c: f32,
+}
+
+impl Default for Conditions {
+    fn default() -> Self {
+        Conditions { light: 1.0, precip_kind: 0, precip_rate: 0.0, visibility_m: 50_000.0, temp_c: 15.0 }
+    }
+}
+
+impl Conditions {
+    /// `light_a` the day's light (`Daylight::light_a`), `w` the weather (none: clear).
+    pub fn new(light_a: f32, w: Option<&Weather>) -> Conditions {
+        let Some(w) = w else {
+            return Conditions { light: light_a.clamp(0.0, 1.0), ..Default::default() };
+        };
+        let (kind, rate) = crate::weather_setup::precip_of(w);
+        let overcast = ((cloud_cover(&w.clouds.0) - 0.45).max(0.0) / 0.55).min(1.0);
+        let rain = if kind != 0 { rate } else { 0.0 };
+        Conditions {
+            light: (light_a * (1.0 - 0.6 * overcast) * (1.0 - 0.4 * rain)).clamp(0.0, 1.0),
+            precip_kind: kind,
+            precip_rate: rate,
+            visibility_m: w.fog.0,
+            temp_c: w.temp.0,
+        }
+    }
+
+    fn raining(&self) -> bool {
+        self.precip_kind >= 1 && self.precip_rate > 0.0
+    }
+}
+
+/// How much of the sky a cloud type covers (0..1), by its name as the weather gives it:
+/// "Cumulus 3", "Overcast 1", also the add-on ones ("AddOn - Overcast 2").
+pub fn cloud_cover(kind: &str) -> f32 {
+    let lower = kind.trim().to_ascii_lowercase();
+    let name = lower.strip_prefix("addon").map(|s| s.trim_start_matches([' ', '-'])).unwrap_or(&lower);
+    if name.is_empty() || name.starts_with("-1") {
+        0.0
+    } else if name.starts_with("overcast") {
+        1.0
+    } else if let Some(n) = name.strip_prefix("cumulus") {
+        match n.trim().parse::<i32>().unwrap_or(1) {
+            1 => 0.35,
+            2 => 0.55,
+            _ => 0.75,
+        }
+    } else if name.starts_with("cirrus") {
+        0.2
+    } else {
+        0.5
+    }
+}
+
+/// A small random stream of a driver's own (xorshift64*).
+#[derive(Debug, Clone)]
+struct Dice(u64);
+
+impl Dice {
+    fn new(seed: u64) -> Dice {
+        // (splitmix64 of the seed: the traffic's own `personality` reads the seed's bits
+        // directly, and a habit must not go with how fast the car drives)
+        let mut z = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        Dice((z ^ (z >> 31)) | 1)
+    }
+    /// 0..1
+    fn unit(&mut self) -> f32 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        (x.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 40) as f32 / (1u64 << 24) as f32
+    }
+    fn chance(&mut self, p: f32) -> bool {
+        self.unit() < p
+    }
+    fn between(&mut self, a: f32, b: f32) -> f32 {
+        a + (b - a) * self.unit()
+    }
+}
+
+/// A broken bulb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bulb {
+    None,
+    HeadLeft,
+    HeadRight,
+    BrakeLeft,
+    BrakeRight,
+}
+
+/// What a driver does every frame, given what the traffic would have the car do.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Input {
+    pub dt: f32,
+    /// m/s
+    pub speed: f32,
+    /// m/s², negative when braking.
+    pub accel: f32,
+    /// 0 none, 1 left, 2 right, 3 both - as the traffic indicates.
+    pub blinker: i32,
+    /// The lights as OMSI switches them by the time of day alone (below a light of 0.75).
+    pub night: bool,
+    /// At a stop of its own (a bus serving it): standing there is no jam.
+    pub at_stop: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Output {
+    pub lights: bool,
+    pub blinker: i32,
+    pub rear_fog: bool,
+    /// Sound the horn now (one toot).
+    pub horn: bool,
+}
+
+/// One driver.
+#[derive(Debug, Clone)]
+pub struct Driver {
+    dice: Dice,
+    /// Seconds since the car came onto the road.
+    clock: f64,
+    // habits
+    always: bool,
+    hazard_user: bool,
+    rear_fog_user: bool,
+    impatient: bool,
+    angry: bool,
+    no_indicator: bool,
+    forgetful: bool,
+    no_lights: bool,
+    rear_fog_misuse: bool,
+    pub bulb: Bulb,
+    bright_thr: f32,
+    precip_thr: f32,
+    fog_thr: f32,
+    no_lights_thr: f32,
+    on_delay: f32,
+    off_delay: f32,
+    hazard_hold: f32,
+    patience: f32,
+    // state
+    started: bool,
+    bad: bool,
+    bad_since: Option<f64>,
+    last_bad: f64,
+    noticed_dark: bool,
+    rear_fog: bool,
+    speed_prev: Option<f32>,
+    /// Smoothed deceleration (m/s², positive braking).
+    decel: f32,
+    hazard: bool,
+    hazard_until: f64,
+    stuck_since: Option<f64>,
+    honks_done: u32,
+    next_honk_round: f64,
+    toots_left: u32,
+    next_toot: f64,
+    angry_at: Option<f64>,
+    angry_cool: f64,
+    blinker_prev: i32,
+    forgot_side: i32,
+    forgot_until: f64,
+}
+
+impl Driver {
+    pub fn new(seed: u64, cfg: &Config) -> Driver {
+        let mut d = Dice::new(seed);
+        let flaws = cfg.flaws;
+        let always = d.chance(cfg.always_on);
+        let hazard_user = d.chance(cfg.hazard);
+        let rear_fog_user = d.chance(cfg.rear_fog);
+        let bright_thr = d.between(cfg.bright_min, cfg.bright_max);
+        let precip_thr = d.between(cfg.precip_min, cfg.precip_max);
+        let fog_thr = d.between(cfg.fog_min_m, cfg.fog_max_m);
+        let on_delay = d.between(0.0, cfg.on_delay_max);
+        let off_delay = d.between(cfg.off_delay_min, cfg.off_delay_max);
+        let hazard_hold = d.between(cfg.hazard_hold_min, cfg.hazard_hold_max);
+        let impatient = d.chance(cfg.honk);
+        let angry = d.chance(cfg.angry);
+        let patience = d.between(cfg.patience_min, cfg.patience_max);
+        let no_indicator = d.chance(cfg.no_indicator) && flaws;
+        let forgetful = d.chance(cfg.forget_indicator) && flaws;
+        let no_lights = d.chance(cfg.no_lights) && flaws && !always;
+        let no_lights_thr = d.between(cfg.no_lights_bright_min, cfg.no_lights_bright_max);
+        let rear_fog_misuse = d.chance(cfg.rear_fog_misuse) && flaws;
+        let bulb = if d.chance(cfg.broken_bulb) && flaws {
+            [Bulb::HeadLeft, Bulb::HeadRight, Bulb::BrakeLeft, Bulb::BrakeRight][(d.unit() * 4.0) as usize % 4]
+        } else {
+            Bulb::None
+        };
+        Driver {
+            dice: d,
+            clock: 0.0,
+            always,
+            hazard_user,
+            rear_fog_user,
+            impatient,
+            angry,
+            no_indicator,
+            forgetful,
+            no_lights,
+            rear_fog_misuse,
+            bulb,
+            bright_thr,
+            precip_thr,
+            fog_thr,
+            no_lights_thr,
+            on_delay,
+            off_delay,
+            hazard_hold,
+            patience,
+            started: false,
+            bad: false,
+            bad_since: None,
+            last_bad: 0.0,
+            noticed_dark: false,
+            rear_fog: false,
+            speed_prev: None,
+            decel: 0.0,
+            hazard: false,
+            hazard_until: 0.0,
+            stuck_since: None,
+            honks_done: 0,
+            next_honk_round: 0.0,
+            toots_left: 0,
+            next_toot: 0.0,
+            angry_at: None,
+            angry_cool: 0.0,
+            blinker_prev: 0,
+            forgot_side: 0,
+            forgot_until: 0.0,
+        }
+    }
+
+    /// Smoothed deceleration (m/s², positive when braking): what the two-stroke smoke
+    /// reads to see a car pulling away.
+    pub fn decel(&self) -> f32 {
+        self.decel
+    }
+
+    /// Seconds since the car came onto the road.
+    pub fn age(&self) -> f64 {
+        self.clock
+    }
+
+    pub fn step(&mut self, cfg: &Config, c: &Conditions, i: &Input) -> Output {
+        let dt = i.dt.max(0.0);
+        self.clock += dt as f64;
+        let t = self.clock;
+        let kmh = i.speed.abs() * 3.6;
+
+        // --- the weather: is it bad enough for this driver? (with hysteresis) -------
+        let dark = c.light < self.bright_thr + if self.bad { cfg.bright_hyst } else { 0.0 };
+        let mut wet_thr = self.precip_thr * if c.precip_kind == 2 { cfg.snow_factor } else { 1.0 };
+        if self.bad {
+            wet_thr *= 0.5;
+        }
+        let wet = c.precip_kind >= 1 && c.precip_rate > wet_thr;
+        let foggy = c.visibility_m < self.fog_thr * if self.bad { 1.2 } else { 1.0 };
+        if dark || wet || foggy {
+            // a car that comes onto the road in bad weather has its lights on already
+            let since = *self.bad_since.get_or_insert(if self.started { t } else { t - 1e6 });
+            if t - since >= self.on_delay as f64 {
+                self.bad = true;
+            }
+            if self.bad {
+                self.last_bad = t;
+            }
+        } else {
+            self.bad_since = None;
+            if t - self.last_bad > self.off_delay as f64 {
+                self.bad = false;
+            }
+        }
+        self.started = true;
+
+        // --- headlights: OMSI's by the time of day, or this driver's own -----------
+        let mut lights = i.night || self.always || self.bad;
+        if c.light < self.no_lights_thr {
+            self.noticed_dark = true;
+        }
+        if self.no_lights && !self.noticed_dark {
+            lights = false;
+        }
+
+        // --- rear fog lamp ---------------------------------------------------------
+        let fog_thick = c.visibility_m < cfg.rear_fog_m * if self.rear_fog { 1.2 } else { 1.0 };
+        let proper = self.rear_fog_user && fog_thick && self.bad;
+        let misused = self.rear_fog_misuse && (c.raining() || c.light < 0.3);
+        self.rear_fog = (proper || misused) && lights;
+
+        // --- hazard lights on hard braking ----------------------------------------
+        if let Some(prev) = self.speed_prev {
+            if dt > 0.0 {
+                let a = (prev - i.speed.abs()) / dt;
+                let k = (dt / 0.3).min(1.0);
+                self.decel += (a - self.decel) * k;
+            }
+        }
+        self.speed_prev = Some(i.speed.abs());
+        if self.hazard_user && self.decel >= cfg.hazard_decel && kmh >= cfg.hazard_speed {
+            self.hazard = true;
+            self.hazard_until = t + self.hazard_hold as f64;
+        }
+        // still slowing down: the hold time counts from the standstill
+        if self.hazard && self.decel > 1.0 {
+            self.hazard_until = t + self.hazard_hold as f64;
+        }
+        // hold time over, or the car drives off again
+        if t > self.hazard_until || self.decel < -0.8 {
+            self.hazard = false;
+        }
+
+        // --- the horn: stuck far longer than a red light lasts ---------------------
+        if kmh < 1.0 && !i.at_stop {
+            if self.stuck_since.is_none() {
+                self.stuck_since = Some(t);
+                self.honks_done = 0;
+                self.next_honk_round = t + self.patience as f64;
+            }
+            if self.impatient && t >= self.next_honk_round && self.honks_done < cfg.honk_max {
+                self.honks_done += 1;
+                self.toots_left = self.honks_done;
+                self.next_toot = t;
+                self.next_honk_round = t + self.dice.between(cfg.honk_repeat_min, cfg.honk_repeat_max) as f64;
+            }
+        } else if kmh > 8.0 {
+            // (creeping along in a jam is still being stuck)
+            self.stuck_since = None;
+        }
+        // cut off: an emergency stop, and a moment later two toots
+        if self.angry && self.decel >= cfg.angry_decel && kmh >= 20.0 && self.angry_at.is_none() && t > self.angry_cool {
+            self.angry_at = Some(t + 0.6 + self.dice.unit() as f64);
+        }
+        if self.angry_at.is_some_and(|at| t >= at) {
+            self.toots_left = 2;
+            self.next_toot = t;
+            self.angry_at = None;
+            self.angry_cool = t + 20.0;
+        }
+        let mut horn = false;
+        if self.toots_left > 0 && t >= self.next_toot {
+            horn = true;
+            self.toots_left -= 1;
+            self.next_toot = t + 0.4;
+        }
+
+        // --- indicators -------------------------------------------------------------
+        let (l, r) = (i.blinker & 1 != 0, i.blinker & 2 != 0);
+        if self.forgetful {
+            let (pl, pr) = (self.blinker_prev & 1 != 0, self.blinker_prev & 2 != 0);
+            // a turn's indicator going off (not the hazard lights)
+            let off_l = pl && !l && self.blinker_prev != 3;
+            let off_r = pr && !r && self.blinker_prev != 3;
+            if (off_l || off_r) && self.dice.chance(cfg.forget_chance) {
+                self.forgot_side = if off_l { 1 } else { 2 };
+                self.forgot_until = t + self.dice.between(cfg.forget_min, cfg.forget_max) as f64;
+            }
+            if i.blinker != 0 || t > self.forgot_until {
+                self.forgot_side = 0;
+            }
+        }
+        self.blinker_prev = i.blinker;
+        let blinker = if self.hazard {
+            3
+        } else if i.blinker == 3 {
+            // (the traffic's own warning lights: a breakdown, a car pulling out of a space)
+            3
+        } else if self.no_indicator {
+            0
+        } else {
+            i.blinker | self.forgot_side
+        };
+
+        Output { lights, blinker, rear_fog: self.rear_fog, horn }
+    }
+}
+
+/// A two-stroke car's smoke (Trabant, Wartburg): a cloud pulling away, more with a cold
+/// engine, some cars badly tuned all the time. Drives the emitter `vehicle_patch` adds to
+/// their models (`AIHL2_*`), and thickens the model's own exhaust.
+#[derive(Debug, Clone)]
+pub struct TwoStroke {
+    smoker: bool,
+    puff: f32,
+}
+
+/// What the smoke emitter and the exhaust are set to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Smoke {
+    /// Particles a second, life (s), start alpha, speed (m/s) of the cloud's emitter.
+    pub freq: f32,
+    pub life: f32,
+    pub alpha: f32,
+    pub speed: f32,
+    /// The extra smoke (0 = as the vehicle's own script has it): the exhaust's
+    /// frequency, life and alpha are raised by it.
+    pub extra: f32,
+}
+
+impl TwoStroke {
+    pub fn new(seed: u64, cfg: &Config) -> TwoStroke {
+        let mut d = Dice::new(seed ^ 0x2_57_0c);
+        TwoStroke { smoker: d.chance(cfg.smokers), puff: 0.0 }
+    }
+
+    /// `age` seconds since the car came onto the road (its engine runs from then on),
+    /// `decel` the driver's smoothed deceleration (negative pulling away).
+    pub fn step(&mut self, cfg: &Config, c: &Conditions, dt: f32, speed: f32, decel: f32, age: f64) -> Smoke {
+        if !cfg.smoke {
+            return Smoke { freq: 0.0, life: 2.0, alpha: 0.5, speed: 0.5, extra: 0.0 };
+        }
+        // pulling away below 30 km/h: the puff builds up quickly and fades over 2 s
+        let pulling = (speed.abs() * 3.6 < 30.0 && decel < -0.5) as i32 as f32;
+        let k = if pulling > self.puff { (dt / 0.3).min(1.0) } else { (dt / 2.0).min(1.0) };
+        self.puff += (pulling - self.puff) * k;
+        // a cold engine: full at the start below 10 °C, a third above, gone after a while
+        let mut cold = (1.0 - age as f32 / cfg.smoke_cold_time.max(1.0)).max(0.0);
+        if c.temp_c >= 10.0 {
+            cold *= 0.33;
+        }
+        let extra = self.puff * cfg.smoke_puff + cold * cfg.smoke_cold + if self.smoker { cfg.smoke_smoker } else { 0.0 };
+        let s = extra + cfg.smoke_base;
+        Smoke {
+            freq: s * cfg.smoke_density,
+            life: s.min(2.0) * 0.75 + 2.0,
+            alpha: (s * 0.25 + 0.45).min(1.0),
+            speed: (0.4 + s * 0.3).min(1.2),
+            extra,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(dt: f32, speed: f32) -> Input {
+        Input { dt, speed, ..Default::default() }
+    }
+
+    fn cfg_all(f: impl FnOnce(&mut Config)) -> Config {
+        let mut c = Config::default();
+        f(&mut c);
+        c
+    }
+
+    #[test]
+    fn cloud_cover_reads_addon_names() {
+        assert_eq!(cloud_cover("AddOn - Overcast 2"), 1.0);
+        assert_eq!(cloud_cover("Overcast 1"), 1.0);
+        assert_eq!(cloud_cover("Cumulus 1"), 0.35);
+        assert_eq!(cloud_cover("-1"), 0.0);
+        assert_eq!(cloud_cover(""), 0.0);
+    }
+
+    #[test]
+    fn settings_by_name_in_percent() {
+        let mut c = Config::default();
+        assert!(c.set("always_on", "35"));
+        assert!((c.always_on - 0.35).abs() < 1e-6);
+        assert_eq!(c.get("always_on").as_deref(), Some("35"));
+        assert!(c.set("flaws", "0") && !c.flaws);
+        assert!(c.set("honk_max", "5") && c.honk_max == 5);
+        assert!(!c.set("no_such_thing", "1"));
+        assert!(!c.set("hazard_decel", "fast"));
+        // every name can be read back and set again
+        for n in Config::NAMES {
+            let v = c.get(n).unwrap();
+            assert!(c.clone().set(n, &v), "{n}");
+        }
+        let s = crate::settings::Settings::from_text("ai_drivers=0\nai_drivers.rear_fog=80\n");
+        assert!(!s.ai_drivers.enabled);
+        assert!((s.ai_drivers.rear_fog - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn habits_follow_the_seed() {
+        let cfg = Config::default();
+        let a = Driver::new(42, &cfg);
+        let b = Driver::new(42, &cfg);
+        assert_eq!((a.always, a.bright_thr, a.patience, a.bulb), (b.always, b.bright_thr, b.patience, b.bulb));
+        // and the shares come out about right over many drivers
+        let n = 20_000;
+        let always = (0..n).filter(|s| Driver::new(*s, &cfg).always).count() as f32 / n as f32;
+        assert!((always - 0.2).abs() < 0.02, "{always}");
+    }
+
+    #[test]
+    fn clear_day_lights_off_unless_always() {
+        let cfg = cfg_all(|c| { c.always_on = 0.0; c.flaws = false; });
+        let mut d = Driver::new(1, &cfg);
+        let o = d.step(&cfg, &Conditions::default(), &input(0.02, 10.0));
+        assert!(!o.lights);
+        let cfg = cfg_all(|c| c.always_on = 1.0);
+        let mut d = Driver::new(1, &cfg);
+        assert!(d.step(&cfg, &Conditions::default(), &input(0.02, 10.0)).lights);
+    }
+
+    #[test]
+    fn spawned_into_fog_lights_at_once_and_rear_fog() {
+        let cfg = cfg_all(|c| { c.always_on = 0.0; c.rear_fog = 1.0; c.flaws = false; });
+        let fog = Conditions { visibility_m: 75.0, ..Default::default() };
+        let mut d = Driver::new(7, &cfg);
+        let o = d.step(&cfg, &fog, &input(0.02, 10.0));
+        assert!(o.lights && o.rear_fog);
+    }
+
+    #[test]
+    fn rain_starting_switches_on_after_the_delay_and_off_later() {
+        let cfg = cfg_all(|c| { c.always_on = 0.0; c.flaws = false; c.on_delay_max = 10.0; });
+        let rain = Conditions { precip_kind: 1, precip_rate: 0.5, ..Default::default() };
+        let mut d = Driver::new(3, &cfg);
+        d.step(&cfg, &Conditions::default(), &input(0.1, 10.0));
+        let mut on_at = None;
+        for k in 0..200 {
+            if d.step(&cfg, &rain, &input(0.1, 10.0)).lights && on_at.is_none() {
+                on_at = Some(k as f32 * 0.1);
+            }
+        }
+        let on_at = on_at.expect("switched on");
+        assert!(on_at <= 10.1, "{on_at}");
+        // dry again: still on for the off delay (30 s at least), then off
+        for _ in 0..250 {
+            assert!(d.step(&cfg, &Conditions::default(), &input(0.1, 10.0)).lights);
+        }
+        for _ in 0..1000 {
+            d.step(&cfg, &Conditions::default(), &input(0.1, 10.0));
+        }
+        assert!(!d.step(&cfg, &Conditions::default(), &input(0.1, 10.0)).lights);
+    }
+
+    #[test]
+    fn hard_braking_from_speed_puts_hazards_on_until_after_the_stop() {
+        let cfg = cfg_all(|c| { c.hazard = 1.0; c.flaws = false; c.hazard_hold_min = 5.0; c.hazard_hold_max = 5.0; });
+        let mut d = Driver::new(5, &cfg);
+        let mut v: f32 = 70.0 / 3.6;
+        d.step(&cfg, &Conditions::default(), &input(0.02, v));
+        let mut seen = false;
+        while v > 0.0 {
+            v = (v - 7.0 * 0.02).max(0.0);
+            seen |= d.step(&cfg, &Conditions::default(), &input(0.02, v)).blinker == 3;
+        }
+        assert!(seen);
+        // still on 3 s after the stop, off after the hold time
+        for _ in 0..150 {
+            assert_eq!(d.step(&cfg, &Conditions::default(), &input(0.02, 0.0)).blinker, 3);
+        }
+        for _ in 0..200 {
+            d.step(&cfg, &Conditions::default(), &input(0.02, 0.0));
+        }
+        assert_eq!(d.step(&cfg, &Conditions::default(), &input(0.02, 0.0)).blinker, 0);
+    }
+
+    #[test]
+    fn gentle_braking_is_no_hazard() {
+        let cfg = cfg_all(|c| { c.hazard = 1.0; c.flaws = false; });
+        let mut d = Driver::new(5, &cfg);
+        let mut v: f32 = 50.0 / 3.6;
+        while v > 0.0 {
+            v = (v - 2.5 * 0.02).max(0.0);
+            assert_ne!(d.step(&cfg, &Conditions::default(), &input(0.02, v)).blinker, 3);
+        }
+    }
+
+    #[test]
+    fn impatient_driver_honks_once_twice_thrice() {
+        let cfg = cfg_all(|c| { c.honk = 1.0; c.angry = 0.0; c.flaws = false; c.patience_min = 100.0; c.patience_max = 100.0; c.honk_repeat_min = 20.0; c.honk_repeat_max = 20.0; });
+        let mut d = Driver::new(9, &cfg);
+        let mut toots = Vec::new();
+        for k in 0..(200 * 50) {
+            if d.step(&cfg, &Conditions::default(), &input(0.02, 0.0)).horn {
+                toots.push(k as f32 * 0.02);
+            }
+        }
+        assert_eq!(toots.len(), 1 + 2 + 3, "{toots:?}");
+        assert!(toots[0] >= 99.9 && toots[0] < 100.1, "{toots:?}");
+    }
+
+    #[test]
+    fn nobody_honks_at_a_red_light_or_a_stop() {
+        let cfg = cfg_all(|c| { c.honk = 1.0; c.flaws = false; });
+        let mut d = Driver::new(9, &cfg);
+        for _ in 0..(90 * 50) {
+            assert!(!d.step(&cfg, &Conditions::default(), &input(0.02, 0.0)).horn);
+        }
+        let mut d = Driver::new(9, &cfg);
+        let at_stop = Input { dt: 0.02, at_stop: true, ..Default::default() };
+        for _ in 0..(600 * 50) {
+            assert!(!d.step(&cfg, &Conditions::default(), &at_stop).horn);
+        }
+    }
+
+    #[test]
+    fn forgetful_driver_leaves_the_indicator_on() {
+        let cfg = cfg_all(|c| { c.flaws = true; c.forget_indicator = 1.0; c.forget_chance = 1.0; c.no_indicator = 0.0; c.hazard = 0.0; c.forget_min = 20.0; c.forget_max = 20.0; });
+        let mut d = Driver::new(11, &cfg);
+        let mut i = input(0.1, 10.0);
+        i.blinker = 1;
+        for _ in 0..30 {
+            d.step(&cfg, &Conditions::default(), &i);
+        }
+        i.blinker = 0;
+        for _ in 0..150 {
+            assert_eq!(d.step(&cfg, &Conditions::default(), &i).blinker, 1);
+        }
+        for _ in 0..60 {
+            d.step(&cfg, &Conditions::default(), &i);
+        }
+        assert_eq!(d.step(&cfg, &Conditions::default(), &i).blinker, 0);
+    }
+
+    #[test]
+    fn flaws_off_means_none() {
+        let cfg = cfg_all(|c| { c.flaws = false; c.no_indicator = 1.0; c.broken_bulb = 1.0; c.no_lights = 1.0; });
+        let mut d = Driver::new(13, &cfg);
+        assert_eq!(d.bulb, Bulb::None);
+        let mut i = input(0.1, 10.0);
+        i.blinker = 2;
+        assert_eq!(d.step(&cfg, &Conditions::default(), &i).blinker, 2);
+    }
+
+    #[test]
+    fn two_stroke_puffs_pulling_away() {
+        let cfg = Config::default();
+        let mut s = TwoStroke::new(1, &cfg);
+        let warm = Conditions { temp_c: 20.0, ..Default::default() };
+        let idle = s.step(&cfg, &warm, 0.02, 0.0, 0.0, 1000.0);
+        let mut puff = idle;
+        for _ in 0..30 {
+            puff = s.step(&cfg, &warm, 0.02, 3.0, -1.5, 1000.0);
+        }
+        assert!(puff.freq > idle.freq * 2.0, "{idle:?} {puff:?}");
+    }
+}

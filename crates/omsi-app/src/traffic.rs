@@ -231,6 +231,14 @@ pub struct AiCar {
     /// A train turned round as a whole (its last car leads now): what a trip's
     /// `[trainreverse]` is compared with (Omsi.exe's vehicle +0x4e1).
     pub consist_reversed: bool,
+    /// The driver's lights, indicators and horn (`ai_drivers`): none for a bus, a train,
+    /// an aircraft, a vehicle that runs the AI Headlights mod's script itself, or while
+    /// they are switched off. Made on the car's first frame.
+    pub driver: Option<Box<crate::ai_drivers::Driver>>,
+    /// A two-stroke car's smoke (its model has the emitter, see `vehicle_patch`).
+    pub two_stroke: Option<crate::ai_drivers::TwoStroke>,
+    /// `driver` has been looked at (a car none is made for is not asked again).
+    pub driver_checked: bool,
 }
 
 /// A free parking space beside a lane that a car means to park in: the space of parked car
@@ -588,6 +596,12 @@ pub struct Traffic {
     pub weekday: i32,
     /// Street lights on → AI vehicles switch their lights on.
     pub night: bool,
+    /// Too dark by the time of day alone (`night` without the weather): what the cars'
+    /// drivers (`ai_drivers`) start from, adding the weather as each of them sees it.
+    pub dark: bool,
+    /// The weather and the light as the drivers see them, and their settings.
+    pub conditions: crate::ai_drivers::Conditions,
+    pub driver_cfg: crate::ai_drivers::Config,
     /// The light of the day, for the cars' `Envir_Brightness` (see `sync`).
     pub daylight: Option<omsi_sim::Daylight>,
     next_id: u64,
@@ -884,6 +898,78 @@ fn extents(ty: &VehicleType, length: f32) -> (f32, f32, f32) {
             _ => (length * 0.5, length * 0.5, 0.9),
         },
     }
+}
+
+/// The car's lights and indicators this frame - as the traffic has them (`night`, the
+/// traffic's own indicating), or as its driver makes of them (`ai_drivers`: the weather as
+/// they see it on top of `dark`, the time of day; hazard lights, a forgotten indicator ...).
+/// The driver also sets the lamps `vehicle_patch` gives the model (rear fog lamp, a broken
+/// bulb, the two-stroke cloud) and sounds the horn.
+fn drive_driver(
+    car: &mut AiCar,
+    cfg: &crate::ai_drivers::Config,
+    conditions: &crate::ai_drivers::Conditions,
+    night: bool,
+    dark: bool,
+    dt: f32,
+) -> (bool, i32) {
+    use crate::ai_drivers::{
+        Bulb, Driver, Input, TwoStroke, VAR_BRAKE_L, VAR_BRAKE_R, VAR_HEAD_L, VAR_HEAD_R, VAR_REAR_FOG, VAR_SMOKE_ALPHA,
+        VAR_SMOKE_FREQ, VAR_SMOKE_LIFE, VAR_SMOKE_SPEED,
+    };
+    if !car.driver_checked {
+        car.driver_checked = true;
+        // cars and lorries: not a timetable bus, a train or an aircraft, and not one that
+        // runs the AI Headlights mod's script (its variables are in its varlist)
+        let v = &car.vehicle;
+        if cfg.enabled
+            && car.bus.is_none()
+            && car.body.kind == MotionKind::Road
+            && v.var("AI_Light").is_some()
+            && v.var("AIHL_always").is_none()
+        {
+            car.driver = Some(Box::new(Driver::new(car.seed, cfg)));
+            if v.ty.ai_patch.two_stroke {
+                car.two_stroke = Some(TwoStroke::new(car.seed, cfg));
+            }
+        }
+    }
+    let at_stop = car.at_stop();
+    let Some(d) = car.driver.as_deref_mut() else {
+        // (a model given the lamps of each side, but no driver to switch them: as the
+        // traffic has its lights)
+        let v = &mut car.vehicle;
+        if v.ty.ai_patch.lamps {
+            let (lit, brake) = (night as i32 as f32, car.state.braking as i32 as f32);
+            for (n, x) in [(VAR_HEAD_L, lit), (VAR_HEAD_R, lit), (VAR_BRAKE_L, brake), (VAR_BRAKE_R, brake), (VAR_REAR_FOG, 0.0)] {
+                v.set_engine_var(n, x);
+            }
+        }
+        return (night, car.state.blinker);
+    };
+    let input = Input { dt, speed: car.state.speed, accel: car.state.acc, blinker: car.state.blinker, night: dark, at_stop };
+    let out = d.step(cfg, conditions, &input);
+    let v = &mut car.vehicle;
+    if v.ty.ai_patch.lamps {
+        let on = |b: bool| b as i32 as f32;
+        let brake = car.state.braking;
+        v.set_engine_var(VAR_REAR_FOG, on(out.rear_fog));
+        v.set_engine_var(VAR_HEAD_L, on(out.lights && d.bulb != Bulb::HeadLeft));
+        v.set_engine_var(VAR_HEAD_R, on(out.lights && d.bulb != Bulb::HeadRight));
+        v.set_engine_var(VAR_BRAKE_L, on(brake && d.bulb != Bulb::BrakeLeft));
+        v.set_engine_var(VAR_BRAKE_R, on(brake && d.bulb != Bulb::BrakeRight));
+    }
+    if out.horn {
+        v.host.fired_triggers.push("ev_AI_Horn".into());
+    }
+    if let Some(s) = car.two_stroke.as_mut() {
+        let smoke = s.step(cfg, conditions, dt, car.state.speed, d.decel(), d.age());
+        v.set_engine_var(VAR_SMOKE_FREQ, smoke.freq);
+        v.set_engine_var(VAR_SMOKE_LIFE, smoke.life);
+        v.set_engine_var(VAR_SMOKE_ALPHA, smoke.alpha);
+        v.set_engine_var(VAR_SMOKE_SPEED, smoke.speed);
+    }
+    (out.lights, out.blinker)
 }
 
 /// The driver of a random car: how fast, how close, how patient (see `AiState`).
@@ -1430,6 +1516,13 @@ impl Traffic {
             time_scale: 1.0,
             weekday: 0,
             night: false,
+            dark: false,
+            conditions: Default::default(),
+            driver_cfg: {
+                let d = crate::settings::Settings::load().ai_drivers;
+                omsi_sim::ai_patch::set_enabled(d.enabled);
+                d
+            },
             daylight: None,
             next_id: 1,
             last_overtaker: None,
@@ -2917,6 +3010,9 @@ impl Traffic {
             rail_trail: Default::default(),
             ai_secs: 0.0,
             consist_reversed: false,
+            driver: None,
+            two_stroke: None,
+            driver_checked: false,
             park: None,
             seed,
             scheme,
@@ -6156,17 +6252,40 @@ impl Traffic {
             let priority_warning = car.vehicle.var("TrafficPriority").is_some_and(|v| v > 0.5)
                 && (lead_now.is_some_and(|l| l.gap < PRIORITY_WARN_GAP && l.speed < car.state.speed + 0.5)
                     || stop_at.is_some_and(|x| x - car.state.front < PRIORITY_WARN_GAP));
+            let (lights, blinker) = drive_driver(car, &self.driver_cfg, &self.conditions, self.night, self.dark, dt);
             frames[i] = Some(AiFrame {
                 speed: car.state.speed,
                 odometer: car.state.odometer,
                 steer_deg: 0.0,
-                blinker: car.state.blinker,
+                blinker,
                 brake: car.state.braking,
-                lights: self.night,
+                lights,
                 at_station: car.at_station() as i32,
                 at_station_side: car.at_station_side(),
                 priority_warning,
             });
+        }
+        // OMSI_DEBUG_DRIVERS: every 10 s what the random cars' drivers do (`ai_drivers`)
+        if omsi_cfg::env::var_os("OMSI_DEBUG_DRIVERS").is_some() && (self.time / 10.0).floor() != ((self.time - dt) / 10.0).floor() {
+            let (mut n, mut lit, mut fog, mut hazard, mut lamps, mut smoke) = (0, 0, 0, 0, 0, 0);
+            for (c, f) in self.cars.iter().zip(&frames) {
+                let (Some(_), Some(f)) = (c.driver.as_ref(), f) else { continue };
+                n += 1;
+                lit += f.lights as usize;
+                hazard += (f.blinker == 3) as usize;
+                fog += c.vehicle.var(crate::ai_drivers::VAR_REAR_FOG).is_some_and(|v| v > 0.5) as usize;
+                lamps += c.vehicle.ty.ai_patch.lamps as usize;
+                smoke += c.two_stroke.is_some() as usize;
+            }
+            log::info!(
+                "t={:.0}: drivers: {n} of {} cars, {lit} lit, {fog} rear fog lamps, {hazard} hazard lights; {lamps} models with their lamps, {smoke} two-strokes; light {:.2} visibility {:.0} m precip {} {:.2}",
+                self.time,
+                self.cars.len(),
+                self.conditions.light,
+                self.conditions.visibility_m,
+                self.conditions.precip_kind,
+                self.conditions.precip_rate
+            );
         }
         // Who can be seen: a car out of the view (and farther than the mirrors and the
         // shadows reach) leaves its animations as they are and is not drawn at all.
@@ -7506,6 +7625,9 @@ impl Traffic {
             rail_trail: Default::default(),
             ai_secs: 0.0,
             consist_reversed: false,
+            driver: None,
+            two_stroke: None,
+            driver_checked: false,
             park: None,
         });
         self.cars.len() - 1

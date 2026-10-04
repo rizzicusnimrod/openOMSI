@@ -294,6 +294,8 @@ pub(crate) fn run_offscreen(
                 .as_ref(),
         );
         t.night = daylight.brightness < 0.75;
+        t.dark = t.night;
+        t.conditions = crate::ai_drivers::Conditions::new(daylight.light_a, Some(&weather));
         t.daylight = Some(daylight);
         t.populate(&world, &renderer, &mut scene, center);
     }

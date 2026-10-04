@@ -609,6 +609,9 @@ impl ApplicationHandler for App {
                     // the street lamps (0.6), and off after them in the morning
                     let daylight = omsi_sim::Daylight::compute(&self.clock, self.envir.as_ref());
                     t.night = daylight.brightness < 0.75 || gloomy;
+                    // (the random cars' drivers judge the weather each for themselves)
+                    t.dark = daylight.brightness < 0.75;
+                    t.conditions = crate::ai_drivers::Conditions::new(daylight.light_a, self.weather.as_ref());
                     t.daylight = Some(daylight);
                     let __t2 = Instant::now();
                     t.others = lan_outlines(&self.remotes);

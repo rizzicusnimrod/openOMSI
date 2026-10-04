@@ -205,6 +205,8 @@ pub struct VehicleType {
     /// Per mesh: the box (least, greatest corner) its vertices take in the mesh's own frame,
     /// kept for AI types too (zero for a mesh without vertices).
     pub mesh_boxes: Vec<(Vec3, Vec3)>,
+    /// What an AI copy's model was given for its driver (`ai_patch`).
+    pub ai_patch: crate::ai_patch::AiPatch,
 }
 
 /// One `.cti` item group: replaces the textures of `[CTCTexture]` slots and sets variables.
@@ -381,8 +383,10 @@ impl VehicleType {
         let dir = def.dir().to_path_buf();
         let model_rel = def.model.clone().context("vehicle has no [model]")?;
         let model_path = omsi_cfg::resolve_path(&dir, &model_rel);
-        let model = Model::load(&model_path)
+        let mut model = Model::load(&model_path)
             .with_context(|| format!("loading {}", model_path.display()))?;
+        // (an AI copy of a random car or lorry: its driver's lamps and smoke)
+        let ai_patch = if keep_meshes { Default::default() } else { crate::ai_patch::patch(&def, &mut model) };
         let model_dir = model_path
             .parent()
             .map(|p| p.to_path_buf())
@@ -585,6 +589,7 @@ impl VehicleType {
             missing_packs,
             mesh_bounds,
             mesh_boxes,
+            ai_patch,
         })
     }
 
@@ -4293,6 +4298,7 @@ mod tests {
             missing_packs: Vec::new(),
             mesh_bounds: Vec::new(),
             mesh_boxes: Vec::new(),
+            ai_patch: Default::default(),
         });
         std::fs::remove_dir_all(dir).unwrap();
         VehicleInstance::new(ty, VehicleHost::new(Default::default()))

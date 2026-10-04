@@ -129,6 +129,7 @@ mod tests {
             missing_packs: Vec::new(),
             mesh_bounds: Vec::new(),
             mesh_boxes: Vec::new(),
+            ai_patch: Default::default(),
         });
         omsi_sim::VehicleInstance::new(ty, omsi_sim::VehicleHost::new(Default::default()))
     }

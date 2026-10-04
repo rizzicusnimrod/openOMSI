@@ -61,6 +61,7 @@ mod settings;
 mod threads;
 mod tiles;
 mod traffic;
+mod ai_drivers;
 mod ui;
 
 // the game itself, split by what each part does
