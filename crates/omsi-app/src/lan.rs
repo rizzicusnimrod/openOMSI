@@ -467,6 +467,18 @@ pub struct RemoteVehicle {
 }
 
 impl RemoteVehicle {
+    /// What the player drives, as the players list names it: the vehicle's maker and type
+    /// (`MAN NL 202`), else its file's name.
+    pub fn bus_label(&self) -> String {
+        let d = &self.vehicle.ty.def;
+        let name = format!("{} {}", d.manufacturer.trim(), d.type_name.trim()).trim().to_string();
+        if name.is_empty() || self.stand_in {
+            vehicle_file_label(&self.last.bus)
+        } else {
+            name
+        }
+    }
+
     /// The LAN player's vehicle as it is drawn here.
     pub fn vehicle(&self) -> &omsi_sim::VehicleInstance {
         &self.vehicle
@@ -592,6 +604,8 @@ pub struct Frame<'a> {
     pub clock: Option<&'a omsi_sim::SimClock>,
     /// The timetable tour we drive, `<line>/<tour>` (the host's timetable leaves it to us).
     pub tour: Option<String>,
+    /// That tour's next stop, for the others' players list.
+    pub next_stop: Option<String>,
     /// We are out of the seat, walking about.
     pub walker: Option<omsi_net::Walker>,
     /// We stand or sit in this player's bus: it is drawn from inside.
@@ -631,6 +645,12 @@ impl Drop for StatusFileGuard {
 fn date_of(clock: &omsi_sim::SimClock) -> String {
     let (d, m) = clock.day_month();
     format!("{:04}-{m:02}-{d:02}", clock.year)
+}
+
+/// A vehicle file's name for the players list (`Vehicles/MAN_NL/MAN_NL202.bus`: MAN_NL202).
+pub fn vehicle_file_label(bus: &str) -> String {
+    let f = bus.rsplit(['/', '\\']).next().unwrap_or("");
+    f.rsplit_once('.').map(|(s, _)| s).unwrap_or(f).replace('_', " ")
 }
 
 /// The name the other players see: `--lan-name` (the launcher passes the driver profile's
@@ -1881,6 +1901,7 @@ pub fn my_pose(
         line,
         destination,
         tour: String::new(),
+        next_stop: String::new(),
         texts,
         freetex,
         figure: p.driver.as_ref().map(|d| content_relative(&d.human_type().def.path, &args.root)).unwrap_or_default(),
@@ -3018,6 +3039,7 @@ pub fn tick(
     }
     let mut mine = my_pose(game, player.as_deref(), args, duty, frame.riders);
     mine.tour = frame.tour.clone().unwrap_or_default();
+    mine.next_stop = frame.next_stop.clone().unwrap_or_default();
     mine.walker = frame.walker;
     if lan.role == Role::Host {
         // the tours the others drive are theirs, not the timetable's

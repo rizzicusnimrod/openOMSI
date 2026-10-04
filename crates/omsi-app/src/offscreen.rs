@@ -1071,6 +1071,7 @@ pub(crate) fn run_offscreen(
                 riders: humans_off.as_ref().map(|h| h.riding()).unwrap_or(0),
                 clock,
                 tour: duty.as_ref().map(|d| format!("{}/{}", d.line, d.tour)),
+                next_stop: duty.as_ref().and_then(crate::schedule::next_stop_name),
                 walker: None,
                 inside_of: None,
             };

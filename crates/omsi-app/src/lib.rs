@@ -578,6 +578,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         cloud_drift: [0.0; 2],
         menu_edit: None,
         menu_search: None,
+        hud_places: Default::default(),
         menu_edit_icao: false,
         swap_pending: false,
         menu_drag: None,

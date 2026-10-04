@@ -288,6 +288,8 @@ pub struct OptionRow {
     pub min: f32,
     pub max: f32,
     pub step: f32,
+    /// Shown only with the advanced settings on (thresholds, timings, amounts).
+    pub advanced: bool,
 }
 
 impl OptionRow {
@@ -303,15 +305,20 @@ impl OptionRow {
 }
 
 const fn row(name: &'static str, label: &'static str, desc: &'static str, unit: Unit, min: f32, max: f32, step: f32) -> OptionRow {
-    OptionRow { name, label, desc, unit, min, max, step }
+    OptionRow { name, label, desc, unit, min, max, step, advanced: false }
+}
+
+/// A row of the advanced settings.
+const fn adv(name: &'static str, label: &'static str, desc: &'static str, unit: Unit, min: f32, max: f32, step: f32) -> OptionRow {
+    OptionRow { name, label, desc, unit, min, max, step, advanced: true }
 }
 
 const fn switch(name: &'static str, label: &'static str, desc: &'static str) -> OptionRow {
-    OptionRow { name, label, desc, unit: Unit::Switch, min: 0.0, max: 1.0, step: 1.0 }
+    OptionRow { name, label, desc, unit: Unit::Switch, min: 0.0, max: 1.0, step: 1.0, advanced: false }
 }
 
 const fn heading(label: &'static str, desc: &'static str) -> OptionRow {
-    OptionRow { name: "", label, desc, unit: Unit::Switch, min: 0.0, max: 0.0, step: 0.0 }
+    OptionRow { name: "", label, desc, unit: Unit::Switch, min: 0.0, max: 0.0, step: 0.0, advanced: false }
 }
 
 /// The options' pages for the drivers, in order: title and rows.
@@ -322,67 +329,67 @@ pub const OPTION_PAGES: &[(&str, &[OptionRow])] = {
             switch("enabled", "AI drivers", "Random cars and lorries switch their lights, indicate, honk and smoke as drivers do (off: as the traffic says)"),
             row("always_on", "Always lights on", "Drivers who drive with their lights on all day, even in sunshine", Percent, 0.0, 1.0, 0.05),
             heading("Dusk and a dark sky", "Each driver switches on at a light of their own between these (0 night, 1 day)"),
-            row("bright_min", "Switch on at the earliest below", "The least careful drivers", Light, 0.0, 1.0, 0.05),
-            row("bright_max", "Switch on at the latest below", "The most careful drivers", Light, 0.0, 1.0, 0.05),
-            row("bright_hyst", "Off only when brighter by", "Keeps the lights from flickering at the threshold", Light, 0.0, 0.3, 0.01),
+            adv("bright_min", "Switch on at the earliest below", "The least careful drivers", Light, 0.0, 1.0, 0.05),
+            adv("bright_max", "Switch on at the latest below", "The most careful drivers", Light, 0.0, 1.0, 0.05),
+            adv("bright_hyst", "Off only when brighter by", "Keeps the lights from flickering at the threshold", Light, 0.0, 0.3, 0.01),
             heading("Rain and snow", "Each driver switches on at a rain rate of their own between these (0..1)"),
-            row("precip_min", "Lights on from rain of", "The most careful drivers", Rain, 0.0, 0.5, 0.01),
-            row("precip_max", "Lights on at the latest in rain of", "The least careful drivers", Rain, 0.0, 0.5, 0.01),
-            row("snow_factor", "Snow counts as", "Times the rain threshold (0.5: on in half as much snow)", Times, 0.1, 1.0, 0.05),
+            adv("precip_min", "Lights on from rain of", "The most careful drivers", Rain, 0.0, 0.5, 0.01),
+            adv("precip_max", "Lights on at the latest in rain of", "The least careful drivers", Rain, 0.0, 0.5, 0.01),
+            adv("snow_factor", "Snow counts as", "Times the rain threshold (0.5: on in half as much snow)", Times, 0.1, 1.0, 0.05),
             heading("Fog", "Each driver switches on below a visibility of their own between these"),
-            row("fog_min_m", "Lights on in fog below", "The least careful drivers", Metres, 50.0, 3000.0, 50.0),
-            row("fog_max_m", "Lights on in fog at the latest below", "The most careful drivers", Metres, 50.0, 3000.0, 50.0),
+            adv("fog_min_m", "Lights on in fog below", "The least careful drivers", Metres, 50.0, 3000.0, 50.0),
+            adv("fog_max_m", "Lights on in fog at the latest below", "The most careful drivers", Metres, 50.0, 3000.0, 50.0),
             heading("Reaction", "How quickly the drivers notice"),
-            row("on_delay_max", "Switch on within", "Seconds after it gets bad (each driver their own)", Seconds, 0.0, 60.0, 1.0),
-            row("off_delay_min", "Switch off at the earliest after", "Seconds after it clears up", Seconds, 0.0, 300.0, 5.0),
-            row("off_delay_max", "Switch off at the latest after", "Seconds after it clears up", Seconds, 0.0, 600.0, 5.0),
+            adv("on_delay_max", "Switch on within", "Seconds after it gets bad (each driver their own)", Seconds, 0.0, 60.0, 1.0),
+            adv("off_delay_min", "Switch off at the earliest after", "Seconds after it clears up", Seconds, 0.0, 300.0, 5.0),
+            adv("off_delay_max", "Switch off at the latest after", "Seconds after it clears up", Seconds, 0.0, 600.0, 5.0),
             heading("Rear fog lamp", "A bright red lamp at the back, in thick fog"),
             row("rear_fog", "Drivers who use it", "Share of the drivers who switch it on in fog", Percent, 0.0, 1.0, 0.05),
-            row("rear_fog_m", "On below a visibility of", "How thick the fog must be", Metres, 25.0, 500.0, 25.0),
+            adv("rear_fog_m", "On below a visibility of", "How thick the fog must be", Metres, 25.0, 500.0, 25.0),
         ]),
         ("AI hazards & horn", &[
             heading("Hazard lights", "Braking hard, e.g. at the end of a jam"),
             row("hazard", "Drivers who use them", "Share of the drivers who put the hazards on when braking hard", Percent, 0.0, 1.0, 0.05),
-            row("hazard_decel", "Braking that counts as hard", "Normal braking is 2-3 m/s², an emergency up to 8", Accel, 2.0, 9.0, 0.5),
-            row("hazard_speed", "Only from a speed of", "Slower than this, nobody puts them on", Kmh, 0.0, 120.0, 5.0),
-            row("hazard_hold_min", "On after the stop for at least", "Seconds (each driver their own; off when they drive off)", Seconds, 0.0, 30.0, 1.0),
-            row("hazard_hold_max", "On after the stop for at most", "Seconds", Seconds, 0.0, 30.0, 1.0),
+            adv("hazard_decel", "Braking that counts as hard", "Normal braking is 2-3 m/s², an emergency up to 8", Accel, 2.0, 9.0, 0.5),
+            adv("hazard_speed", "Only from a speed of", "Slower than this, nobody puts them on", Kmh, 0.0, 120.0, 5.0),
+            adv("hazard_hold_min", "On after the stop for at least", "Seconds (each driver their own; off when they drive off)", Seconds, 0.0, 30.0, 1.0),
+            adv("hazard_hold_max", "On after the stop for at most", "Seconds", Seconds, 0.0, 30.0, 1.0),
             heading("Honking when stuck", "Far longer than a red light lasts: a jam, a deadlock, a bus in the way"),
             row("honk", "Impatient drivers", "Share of the drivers who honk when stuck", Percent, 0.0, 1.0, 0.05),
-            row("patience_min", "Patience at least", "Seconds standing before the first honk (keep it above your longest red light)", Seconds, 10.0, 600.0, 10.0),
-            row("patience_max", "Patience at most", "Seconds", Seconds, 10.0, 600.0, 10.0),
-            row("honk_repeat_min", "Again after at least", "Seconds between the honks while still stuck", Seconds, 5.0, 180.0, 5.0),
-            row("honk_repeat_max", "Again after at most", "Seconds", Seconds, 5.0, 180.0, 5.0),
-            row("honk_max", "Honks at most", "Once, then twice, then three times ...", Count, 1.0, 6.0, 1.0),
+            adv("patience_min", "Patience at least", "Seconds standing before the first honk (keep it above your longest red light)", Seconds, 10.0, 600.0, 10.0),
+            adv("patience_max", "Patience at most", "Seconds", Seconds, 10.0, 600.0, 10.0),
+            adv("honk_repeat_min", "Again after at least", "Seconds between the honks while still stuck", Seconds, 5.0, 180.0, 5.0),
+            adv("honk_repeat_max", "Again after at most", "Seconds", Seconds, 5.0, 180.0, 5.0),
+            adv("honk_max", "Honks at most", "Once, then twice, then three times ...", Count, 1.0, 6.0, 1.0),
             heading("Honking when cut off", "Two toots after an emergency stop"),
             row("angry", "Drivers who honk", "Share of the drivers", Percent, 0.0, 1.0, 0.05),
-            row("angry_decel", "Braking that makes them honk", "m/s², from 20 km/h or more", Accel, 3.0, 9.0, 0.5),
+            adv("angry_decel", "Braking that makes them honk", "m/s², from 20 km/h or more", Accel, 3.0, 9.0, 0.5),
         ]),
         ("AI driver habits", &[
             switch("flaws", "Imperfect drivers", "Some drivers have one of the bad habits below (off: none of them)"),
             row("no_indicator", "Never indicate", "Share of the drivers", Percent, 0.0, 0.5, 0.01),
             heading("Forgotten indicator", "Left blinking after a turn"),
             row("forget_indicator", "Forgetful drivers", "Share of the drivers", Percent, 0.0, 0.5, 0.01),
-            row("forget_chance", "Forget it after", "Share of their turns", Percent, 0.0, 1.0, 0.05),
-            row("forget_min", "Blinking on for at least", "Seconds", Seconds, 5.0, 180.0, 5.0),
-            row("forget_max", "Blinking on for at most", "Seconds", Seconds, 5.0, 180.0, 5.0),
+            adv("forget_chance", "Forget it after", "Share of their turns", Percent, 0.0, 1.0, 0.05),
+            adv("forget_min", "Blinking on for at least", "Seconds", Seconds, 5.0, 180.0, 5.0),
+            adv("forget_max", "Blinking on for at most", "Seconds", Seconds, 5.0, 180.0, 5.0),
             heading("Forgotten lights", "At dusk, and in fog or rain by day, until it is really dark"),
             row("no_lights", "Drivers who forget them", "Share of the drivers", Percent, 0.0, 0.5, 0.01),
-            row("no_lights_bright_min", "They notice at the latest below", "The light outside (0 night, 1 day)", Light, 0.0, 0.5, 0.01),
-            row("no_lights_bright_max", "They notice at the earliest below", "The light outside", Light, 0.0, 0.5, 0.01),
+            adv("no_lights_bright_min", "They notice at the latest below", "The light outside (0 night, 1 day)", Light, 0.0, 0.5, 0.01),
+            adv("no_lights_bright_max", "They notice at the earliest below", "The light outside", Light, 0.0, 0.5, 0.01),
             heading("Other habits", "A few drivers"),
             row("rear_fog_misuse", "Rear fog lamp in rain and at night", "Share of the drivers", Percent, 0.0, 0.5, 0.01),
             row("broken_bulb", "A broken bulb", "Share of the cars with one headlight or brake light out", Percent, 0.0, 0.5, 0.01),
         ]),
         ("AI two-stroke smoke", &[
             switch("smoke", "Two-stroke smoke", "Trabants and Wartburgs leave a blue-grey trail (Display, Vehicle smoke thins it with the rest)"),
-            row("smoke_base", "Smoke all the time", "The light haze every two-stroke makes", Times, 0.0, 1.0, 0.05),
-            row("smoke_puff", "Pulling away", "Extra smoke when a car moves off", Times, 0.0, 5.0, 0.25),
-            row("smoke_cold", "Cold engine", "Extra smoke for the first minutes (full below 10 °C, a third above)", Times, 0.0, 5.0, 0.25),
-            row("smoke_cold_time", "Engine warm after", "Seconds", Seconds, 0.0, 900.0, 30.0),
+            adv("smoke_base", "Smoke all the time", "The light haze every two-stroke makes", Times, 0.0, 1.0, 0.05),
+            adv("smoke_puff", "Pulling away", "Extra smoke when a car moves off", Times, 0.0, 5.0, 0.25),
+            adv("smoke_cold", "Cold engine", "Extra smoke for the first minutes (full below 10 °C, a third above)", Times, 0.0, 5.0, 0.25),
+            adv("smoke_cold_time", "Engine warm after", "Seconds", Seconds, 0.0, 900.0, 30.0),
             row("smokers", "Badly tuned cars", "Share of the two-strokes that smoke heavily all the time", Percent, 0.0, 1.0, 0.05),
-            row("smoke_smoker", "How much they smoke", "Extra smoke of a badly tuned car", Times, 0.0, 3.0, 0.25),
-            row("smoke_density", "Cloud density", "Particles a second for each unit of smoke", Rate, 0.0, 100.0, 5.0),
+            adv("smoke_smoker", "How much they smoke", "Extra smoke of a badly tuned car", Times, 0.0, 3.0, 0.25),
+            adv("smoke_density", "Cloud density", "Particles a second for each unit of smoke", Rate, 0.0, 100.0, 5.0),
         ]),
     ]
 };

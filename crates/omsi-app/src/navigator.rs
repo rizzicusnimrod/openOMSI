@@ -36,10 +36,14 @@ use crate::traffic::Traffic;
 
 // neutral dark, half transparent, calm
 const NAV_REDRAW_S: f32 = 1.0 / 30.0;
-const PANEL: Color = Color::rgba(10, 10, 10, 0.70);
+const PANEL: Color = Color::rgba(15, 18, 23, 0.82);
 // (the bars under the texts darken whatever the opacity setting leaves of the panel: at a
 // third the cab showed through behind the next stop)
-const BAR: Color = Color::rgba(0, 0, 0, 0.55);
+const BAR: Color = Color::rgba(6, 8, 11, 0.55);
+/// The custom fork's look: its accent (the bus, the next turn, the next stop), a hairline.
+const ACCENT: Color = Color::rgba(64, 156, 255, 1.0);
+const HAIRLINE: Color = Color::rgba(255, 255, 255, 0.08);
+const CHIP: Color = Color::rgba(255, 255, 255, 0.07);
 // (the launcher's map picture draws with these too, so the two maps cannot look apart)
 pub(crate) const ROAD_CASING: Color = Color::rgba(30, 30, 30, 0.9);
 pub(crate) const ROAD: Color = Color::rgba(92, 92, 92, 1.0);
@@ -806,6 +810,30 @@ impl Navigator {
     }
 
     /// The street a lane of the route's network belongs to (the map's network only).
+    /// The name of the street at `p`: the named road nearest it within `reach` metres (none
+    /// before the map's roads are read, or out on an unnamed road).
+    pub fn street_at(&self, p: DVec3, reach: f64) -> Option<String> {
+        let net = self.global.as_deref()?;
+        if let Some(n) = net.nearest_lane_near(p, LaneKind::Street).filter(|l| l.2 < reach.min(25.0)).and_then(|l| self.street_of(l.0)) {
+            return Some(n.to_string());
+        }
+        // (the nearest road has no name: the nearest one that has)
+        let st = self.streets.as_deref()?;
+        let mut best: Option<(f64, usize)> = None;
+        for (i, lane) in net.lanes.iter().enumerate() {
+            if lane.kind != LaneKind::Street || st.of_lane.get(i).is_none_or(|&n| n == u32::MAX) {
+                continue;
+            }
+            for q in &lane.points {
+                let d = (*q - p).truncate().length();
+                if d < reach && best.is_none_or(|b| d < b.0) {
+                    best = Some((d, i));
+                }
+            }
+        }
+        best.and_then(|(_, i)| self.street_of(i)).map(str::to_string)
+    }
+
     fn street_of(&self, lane: usize) -> Option<&str> {
         self.global.as_ref()?;
         let st = self.streets.as_deref()?;
@@ -994,7 +1022,7 @@ impl Navigator {
         let wd = words(f.language);
         self.atlas.begin_frame();
         let panel = Rect::new(0.0, 0.0, pw, ph);
-        let radius = 7.0 * s;
+        let radius = 12.0 * s;
         let top_h = (34.0 * s).round();
         let map = Rect::new(0.0, top_h, pw, map_h);
         let vp = [map.x, map.y, map.w, map.h];
@@ -1115,21 +1143,24 @@ impl Navigator {
             let street = street.as_deref().map(|n| self.fonts.fit(n, 12.0 * s, Weight::Medium, map.w * 0.62 - 50.0 * s - tw));
             let sw_ = street.as_deref().map(|n| self.fonts.width(n, 12.0 * s, Weight::Medium) + 10.0 * s).unwrap_or(0.0);
             let b = Rect::new(map.x + 8.0 * s, map.y + 8.0 * s, 44.0 * s + tw + sw_, 34.0 * s);
-            ui.rounded(b, 5.0 * s, Color::rgba(10, 10, 10, 0.85));
-            ui.icon(&mut self.atlas, icon, Vec2::new(b.x + 18.0 * s, b.center().y), 24.0 * s, TEXT);
-            ui.text_in(&mut self.atlas, &self.fonts, &t, 14.0 * s, Weight::Bold, Rect::new(b.x + 34.0 * s, b.y, tw + 4.0, b.h), Align::Left, TEXT);
+            ui.shadow(b, 8.0 * s, 6.0 * s, Color::rgba(0, 0, 0, 0.35));
+            ui.rounded(b, 8.0 * s, ACCENT.alpha(0.96));
+            ui.icon(&mut self.atlas, icon, Vec2::new(b.x + 18.0 * s, b.center().y), 24.0 * s, Color::WHITE);
+            ui.text_in(&mut self.atlas, &self.fonts, &t, 14.0 * s, Weight::Bold, Rect::new(b.x + 34.0 * s, b.y, tw + 4.0, b.h), Align::Left, Color::WHITE);
             if let Some(n) = street.as_deref() {
-                ui.text_in(&mut self.atlas, &self.fonts, n, 12.0 * s, Weight::Medium, Rect::new(b.x + 42.0 * s + tw, b.y, sw_, b.h), Align::Left, TEXT_DIM);
+                ui.text_in(&mut self.atlas, &self.fonts, n, 12.0 * s, Weight::Medium, Rect::new(b.x + 42.0 * s + tw, b.y, sw_, b.h), Align::Left, Color::rgba(225, 238, 255, 1.0));
             }
         }
         // the street the bus is on, bottom middle of the map
         if let Some(n) = self.street_here.as_deref() {
             let px = 11.5 * s;
             let n = self.fonts.fit(n, px, Weight::Medium, map.w * 0.7);
-            let w = self.fonts.width(&n, px, Weight::Medium) + 14.0 * s;
-            let r = Rect::new(map.center().x - w * 0.5, map.bottom() - 24.0 * s, w, 18.0 * s);
-            ui.rounded(r, 9.0 * s, Color::rgba(10, 10, 10, 0.8));
-            ui.text_in(&mut self.atlas, &self.fonts, &n, px, Weight::Medium, r, Align::Center, STREET);
+            let w = self.fonts.width(&n, px, Weight::Medium) + 30.0 * s;
+            let r = Rect::new(map.center().x - w * 0.5, map.bottom() - 26.0 * s, w, 20.0 * s);
+            ui.rounded(Rect::new(r.x - 1.0, r.y - 1.0, r.w + 2.0, r.h + 2.0), 10.0 * s + 1.0, HAIRLINE.alpha(0.18));
+            ui.rounded(r, 10.0 * s, Color::rgba(15, 18, 23, 0.92));
+            ui.icon(&mut self.atlas, "location_on", Vec2::new(r.x + 10.0 * s, r.center().y), 12.0 * s, ACCENT);
+            ui.text_in(&mut self.atlas, &self.fonts, &n, px, Weight::Medium, Rect::new(r.x + 18.0 * s, r.y, r.w - 22.0 * s, r.h), Align::Center, STREET);
         }
         // Stops ahead use a bus badge so they read as stops, not generic route dots.
         let n_stops = f.stops.len();
@@ -1183,12 +1214,26 @@ impl Navigator {
         // the bus: a plain white arrow
         if let Some(bp) = project(vpm, vp, rel(f.bus)) {
             let a = (angle_diff(self.cam_heading, f.heading) as f32).to_radians();
-            arrow(&mut ui, bp, a, 9.0 * s, 1.25, Color::rgba(10, 10, 10, 0.8), TEXT);
+            ui.circle(bp, 15.0 * s, ACCENT.alpha(0.16));
+            arrow(&mut ui, bp, a, 9.5 * s, 1.35, Color::WHITE, ACCENT);
+        }
+        // the compass: north, as the map is turned
+        {
+            let c = Vec2::new(map.right() - 18.0 * s, map.y + 18.0 * s);
+            ui.circle(c, 12.0 * s, Color::rgba(15, 18, 23, 0.9));
+            let north = (-self.cam_heading as f32).to_radians();
+            let dir = Vec2::new(north.sin(), -north.cos());
+            let side = Vec2::new(-dir.y, dir.x);
+            let (tip, tail) = (c + dir * 8.0 * s, c - dir * 8.0 * s);
+            ui.tri(tip, c + side * 3.5 * s, c - side * 3.5 * s, LATE, LATE, LATE);
+            ui.tri(tail, c - side * 3.5 * s, c + side * 3.5 * s, TEXT_DIM, TEXT_DIM, TEXT_DIM);
+            ui.text(&mut self.atlas, &self.fonts, "N", 8.0 * s, Weight::Black, c + dir * 15.5 * s + Vec2::new(0.0, self.fonts.cap_height(8.0 * s, Weight::Black) * 0.5), Align::Center, TEXT);
         }
 
         // top bar: speed (and the limit) · line ……… game time
         let top = Rect::new(0.0, 0.0, pw, top_h);
         ui.rect(top, BAR);
+        ui.rect(Rect::new(0.0, top.bottom() - 1.0, pw, 1.0), HAIRLINE);
         let pad = 11.0 * s;
         let base = top.y + top.h * 0.5 + self.fonts.cap_height(17.0 * s, Weight::Bold) * 0.5;
         let mut x = pad;
@@ -1218,30 +1263,53 @@ impl Navigator {
         let day_w = self.fonts.width(day_text, 12.0 * s, Weight::Medium);
         ui.text(&mut self.atlas, &self.fonts, &time_text, 14.0 * s, Weight::Bold, Vec2::new(pw - pad, base), Align::Right, TEXT);
         ui.text(&mut self.atlas, &self.fonts, day_text, 12.0 * s, Weight::Medium, Vec2::new(pw - pad - time_w - 5.0 * s, base), Align::Right, TEXT_DIM);
+        ui.icon(&mut self.atlas, "schedule", Vec2::new(pw - pad - time_w - 5.0 * s - day_w - 10.0 * s, top.center().y), 13.0 * s, TEXT_DIM);
+        let day_w = day_w + 18.0 * s;
 
         // Temperatures stay in the navigator header on every bus. The simulator always keeps
         // Cabinair_Temp, while scripts that model heating/air conditioning can overwrite it.
-        let temp = format!("EXT {:.0}°C · INT {:.0}°C", f.outside_temp, f.inside_temp);
-        let center = match f.line.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
-            Some(line) => format!("{temp} · {line}"),
-            None => temp,
-        };
+        let temp = format!("{:.0}° / {:.0}°", f.outside_temp, f.inside_temp);
+        let line = f.line.as_deref().map(str::trim).filter(|l| !l.is_empty());
         let left_edge = (if limit.is_some() { x + 24.0 * s } else { x }) + 6.0 * s;
         let right_edge = pw - pad - time_w - 5.0 * s - day_w - 6.0 * s;
         if right_edge > left_edge {
-            let rect = Rect::new(left_edge, top.y, right_edge - left_edge, top.h);
-            let center = self.fonts.fit(&center, 11.5 * s, Weight::Bold, rect.w);
-            ui.text_in(&mut self.atlas, &self.fonts, &center, 11.5 * s, Weight::Bold, rect, Align::Center, TEXT_DIM);
+            // (the line on a tag in the accent, the temperatures outside / inside beside it)
+            let px = 11.5 * s;
+            let line_w = line.map(|l| self.fonts.width(&self.fonts.fit(l, px, Weight::Bold, 60.0 * s), px, Weight::Bold) + 14.0 * s).unwrap_or(0.0);
+            let temp_w = self.fonts.width(&temp, px, Weight::Bold) + 16.0 * s;
+            let total = line_w + if line.is_some() { 8.0 * s } else { 0.0 } + temp_w;
+            let room = right_edge - left_edge;
+            let mut cx = left_edge + ((room - total) * 0.5).max(0.0);
+            if let Some(l) = line.filter(|_| total <= room) {
+                let tag = Rect::new(cx, top.center().y - 9.0 * s, line_w, 18.0 * s);
+                ui.rounded(tag, 5.0 * s, ACCENT);
+                let l = self.fonts.fit(l, px, Weight::Bold, 60.0 * s);
+                ui.text_in(&mut self.atlas, &self.fonts, &l, px, Weight::Bold, tag, Align::Center, Color::WHITE);
+                cx += line_w + 8.0 * s;
+            }
+            if cx + temp_w <= right_edge + 1.0 {
+                ui.icon(&mut self.atlas, "thermostat", Vec2::new(cx + 6.0 * s, top.center().y), 13.0 * s, TEXT_DIM);
+                ui.text_in(&mut self.atlas, &self.fonts, &temp, px, Weight::Bold, Rect::new(cx + 14.0 * s, top.y, temp_w, top.h), Align::Left, TEXT_DIM);
+            }
         }
 
         // bottom bar: the next stop; its distance, the time to it, the planned time and
         // whether the bus is early or late
         let bottom = Rect::new(0.0, map.bottom(), pw, 46.0 * s);
         ui.rect(bottom, BAR);
+        ui.rect(Rect::new(0.0, bottom.y, pw, 1.0), HAIRLINE);
+        // (a round badge with a bus before the next stop, as on the map)
+        let badge = if f.stops.is_empty() { 0.0 } else { 34.0 * s };
+        if badge > 0.0 {
+            let c = Vec2::new(pad + 14.0 * s, bottom.center().y);
+            ui.circle(c, 14.0 * s, ACCENT.alpha(0.22));
+            ui.icon(&mut self.atlas, "directions_bus", c, 16.0 * s, Color::rgba(150, 200, 255, 1.0));
+        }
+        let pad_l = pad + badge;
         let stop_row = if f.stops.is_empty() {
             Rect::new(pad, bottom.y, pw - 2.0 * pad, bottom.h)
         } else {
-            Rect::new(pad, bottom.y + 4.0 * s, pw - 2.0 * pad, 20.0 * s)
+            Rect::new(pad_l, bottom.y + 4.0 * s, pw - pad_l - pad, 20.0 * s)
         };
         let stop_row = stop_request_icon(&mut ui, &mut self.atlas, f.stop_requested, stop_row, s);
         let note = if self.route.note > 0.0 {
@@ -1270,7 +1338,7 @@ impl Navigator {
                 }
                 parts.push(format!("{:02}:{:02}", (st.arrival / 3600.0) as i32 % 24, ((st.arrival % 3600.0) / 60.0) as i32));
                 let line2 = parts.join("  ·  ");
-                let y2 = Rect::new(pad, bottom.y + 24.0 * s, pw - 2.0 * pad, 18.0 * s);
+                let y2 = Rect::new(pad_l, bottom.y + 24.0 * s, pw - pad_l - pad, 18.0 * s);
                 match note {
                     Some((t, c)) => {
                         ui.text_in(&mut self.atlas, &self.fonts, t, 12.5 * s, Weight::Medium, y2, Align::Left, c);
@@ -1292,7 +1360,11 @@ impl Navigator {
                     } else {
                         (wd.on_time.to_string(), ON_TIME)
                     };
-                    ui.text_in(&mut self.atlas, &self.fonts, &txt, 12.5 * s, Weight::Bold, y2, Align::Right, c);
+                    // (on a tag of its own colour)
+                    let tw = self.fonts.width(&txt, 12.0 * s, Weight::Bold) + 14.0 * s;
+                    let tag = Rect::new(y2.right() - tw, y2.y, tw, y2.h);
+                    ui.rounded(tag, 5.0 * s, c.alpha(0.2));
+                    ui.text_in(&mut self.atlas, &self.fonts, &txt, 12.0 * s, Weight::Bold, tag, Align::Center, c);
                 }
             }
             None => {
@@ -1305,11 +1377,18 @@ impl Navigator {
             let mut y = bottom.bottom() + 6.0 * s;
             ui.rect(Rect::new(pad, bottom.bottom(), pw - 2.0 * pad, 1.0), Color::WHITE.alpha(0.06));
             let late = f.delay.unwrap_or(0.0);
-            for st in f.stops.iter().take(5) {
+            let shown = f.stops.len().min(5);
+            if shown > 1 {
+                ui.rect(Rect::new(pad + 4.0 * s - 1.0 * s, y + 11.0 * s, 2.0 * s, (shown - 1) as f32 * 22.0 * s), Color::rgba(255, 255, 255, 0.14));
+            }
+            for (k, st) in f.stops.iter().take(5).enumerate() {
                 let r = Rect::new(pad, y, pw - 2.0 * pad, 22.0 * s);
+                ui.circle(Vec2::new(pad + 4.0 * s, r.center().y), if k == 0 { 4.0 } else { 3.0 } * s, if k == 0 { ACCENT } else { Color::rgba(120, 132, 150, 1.0) });
                 let planned = format!("{:02}:{:02}", (st.arrival / 3600.0) as i32 % 24, ((st.arrival % 3600.0) / 60.0) as i32);
-                ui.text_in(&mut self.atlas, &self.fonts, &planned, 12.5 * s, Weight::Bold, r, Align::Left, TEXT_DIM);
-                ui.text_in(&mut self.atlas, &self.fonts, st.name.trim(), 13.0 * s, Weight::Medium, Rect::new(r.x + 46.0 * s, r.y, r.w - 100.0 * s, r.h), Align::Left, TEXT);
+                let chip = Rect::new(r.x + 14.0 * s, r.y + 3.0 * s, 40.0 * s, r.h - 6.0 * s);
+                ui.rounded(chip, 4.0 * s, CHIP);
+                ui.text_in(&mut self.atlas, &self.fonts, &planned, 11.5 * s, Weight::Bold, chip, Align::Center, TEXT_DIM);
+                ui.text_in(&mut self.atlas, &self.fonts, st.name.trim(), 13.0 * s, Weight::Medium, Rect::new(r.x + 62.0 * s, r.y, r.w - 112.0 * s, r.h), Align::Left, TEXT);
                 // when the bus will be there at this lateness
                 let exp = st.arrival + late;
                 let e = format!("{:02}:{:02}", (exp / 3600.0).rem_euclid(24.0) as i32, ((exp.rem_euclid(3600.0)) / 60.0) as i32);

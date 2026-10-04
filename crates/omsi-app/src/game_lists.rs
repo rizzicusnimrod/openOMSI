@@ -274,6 +274,7 @@ pub(crate) fn search_items(app: &App, kind: &ListKind, query: &str) -> Vec<(Stri
     let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
     let Some((pages, _)) = pages_of(app, kind) else { return Vec::new() };
     let mut out = Vec::new();
+    let mut hidden = 0usize;
     for (title, rows) in pages {
         // (the heading the rows come under: part of where a row is, and of what it is about)
         let mut section = String::new();
@@ -292,12 +293,21 @@ pub(crate) fn search_items(app: &App, kind: &ListKind, query: &str) -> Vec<(Stri
             if !words.iter().all(|w| hay.contains(w.as_str())) {
                 continue;
             }
+            // (an advanced setting found while they are hidden: counted, offered below)
+            if !app.settings.advanced_settings && is_advanced(&id) {
+                hidden += 1;
+                continue;
+            }
             let mut p: Vec<String> = parts.iter().map(|x| x.to_string()).collect();
             p.resize(5, String::new());
             let place = if section.is_empty() { omsi_ui::tr(title).into_owned() } else { format!("{} › {section}", omsi_ui::tr(title)) };
             p[3] = if desc.is_empty() { place } else { format!("{place} — {desc}") };
             out.push((p.join("\u{1f}"), id));
         }
+    }
+    if hidden > 0 {
+        let what = if hidden == 1 { "1 more setting matches in the advanced settings".to_string() } else { format!("{hidden} more settings match in the advanced settings") };
+        out.push((row("Show the advanced settings", 'a', "Show", &what, None), ADVANCED_ON.to_string()));
     }
     out
 }
@@ -315,7 +325,7 @@ pub(crate) fn items(app: &App, kind: &ListKind) -> Vec<(String, String)> {
             if pages.is_empty() {
                 return vec![(row("Nothing to set here", 'i', "", "", None), "noop".to_string())];
             }
-            return pages.swap_remove(tab).1;
+            return hide_advanced(pages.swap_remove(tab).1, app.settings.advanced_settings);
         }
         ListKind::Lines => {
             if let Some(sch) = app.schedule.as_ref() {
@@ -1297,6 +1307,7 @@ fn toggle_now(app: &App, id: &str) -> Option<bool> {
         "notes" => s.notes,
         "chat" => s.chat,
         "name_tags" => s.name_tags,
+        "advanced" => s.advanced_settings,
         _ => return None,
     })
 }
@@ -1574,6 +1585,10 @@ fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static str, String
             app.settings.name_tags = on;
             Some(("name_tags", bit))
         }
+        "advanced" => {
+            app.settings.advanced_settings = on;
+            Some(("advanced_settings", bit))
+        }
         _ => None,
     }
 }
@@ -1583,6 +1598,10 @@ pub(crate) static LIST_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic:
 
 /// Change the setting `verb` (a switch or a slider) as `mv` says; false when it is neither.
 fn option_do(app: &mut App, verb: &str, arg: &str, mv: Move) -> bool {
+    if verb == ADVANCED_ON {
+        set_advanced(app, true);
+        return true;
+    }
     if let Some(name) = verb.strip_prefix("aid:") {
         return ai_driver_do(app, name, mv);
     }
@@ -1656,7 +1675,8 @@ fn ai_driver_do(app: &mut App, name: &str, mv: Move) -> bool {
     true
 }
 
-/// The rows of one of the AI drivers' pages: switches, sliders and headings.
+/// The rows of one of the AI drivers' pages: switches, sliders and headings (all of them:
+/// `hide_advanced` leaves out the advanced ones where they are not wanted).
 fn ai_driver_rows(app: &App, rows: &[crate::ai_drivers::OptionRow]) -> Vec<(String, String)> {
     use crate::ai_drivers::Unit;
     let cfg = &app.settings.ai_drivers;
@@ -1675,6 +1695,54 @@ fn ai_driver_rows(app: &App, rows: &[crate::ai_drivers::OptionRow]) -> Vec<(Stri
             (row(r.label, 'v', &r.unit.text(v), r.desc, Some(frac)), id)
         })
         .collect()
+}
+
+/// The action that switches the advanced settings on (a page's button, a search's).
+pub(crate) const ADVANCED_ON: &str = "advanced_on";
+
+/// Rows of the other settings pages that are advanced: shown only with the advanced
+/// settings on (by their action).
+const ADVANCED_IDS: &[&str] = &["sel shadow_casters", "sel texture_memory", "texture_compression", "sel min_obj_size", "sel max_obj_dist", "led_glow", "led_mips", "steer_look_response"];
+
+/// A row (by its action) of the advanced settings: the AI drivers' thresholds and timings,
+/// and the technical ones of the other pages.
+pub(crate) fn is_advanced(id: &str) -> bool {
+    match id.strip_prefix("aid:") {
+        Some(name) => crate::ai_drivers::option_row(name).is_some_and(|r| r.advanced),
+        None => ADVANCED_IDS.contains(&id),
+    }
+}
+
+/// A page's rows as shown: without the advanced settings (unless `advanced`), and a
+/// heading left with nothing under it; then, when some were left out, a button that shows
+/// them.
+pub(crate) fn hide_advanced(rows: Vec<(String, String)>, advanced: bool) -> Vec<(String, String)> {
+    if advanced {
+        return rows;
+    }
+    let hidden = rows.iter().filter(|r| is_advanced(&r.1)).count();
+    let kept: Vec<(String, String)> = rows.into_iter().filter(|r| !is_advanced(&r.1)).collect();
+    let mut out: Vec<(String, String)> = Vec::with_capacity(kept.len() + 2);
+    for (i, r) in kept.iter().enumerate() {
+        let heading = r.1 == HEADING;
+        if heading && kept.get(i + 1).is_none_or(|n| n.1 == HEADING) {
+            continue;
+        }
+        out.push(r.clone());
+    }
+    if hidden > 0 {
+        out.push((row("Advanced settings", 'i', "", "", None), HEADING.to_string()));
+        let what = if hidden == 1 { "1 more setting on this page".to_string() } else { format!("{hidden} more settings on this page") };
+        out.push((row("Show the advanced settings", 'a', "Show", &what, None), ADVANCED_ON.to_string()));
+    }
+    out
+}
+
+/// Switch the advanced settings on or off, keep it, and show the window again.
+pub(crate) fn set_advanced(app: &mut App, on: bool) {
+    app.settings.advanced_settings = on;
+    remember_setting("advanced_settings", if on { "1" } else { "0" });
+    LIST_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The name of the weather in force (the file's name without its ending).
@@ -2204,6 +2272,7 @@ fn options_pages(app: &App) -> Vec<Page> {
     let interface: Vec<(String, String)> = vec![
         pick("language", "Language", "The language of the game's interface"),
         switch_row(app, "machine_translation", "Translate the remaining texts automatically (offline, downloads 620 MB once)", "Translates texts nobody has translated, on this machine"),
+        switch_row(app, "advanced", "Advanced settings", "Shows the detailed settings too: the AI traffic's thresholds and timings, and technical options"),
         slider_row(app, "ui_scale", "Game interface size", "The size of the texts, the menu, the timetable and the navigator", &pct),
         switch_row(app, "ui_scale_window", "Interface grows with the window", "On a window taller than 1080p the interface grows with it"),
         slider_row(app, "ui_opacity", "Interface opacity", "How much of the interface's backgrounds shows", &pct),
@@ -2733,6 +2802,19 @@ mod tests {
         let file = serde_json::json!({ "anisotropy": 16 });
         let (options, at, _) = super::select_state(&file, "anisotropy");
         assert_eq!(at.map(|i| options[i]), Some(("16", "16x")));
+    }
+
+    #[test]
+    fn advanced_rows_hide_with_their_empty_headings() {
+        use super::{hide_advanced, row, ADVANCED_ON, HEADING};
+        let h = |n: &str| (row(n, 'i', "", "", None), HEADING.to_string());
+        let r = |id: &str| (row(id, 's', "on", "", None), id.to_string());
+        let rows = vec![h("A"), r("aid:enabled"), h("B"), r("aid:bright_min"), r("aid:bright_max"), h("C"), r("aid:rear_fog"), r("sel texture_memory")];
+        let shown = hide_advanced(rows.clone(), false);
+        let ids: Vec<&str> = shown.iter().map(|x| x.1.as_str()).collect();
+        assert_eq!(ids, [HEADING, "aid:enabled", HEADING, "aid:rear_fog", HEADING, ADVANCED_ON]);
+        assert!(shown.last().unwrap().0.contains("3 more"));
+        assert_eq!(hide_advanced(rows.clone(), true), rows);
     }
 
     #[test]

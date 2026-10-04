@@ -3544,6 +3544,12 @@ pub fn ibis_stop_index(hof: &omsi_vehicle::Hof, route: usize, name: &str, k: usi
         .min_by_key(|i| i.abs_diff(k))
 }
 
+/// The name of the next stop of the player's duty (none past the last, or off a trip).
+pub(crate) fn next_stop_name(d: &PlayerDuty) -> Option<String> {
+    let trip = d.trips.get(d.trip_index)?;
+    trip.stops.get(d.next_stop).map(|s| s.name.trim().to_string()).filter(|n| !n.is_empty())
+}
+
 /// The player's tour: its trips with planned stop times, and the progress along them.
 pub struct PlayerDuty {
     pub line: String,

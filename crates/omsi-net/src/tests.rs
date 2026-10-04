@@ -76,8 +76,9 @@ fn info_carries_the_freetex_pictures_and_an_older_info_has_none() {
     let q = Pose::decode_info(&text.split('|').collect::<Vec<_>>()).unwrap();
     assert_eq!(q.freetex, p.freetex);
     assert_eq!(q.texts, p.texts);
-    // an older game's INFO ends with the figure: no pictures, everything else as before
-    let older = text.rsplit_once('|').unwrap().0;
+    // an older game's INFO ends with the figure: no pictures (and no next stop), everything
+    // else as before
+    let older = text.rsplitn(3, '|').last().unwrap();
     let q = Pose::decode_info(&older.split('|').collect::<Vec<_>>()).unwrap();
     assert!(q.freetex.is_empty());
     assert_eq!(q.texts, p.texts);
@@ -86,6 +87,26 @@ fn info_carries_the_freetex_pictures_and_an_older_info_has_none() {
     p.bus = format!("Vehicles/{}/{}.bus", "Ü".repeat(60), "b".repeat(120));
     p.texts = (0..MAX_TEXTS).map(|k| format!("{k}ß{}", "ñ".repeat(40))).collect();
     assert!(p.encode_info().len() <= MAX_DATAGRAM);
+}
+
+#[test]
+fn info_carries_the_next_stop_and_an_older_info_has_none() {
+    let mut p = pose(1.5);
+    p.freetex = vec![r"..\Rollband\17.tga".into()];
+    p.next_stop = "Lichtentanne, Freiheit".into();
+    let text = p.encode_info();
+    let q = Pose::decode_info(&text.split('|').collect::<Vec<_>>()).unwrap();
+    assert_eq!(q.next_stop, p.next_stop);
+    assert_eq!(q.freetex, p.freetex);
+    // an INFO without it (an older game's): empty, the rest as it was
+    let older = text.rsplit_once('|').unwrap().0;
+    let q = Pose::decode_info(&older.split('|').collect::<Vec<_>>()).unwrap();
+    assert!(q.next_stop.is_empty());
+    assert_eq!(q.freetex, p.freetex);
+    // a stop name with the separator in it does not spill into another field
+    p.next_stop = "A|B".into();
+    let q = Pose::decode_info(&p.encode_info().split('|').collect::<Vec<_>>()).unwrap();
+    assert!(!q.next_stop.contains('|'));
 }
 
 #[test]

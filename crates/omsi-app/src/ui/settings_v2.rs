@@ -118,11 +118,27 @@ impl Ui {
         self.text.rounded(r, scene, close, b * 0.5, super::mix(SURFACE_2, HOVER, a_close));
         self.icon_at(r, scene, "close", 20.0 * s, super::mix(TEXT_2, TEXT, a_close), (close[0] + close[2]) * 0.5, head_cy);
         self.menu_close_rect = Some(close);
+        // the switch of the advanced settings, left of X
+        let adv_label = omsi_ui::tr("Advanced").into_owned();
+        let aw = self.text.width(&adv_label, T_SMALL * s) + 66.0 * s;
+        let adv = [close[0] - 10.0 * s - aw, head_cy - 15.0 * s, close[0] - 10.0 * s, head_cy + 15.0 * s];
+        let a_adv = self.easeq((80, "advanced", 0), if over(adv) { 1.0 } else { 0.0 }, 1.0 / FADE);
+        self.text.rounded(r, scene, adv, 15.0 * s, super::mix(SURFACE_2, HOVER, a_adv));
+        let t_adv = self.ease((81, "advanced", 0), if f.menu_advanced { 1.0 } else { 0.0 }, 1.0 / FADE);
+        self.icon_at(r, scene, "tune", 16.0 * s, if f.menu_advanced { TEXT_ACCENT } else { TEXT_3 }, adv[0] + 16.0 * s, head_cy);
+        self.put(r, scene, &adv_label, (T_SMALL * s) as u32, if f.menu_advanced { TEXT } else { TEXT_2 }, adv[0] + 30.0 * s, head_cy);
+        let (tw, th) = (28.0 * s, 16.0 * s);
+        let tx = adv[2] - 8.0 * s - tw;
+        self.text.rounded(r, scene, [tx, head_cy - th * 0.5, tx + tw, head_cy + th * 0.5], th * 0.5, super::mix(TRACK, ACCENT, super::quant(t_adv)));
+        let kn = th - 4.0 * s;
+        let kx = tx + 2.0 * s + (tw - kn - 4.0 * s) * t_adv;
+        self.text.rounded(r, scene, [kx, head_cy - kn * 0.5, kx + kn, head_cy + kn * 0.5], kn * 0.5, KNOB);
+        self.menu_adv_rect = Some(adv);
         let title = match f.menu_head.as_ref() {
             Some((t, _)) => t.clone(),
             None => "Options".to_string(),
         };
-        self.put_bold(r, scene, &title, T_TITLE * s, TEXT, back[2] + 12.0 * s, head_cy, close[0] - back[2] - 24.0 * s);
+        self.put_bold(r, scene, &title, T_TITLE * s, TEXT, back[2] + 12.0 * s, head_cy, adv[0] - back[2] - 24.0 * s);
 
         // the search field
         let sy0 = y0 + HEADER_H * s;

@@ -146,6 +146,8 @@ pub(crate) struct App {
     /// What is typed into the settings window's search field (None: no search; empty: the
     /// field has the keys, nothing typed yet). See `game_lists::search_items`.
     pub(crate) menu_search: Option<String>,
+    /// The players list's streets: by player (0 ourselves), when looked up and the name.
+    pub(crate) hud_places: hashbrown::HashMap<u32, (f32, String)>,
     /// The vehicle being chosen in "Place a vehicle" takes the place of the one driven
     /// (the game menu's "Swap for another vehicle", #728).
     pub(crate) swap_pending: bool,

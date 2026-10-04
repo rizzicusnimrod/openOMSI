@@ -636,6 +636,7 @@ impl App {
             riders: self.humans.as_ref().map(|h| h.riding()).unwrap_or(0),
             clock: Some(&self.clock),
             tour: self.duty.as_ref().map(|d| format!("{}/{}", d.line, d.tour)),
+            next_stop: self.duty.as_ref().and_then(crate::schedule::next_stop_name),
             walker,
             inside_of: self.inside_remote,
         };
@@ -4416,6 +4417,87 @@ impl crate::App {
     }
 
     /// Whether line `k` of the game menu is greyed out.
+    /// The players list at the top right of a LAN session or server: ourselves first, then
+    /// the others by name - what they drive, their line and next stop (else where they are
+    /// bound), the street they are on, and how far from us. None when playing alone.
+    pub(crate) fn players_hud(&mut self) -> Option<Vec<crate::ui::PlayerRow>> {
+        if self.lan.is_none() && !crate::input_script::on_server(&self.args) {
+            return None;
+        }
+        let lan = self.lan.as_ref()?;
+        let now = self.started.elapsed().as_secs_f32();
+        let me_pos = self.on_foot.as_ref().map(|f| f.pos).or(self.player.as_ref().map(|p| p.vehicle.position));
+        // (who is where, as names of streets: looked up again every two seconds)
+        let mut wanted: Vec<(u32, glam::DVec3)> = Vec::new();
+        if let Some(p) = me_pos {
+            wanted.push((0, p));
+        }
+        let peers: Vec<omsi_net::Pose> = lan.peers().filter(|p| p.has_info || p.has_pose).map(|p| p.pose.clone()).collect();
+        let pos_of = |pose: &omsi_net::Pose| match pose.walker.as_ref() {
+            Some(w) => glam::DVec3::new(w.x, w.y, w.z),
+            None => glam::DVec3::new(pose.x, pose.y, pose.z),
+        };
+        for pose in &peers {
+            wanted.push((pose.id.max(1), pos_of(pose)));
+        }
+        for (id, p) in wanted {
+            let stale = self.hud_places.get(&id).is_none_or(|(t, _)| now - t > 2.0);
+            if stale {
+                let place = self.navigator.as_ref().and_then(|n| n.street_at(p, 80.0)).unwrap_or_default();
+                self.hud_places.insert(id, (now, place));
+            }
+        }
+        let place = |id: u32| self.hud_places.get(&id).map(|x| x.1.clone()).unwrap_or_default();
+        let lan = self.lan.as_ref()?;
+        let mut rows = Vec::new();
+        // ourselves
+        let my_bus = match (self.player.as_ref(), self.on_foot.is_some()) {
+            (_, true) => omsi_ui::tr("On foot").into_owned(),
+            (Some(p), _) => {
+                let d = &p.vehicle.ty.def;
+                format!("{} {}", d.manufacturer.trim(), d.type_name.trim()).trim().to_string()
+            }
+            (None, _) => String::new(),
+        };
+        let (my_line, my_next) = match self.duty.as_ref() {
+            Some(d) => {
+                let trip = d.trips.get(d.trip_index);
+                let line = trip.map(|t| t.line.trim()).filter(|l| !l.is_empty()).unwrap_or(d.line.trim()).to_string();
+                let next = crate::schedule::next_stop_name(d).or_else(|| trip.map(|t| format!("→ {}", t.terminus.trim()))).unwrap_or_default();
+                (line, next)
+            }
+            None => (String::new(), String::new()),
+        };
+        let my_name = if lan.my_name.trim().is_empty() { crate::lan::player_name(&self.args) } else { lan.my_name.clone() };
+        rows.push(crate::ui::PlayerRow { name: my_name, me: true, bus: my_bus, line: my_line, next: my_next, place: place(0), distance: None });
+        // the others
+        let mut others: Vec<crate::ui::PlayerRow> = peers
+            .iter()
+            .filter(|pose| pose.id != lan.my_id)
+            .map(|pose| {
+                let bus = if pose.walker.is_some() && pose.walker.as_ref().is_none_or(|w| w.aboard.is_none()) && pose.bus.is_empty() {
+                    omsi_ui::tr("On foot").into_owned()
+                } else {
+                    self.remotes.remotes.get(&pose.id).map(|r| r.bus_label()).unwrap_or_else(|| crate::lan::vehicle_file_label(&pose.bus))
+                };
+                let line = if !pose.line.trim().is_empty() { pose.line.trim().to_string() } else { pose.tour.split_once('/').map(|(l, _)| l.trim().to_string()).unwrap_or_default() };
+                let next = if !pose.next_stop.trim().is_empty() {
+                    pose.next_stop.trim().to_string()
+                } else if !pose.destination.trim().is_empty() {
+                    format!("→ {}", pose.destination.trim())
+                } else {
+                    String::new()
+                };
+                let name = if pose.name.trim().is_empty() { format!("{} {}", omsi_ui::tr("Player"), pose.id) } else { pose.name.trim().to_string() };
+                let distance = me_pos.map(|m| (pos_of(pose) - m).truncate().length() as f32);
+                crate::ui::PlayerRow { name, me: false, bus, line, next, place: place(pose.id.max(1)), distance }
+            })
+            .collect();
+        others.sort_by_key(|r| r.name.to_lowercase());
+        rows.extend(others);
+        Some(rows)
+    }
+
     /// What the game menu says at its top: the vehicle driven (or how one is about), and
     /// chips for the map, the line and tour with the delay, and the time of day.
     pub(crate) fn menu_status(&self) -> crate::ui::MenuStatus {

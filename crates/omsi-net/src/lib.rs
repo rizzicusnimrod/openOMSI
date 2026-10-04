@@ -840,6 +840,9 @@ pub struct Pose {
     pub destination: String,
     /// The timetable tour the player drives, `<line>/<tour>` (empty for none).
     pub tour: String,
+    /// The next stop of that tour (empty for none, or from a game that does not say it):
+    /// what the others' players list shows.
+    pub next_stop: String,
     /// What the vehicle's `[texttexture]` displays show (their string variables, in the
     /// model's order), so another player's bus shows the same destination and line signs
     /// rather than what its depot file makes of the line and terminus names.
@@ -954,10 +957,11 @@ impl Pose {
         // the others never learnt which bus the player drove)
         let room = MAX_DATAGRAM.saturating_sub(head.len() + figure.len() + 1);
         let info = format!("{head}{}|{figure}", encode_texts(&self.texts, MAX_TEXTS, MAX_TEXT_LEN, room));
-        // the `[matl_freetex]` pictures last, in what room is left (an older game reads the
-        // fields it knows and passes this one by)
-        let room = MAX_DATAGRAM.saturating_sub(info.len() + 1);
-        format!("{info}|{}", encode_texts(&self.freetex, MAX_FREETEX, MAX_FREETEX_LEN, room))
+        // the `[matl_freetex]` pictures in what room is left, then the next stop (an older
+        // game reads the fields it knows and passes the newer ones by)
+        let next = clean_text(&self.next_stop, MAX_FIELD);
+        let room = MAX_DATAGRAM.saturating_sub(info.len() + 2 + next.len());
+        format!("{info}|{}|{next}", encode_texts(&self.freetex, MAX_FREETEX, MAX_FREETEX_LEN, room))
     }
 
     /// The info fields of an `INFO` message (checked and cleaned), or None.
@@ -987,6 +991,7 @@ impl Pose {
             texts: parts.get(12).map(|t| decode_texts(t, MAX_TEXTS, MAX_TEXT_LEN)).unwrap_or_default(),
             figure: parts.get(13).and_then(|f| human_path(f)).unwrap_or_default(),
             freetex: parts.get(14).map(|t| decode_texts(t, MAX_FREETEX, MAX_FREETEX_LEN)).unwrap_or_default(),
+            next_stop: parts.get(15).map(|t| clean_text(t, MAX_FIELD)).unwrap_or_default(),
             ..Default::default()
         })
     }
@@ -999,6 +1004,7 @@ impl Pose {
         self.line = info.line.clone();
         self.destination = info.destination.clone();
         self.tour = info.tour.clone();
+        self.next_stop = info.next_stop.clone();
         self.texts = info.texts.clone();
         self.freetex = info.freetex.clone();
         self.figure = info.figure.clone();
@@ -1019,6 +1025,7 @@ impl Pose {
             line: keep.line,
             destination: keep.destination,
             tour: keep.tour,
+            next_stop: keep.next_stop,
             texts: keep.texts,
             freetex: keep.freetex,
             figure: keep.figure,

@@ -12,6 +12,7 @@ use omsi_render::{Renderer, Scene, TextureId};
 // the custom fork's look: its colours and sizes, and the settings windows drawn in it
 mod kit;
 mod pause_v2;
+mod players_hud;
 mod settings_v2;
 mod theme;
 
@@ -482,6 +483,28 @@ pub struct Frame<'a> {
     pub menu_search: Option<&'a str>,
     /// What the game menu says at its top about the session.
     pub menu_status: Option<MenuStatus>,
+    /// The settings windows show the advanced settings (the switch in their header).
+    pub menu_advanced: bool,
+    /// The players of a LAN session or server, ourselves first (none: playing alone).
+    pub players: Option<Vec<PlayerRow>>,
+}
+
+/// A line of the players list of a LAN session or server (top right).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerRow {
+    pub name: String,
+    /// This is us.
+    pub me: bool,
+    /// What they drive ("On foot" for a walker).
+    pub bus: String,
+    /// The line they drive (empty: none).
+    pub line: String,
+    /// Their next stop, else where their bus is bound (empty: neither known).
+    pub next: String,
+    /// The street they are on (empty: not known).
+    pub place: String,
+    /// How far from us (m); none for ourselves.
+    pub distance: Option<f32>,
 }
 
 /// The game menu's head: what is driven, and chips of (Material icon, text) - the map, the
@@ -553,6 +576,8 @@ pub struct Ui {
     pub menu_search_rect: Option<[f32; 4]>,
     /// The settings window's X: back to the game.
     pub menu_close_rect: Option<[f32; 4]>,
+    /// The settings window's switch for the advanced settings.
+    pub menu_adv_rect: Option<[f32; 4]>,
     /// The game menu is drawn as tiles: the keys move between them by where they are.
     pub menu_grid: bool,
 }
@@ -634,7 +659,7 @@ impl Ui {
         self.chat.rect[2] += x;
     }
     pub fn new() -> Option<Ui> {
-        Some(Ui { origin_x: 0.0, text: TextCache::new()?, chat: ChatWidget::default(), menu_rects: Vec::new(), menu_arrows: Vec::new(), menu_scroll_thumb: None, menu_scroll_track: None, menu_ctl: Vec::new(), dd_rects: Vec::new(), dd_top: 0, dd_rows: 8, dd_scroll: None, menu_side: Vec::new(), menu_pane: Vec::new(), menu_pane_start: 0, menu_pane_go: None, menu_pane_box: None, menu_pane_scroll: None, menu_time: Vec::new(), anim: Default::default(), anim_dt: 0.0, menu_overlay_range: 0..0, vr_cursor_overlay: None, vr_tooltip_overlay: None, menu_start: 0, menu_rows: 0, menu_row_h: 1.0, images: Default::default(), info_rect: None, menu_search_rect: None, menu_close_rect: None, menu_grid: false })
+        Some(Ui { origin_x: 0.0, text: TextCache::new()?, chat: ChatWidget::default(), menu_rects: Vec::new(), menu_arrows: Vec::new(), menu_scroll_thumb: None, menu_scroll_track: None, menu_ctl: Vec::new(), dd_rects: Vec::new(), dd_top: 0, dd_rows: 8, dd_scroll: None, menu_side: Vec::new(), menu_pane: Vec::new(), menu_pane_start: 0, menu_pane_go: None, menu_pane_box: None, menu_pane_scroll: None, menu_time: Vec::new(), anim: Default::default(), anim_dt: 0.0, menu_overlay_range: 0..0, vr_cursor_overlay: None, vr_tooltip_overlay: None, menu_start: 0, menu_rows: 0, menu_row_h: 1.0, images: Default::default(), info_rect: None, menu_search_rect: None, menu_close_rect: None, menu_adv_rect: None, menu_grid: false })
     }
 
     /// Draw the frame's interface: its overlays go after the HUD's in `scene.overlays`.
@@ -941,6 +966,15 @@ impl Ui {
             let plate = self.text.plate(r, scene, 3);
             scene.overlays.push((plate, [x, top, x + w, y]));
             scene.overlays.extend(items);
+        }
+        // --- the players of a LAN session or server, top right (under the frame rate and the
+        // information bar where they are there; not while a menu is open)
+        if let Some(players) = f.players.as_ref().filter(|_| f.menu.is_none()) {
+            let mut top = if f.fps.is_some() { 40.0 * s } else { 12.0 * s };
+            if let Some(info) = self.info_rect.filter(|r| r[2] > f.width - 360.0 * s) {
+                top = top.max(info[3] + 8.0 * s);
+            }
+            self.draw_players_hud(r, scene, f, players, top);
         }
         // --- the game menu and its lists, in the middle over a dimmed picture
         self.anim_dt = dt.clamp(0.0, 0.1);
@@ -1478,6 +1512,7 @@ impl Ui {
         self.dd_scroll = None;
         self.menu_search_rect = None;
         self.menu_close_rect = None;
+        self.menu_adv_rect = None;
         self.menu_grid = false;
         let overlay_start = scene.overlays.len();
         let Some((sel, items)) = f.menu else {

@@ -1982,6 +1982,8 @@ impl ApplicationHandler for App {
                 };
                 // (what the game menu says at its top about the session)
                 let menu_status = (self.game_menu.is_some() && self.chooser.is_none()).then(|| self.menu_status());
+                // (the players of a LAN session or server, for the list at the top right)
+                let players = self.players_hud();
                 if let (true, Some(r), Some(scene)) = (
                     self.world.is_some(),
                     self.renderer.as_ref(),
@@ -2262,6 +2264,8 @@ impl ApplicationHandler for App {
                             dropdown,
                             menu_search: self.menu_search.as_deref().filter(|_| crate::game_lists::is_settings(self.list_kind.as_ref())),
                             menu_status,
+                            menu_advanced: self.settings.advanced_settings,
+                            players,
                             menu_kbd: self.menu_kbd,
                             menu_top: self.menu_top,
                             // (not over the city map, which has the stops and their times: it
@@ -3067,6 +3071,14 @@ impl App {
                         self.menu_scroll_drag = true;
                         return;
                     }
+                }
+
+                // The switch of the advanced settings in a settings window's header.
+                if self.chooser.is_some() && self.ui.as_ref().and_then(|u| u.menu_adv_rect).is_some_and(|r| self.cursor.0 >= r[0] && self.cursor.0 <= r[2] && self.cursor.1 >= r[1] && self.cursor.1 <= r[3]) {
+                    let on = !self.settings.advanced_settings;
+                    crate::game_lists::set_advanced(self, on);
+                    self.refresh_list();
+                    return;
                 }
 
                 // The X of a settings window: back to the game.
