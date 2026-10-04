@@ -1230,7 +1230,7 @@ impl VehicleInstance {
         };
         VehicleInstance {
             a_trans: OmsiFrames::default(),
-            particles: ParticleSet::new(ty.model.particle_systems(), std::ptr::addr_of!(host) as u64 ^ 0x9e37_79b9).with_amount(crate::particles::vehicle_amount()),
+            particles: ParticleSet::new(ty.model.particle_systems(), std::ptr::addr_of!(host) as u64 ^ 0x9e37_79b9).for_vehicle(),
             light_fade: Vec::new(),
             v_springfactor,
             rest_sag,
@@ -3535,7 +3535,7 @@ impl TrailerPart {
             })
             .collect();
         TrailerPart {
-            particles: ParticleSet::new(ty.model.particle_systems(), first_axle as u64 * 7919 + 17).with_amount(crate::particles::vehicle_amount()),
+            particles: ParticleSet::new(ty.model.particle_systems(), first_axle as u64 * 7919 + 17).for_vehicle(),
             light_fade: Vec::new(),
             rest,
             v_brakes,

@@ -833,7 +833,7 @@ fn steps_of(verb: &str) -> Option<Vec<f32>> {
         "led_mips" => (0..=80).map(|v| v as f32 * 0.05).collect(),
         "ui_scale" => (10..=40).map(|v| v as f32 * 0.05).collect(),
         "ui_opacity" => (4..=20).map(|v| v as f32 * 0.05).collect(),
-        "vol_ai" | "vol_scenery" => (0..=20).map(|v| v as f32 * 0.05).collect(),
+        "vol_ai" | "vol_scenery" | "exhaust" => (0..=20).map(|v| v as f32 * 0.05).collect(),
         "wheel_range" => (6..=60).map(|v| v as f32 * 30.0).collect(),
         "wheel_lock" => std::iter::once(0.0).chain((2..=60).map(|v| v as f32 * 30.0)).collect(),
         "fov" => std::iter::once(0.0).chain((20..=120).map(|v| v as f32)).collect(),
@@ -969,6 +969,7 @@ fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
         "ui_scale" => s.ui_scale,
         "ui_opacity" => s.ui_opacity,
         "vol_ai" => s.vol_ai,
+        "exhaust" => s.exhaust,
         "vol_scenery" => s.vol_scenery,
         "wheel_range" => s.wheel_range,
         "wheel_lock" => s.wheel_lock,
@@ -1062,6 +1063,11 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
         "ui_opacity" => {
             app.settings.ui_opacity = (v * 100.0).round() / 100.0;
             Some(("ui_opacity", app.settings.ui_opacity.to_string()))
+        }
+        "exhaust" => {
+            app.settings.exhaust = (v * 100.0).round() / 100.0;
+            omsi_sim::particles::set_vehicle_amount(app.settings.exhaust);
+            Some(("exhaust", format!("{:.0}", app.settings.exhaust * 100.0)))
         }
         "vol_ai" => {
             app.settings.vol_ai = (v * 100.0).round() / 100.0;
@@ -1874,6 +1880,7 @@ fn reload_settings(app: &mut App) {
 fn sync_live(app: &mut App) {
     let s = &app.settings;
     crate::startup::SOUND_AI.store(s.vol_ai.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    omsi_sim::particles::set_vehicle_amount(s.exhaust);
     crate::startup::SOUND_SCENERY.store(s.vol_scenery.to_bits(), std::sync::atomic::Ordering::Relaxed);
     omsi_audio::DOPPLER.store(s.doppler, std::sync::atomic::Ordering::Relaxed);
     if let Some(n) = app.navigator.as_mut() {
@@ -2011,6 +2018,7 @@ fn options_pages(app: &App) -> Vec<Page> {
         switch_row(app, "vsync", "V-sync", "Waits for the screen's refresh"),
         pick("max_fps", "Frame limit", "Frames a second at most"),
         switch_row(app, "fps", "Frame rate", "Show the frames per second in the top right corner"),
+        slider_row(app, "exhaust", "Vehicle smoke", "How much exhaust, steam and spray the vehicles make", &pct),
         pick("view_distance", "View distance", later),
         pick("max_obj_dist", "Object distance", later),
         pick("min_obj_size", "Small objects", later),

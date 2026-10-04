@@ -103,6 +103,8 @@ pub struct ParticleSet {
     rng: u64,
     /// How much of it is sent off (see `with_amount`; none: all).
     amount: Option<f32>,
+    /// A vehicle's: as much as the `exhaust` setting says, as it says it now.
+    vehicle: bool,
 }
 
 fn eval(v: &PsValue, value: &dyn Fn(&str) -> f32) -> f32 {
@@ -121,7 +123,15 @@ impl ParticleSet {
                 .collect(),
             rng: seed | 1,
             amount: None,
+            vehicle: false,
         }
+    }
+
+    /// A vehicle's set: it sends off `vehicle_amount` of its particles, whatever that is at
+    /// the time (the options' slider changes it while the game runs).
+    pub fn for_vehicle(mut self) -> ParticleSet {
+        self.vehicle = true;
+        self
     }
 
     /// Send off only `k` of the particles (0.67 = two thirds; bursts as many fewer).
@@ -199,7 +209,7 @@ impl ParticleSet {
             // where new particles start: the emitter itself, or the particles of the one it
             // is attached to - and the ground under them: the owner's under the emitter, a
             // parent particle's own
-            let k = self.amount.unwrap_or(1.0);
+            let k = if self.vehicle { vehicle_amount() } else { self.amount.unwrap_or(1.0) };
             let freq = eval(&def.freq.0, value).max(0.0) * k;
             let mut sources: Vec<(DVec3, Vec3, f64)> = Vec::new();
             let mut burst_sources: Vec<(DVec3, Vec3, f64)> = Vec::new();
