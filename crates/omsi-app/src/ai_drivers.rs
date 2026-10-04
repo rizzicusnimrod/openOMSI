@@ -68,6 +68,10 @@ pub struct Config {
     /// Drivers who honk twice after an emergency stop (braking at `angry_decel` m/s²).
     pub angry: f32,
     pub angry_decel: f32,
+    /// Tyres screeching when a car brakes at `screech_decel` m/s² or harder (an emergency
+    /// stop; `traffic::Traffic::update_audio`).
+    pub screech: bool,
+    pub screech_decel: f32,
     /// The bad habits (all off when `flaws` is false): never indicating; leaving the
     /// indicator on after a turn (`forget_chance` of the turns, for 15-60 s); forgetting the
     /// lights until it is really dark (`nolights_bright`); the rear fog lamp in rain and at
@@ -126,6 +130,8 @@ impl Default for Config {
             honk_max: 3,
             angry: 0.3,
             angry_decel: 6.0,
+            screech: true,
+            screech_decel: 7.0,
             flaws: true,
             no_indicator: 0.05,
             forget_indicator: 0.05,
@@ -236,6 +242,7 @@ config_fields! {
     hazard: share, hazard_decel: num, hazard_speed: num, hazard_hold_min: num, hazard_hold_max: num,
     honk: share, patience_min: num, patience_max: num, honk_repeat_min: num, honk_repeat_max: num, honk_max: count,
     angry: share, angry_decel: num,
+    screech: switch, screech_decel: num,
     flaws: switch,
     no_indicator: share, forget_indicator: share, forget_chance: share, forget_min: num, forget_max: num,
     no_lights: share, no_lights_bright_min: num, no_lights_bright_max: num,
@@ -360,7 +367,7 @@ pub const OPTION_PAGES: &[(&str, &[OptionRow])] = {
         ("AI hazards & horn", &[
             heading("Hazard lights", "Braking hard, e.g. at the end of a jam"),
             row("hazard", "Drivers who use them", "Share of the drivers who put the hazards on when braking hard", Percent, 0.0, 1.0, 0.05),
-            adv("hazard_decel", "Braking that counts as hard", "Normal braking is 2-3 m/s², an emergency up to 8", Accel, 2.0, 9.0, 0.5),
+            adv("hazard_decel", "Braking that counts as hard", "Normal braking is 2-3 m/s², an emergency up to 9.5", Accel, 2.0, 9.0, 0.5),
             adv("hazard_speed", "Only from a speed of", "Slower than this, nobody puts them on", Kmh, 0.0, 120.0, 5.0),
             adv("hazard_hold_min", "On after the stop for at least", "Seconds (each driver their own; off when they drive off)", Seconds, 0.0, 30.0, 1.0),
             adv("hazard_hold_max", "On after the stop for at most", "Seconds", Seconds, 0.0, 30.0, 1.0),
@@ -374,6 +381,9 @@ pub const OPTION_PAGES: &[(&str, &[OptionRow])] = {
             heading("Honking when cut off", "Two toots after an emergency stop"),
             row("angry", "Drivers who honk", "Share of the drivers", Percent, 0.0, 1.0, 0.05),
             adv("angry_decel", "Braking that makes them honk", "m/s², from 20 km/h or more", Accel, 3.0, 9.0, 0.5),
+            heading("Screeching tyres", "Heard when a car has to stop for an emergency"),
+            switch("screech", "Screeching tyres", "Tyres squeal when a car or lorry brakes really hard"),
+            adv("screech_decel", "Braking that makes them squeal", "m/s²: normal braking is 2-3, an emergency up to 9.5", Accel, 4.0, 9.5, 0.5),
         ]),
         ("AI driver habits", &[
             switch("flaws", "Imperfect drivers", "Some drivers have one of the bad habits below (off: none of them)"),

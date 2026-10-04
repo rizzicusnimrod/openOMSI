@@ -87,7 +87,7 @@ pub fn page_meta(title: &str) -> (&'static str, &'static str) {
         "Display & performance" => ("monitor", "Window, frame rate, how far you see and memory"),
         "Gameplay" => ("sports_esports", "The map, collisions, passengers and the traffic's size"),
         "AI lights" => ("light", "When the other drivers switch their headlights and rear fog lamp on"),
-        "AI hazards & horn" => ("warning", "Hazard lights when braking hard, honking when stuck or cut off"),
+        "AI hazards & horn" => ("warning", "Hazard lights and screeching tyres when braking hard, honking when stuck or cut off"),
         "AI driver habits" => ("person", "The small mistakes some drivers make"),
         "AI two-stroke smoke" => ("air", "Trabants and Wartburgs and their blue cloud"),
         "Graphics" => ("palette", "Quality, lighting and shadows, detail and smoke"),

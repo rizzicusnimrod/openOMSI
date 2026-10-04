@@ -197,6 +197,10 @@ pub struct AiCar {
     /// ("lead", "light", "yield", "merge", "keep_back", "people", "pull_out", "service",
     /// "end", "" for none) and its distance ahead of the front (m).
     pub why: (&'static str, f32),
+    /// Its tyres screeching (`Traffic::update_audio`), and for how long it has braked at
+    /// least that hard (s).
+    screech: Option<omsi_audio::VoiceId>,
+    hard_brake: f32,
     /// Something made it wait this frame: a stop point, or a car or an obstacle close ahead.
     pub held: bool,
     /// The vehicle (by id) whose body stands in this car's way off its lanes this frame
@@ -579,6 +583,8 @@ pub struct Traffic {
     trailer_types: HashMap<std::path::PathBuf, Option<Arc<VehicleType>>>,
     /// `[sound_ai]` configurations by file.
     sound_cfgs: HashMap<std::path::PathBuf, Option<Arc<omsi_vehicle::SoundCfg>>>,
+    /// The tyre screech (`load_screech`), read the first time it is wanted.
+    screech_clip: Option<Option<Arc<omsi_audio::Clip>>>,
     root: std::path::PathBuf,
     /// Car-frames spent waiting for a red light (statistics).
     pub held_at_red: usize,
@@ -766,6 +772,22 @@ pub(crate) fn ibis_to_next_stop(v: &mut VehicleInstance, remaining: usize) {
 
 fn look_ahead(speed: f32) -> f32 {
     (speed * speed / 3.0 + speed * 2.0 + 20.0).clamp(LOOK_AHEAD, LOOK_AHEAD_MAX)
+}
+
+/// The tyre screech of an emergency stop: `Sound/tyre_screech.wav` in the game's folder or a
+/// mod's when there is one (anyone's own recording), else the one built into the game.
+fn load_screech() -> Option<Arc<omsi_audio::Clip>> {
+    for root in omsi_cfg::content_roots() {
+        let p = root.join("Sound").join("tyre_screech.wav");
+        if p.is_file() {
+            if let Some(clip) = omsi_audio::mixer::read_clip(&p) {
+                log::info!("tyre screech: {}", p.display());
+                return Some(clip);
+            }
+        }
+    }
+    let w = omsi_audio::wav::parse_wav(include_bytes!("../../../assets/sounds/tyre_screech.wav")).ok()?;
+    Some(Arc::new(omsi_audio::Clip { sample_rate: w.sample_rate, channels: w.channels, samples: w.samples }))
 }
 
 /// The speed (m/s) and the acceleration (m/s², smoothed over about a fifth of a second) of
@@ -1531,6 +1553,7 @@ impl Traffic {
             controller_of_object,
             trailer_types: HashMap::new(),
             sound_cfgs: HashMap::new(),
+            screech_clip: None,
             root: root.to_path_buf(),
             held_at_red: 0,
             stop_wishes: None,
@@ -3022,6 +3045,8 @@ impl Traffic {
             merge_after: None,
             holding: None,
             why: ("", 0.0),
+            screech: None,
+            hard_brake: 0.0,
             held: false,
             geo_block: None,
             lead_info: None,
@@ -6685,9 +6710,45 @@ impl Traffic {
         for mut s in self.orphan_sounds.drain(..) {
             s.stop_all(audio);
         }
+        let cfg = &self.driver_cfg;
+        let screech_at = (cfg.enabled && cfg.screech).then_some(cfg.screech_decel);
+        let screech_clip = match screech_at {
+            Some(_) => self.screech_clip.get_or_insert_with(load_screech).clone(),
+            None => None,
+        };
+        let (dt, ai_gain) = (self.last_dt, crate::sound_gain(&crate::SOUND_AI));
         let near = 250.0;
         for c in &mut self.cars {
             let d = (c.vehicle.position - listener).length();
+            // the tyres screeching in an emergency stop: braking that hard for a twentieth of
+            // a second at least (one frame of it is no skid), louder the faster the car, and
+            // quiet as soon as it is down to a crawl or eases off
+            let hard = c.body.kind == MotionKind::Road && c.state.speed > 3.0 && screech_at.is_some_and(|x| c.state.acc <= -x);
+            c.hard_brake = if hard { c.hard_brake + dt } else { 0.0 };
+            let skidding = c.state.acc <= -3.5 && c.state.speed > 0.8;
+            let params = omsi_audio::VoiceParams {
+                gain: (c.state.speed / 12.0).clamp(0.35, 1.0) * ai_gain * if muffled { 0.35 } else { 1.0 },
+                pitch: 0.92 + (c.seed % 7) as f32 * 0.025,
+                position: Some(c.vehicle.position.as_vec3()),
+                range: 14.0,
+                lowpass_hz: if muffled { 2500.0 } else { 0.0 },
+                ..Default::default()
+            };
+            match c.screech {
+                Some(id) if audio.is_playing(id) => {
+                    // (faded out rather than cut off: it runs out silent)
+                    audio.set_params(id, omsi_audio::VoiceParams { gain: if skidding { params.gain } else { 0.0 }, ..params });
+                    if !skidding {
+                        c.screech = None;
+                    }
+                }
+                _ => {
+                    c.screech = None;
+                    if let (true, true, Some(clip)) = (c.hard_brake >= 0.05, d < 200.0, &screech_clip) {
+                        c.screech = Some(audio.play(clip.clone(), params));
+                    }
+                }
+            }
             if d > near * 1.2 {
                 if let Some(mut s) = c.sounds.take() {
                     s.stop_all(audio);
@@ -7695,6 +7756,8 @@ impl Traffic {
             merge_after: None,
             holding: None,
             why: ("", 0.0),
+            screech: None,
+            hard_brake: 0.0,
             held: false,
             geo_block: None,
             lead_info: None,
@@ -7927,6 +7990,13 @@ mod group_density_tests {
 mod way_user_tests {
     use super::*;
     use omsi_sim::traffic::{Crossing, LaneBuilder};
+
+    #[test]
+    fn the_tyre_screech_is_built_in() {
+        let clip = load_screech().expect("decoded");
+        assert_eq!((clip.sample_rate, clip.channels), (44100, 1));
+        assert!(clip.frames() > 44100, "{} frames", clip.frames());
+    }
 
     #[test]
     fn the_car_behind_sees_the_bus_brake() {

@@ -86,6 +86,7 @@ pub const OPTIONS: &[PageDef] = &[
             sec("How quickly drivers react", &[ai("aid:on_delay_max"), ai("aid:off_delay_min"), ai("aid:off_delay_max")]),
             sec("Rear fog lamp", &[ai("aid:rear_fog"), ai("aid:rear_fog_m")]),
             sec("Hazard lights", &[ai("aid:hazard"), ai("aid:hazard_decel"), ai("aid:hazard_speed"), ai("aid:hazard_hold_min"), ai("aid:hazard_hold_max")]),
+            sec("Screeching tyres", &[ai("aid:screech"), ai("aid:screech_decel")]),
             sec("Horn", &[ai("aid:honk"), ai("aid:patience_min"), ai("aid:patience_max"), ai("aid:honk_repeat_min"), ai("aid:honk_repeat_max"), ai("aid:honk_max"), ai("aid:angry"), ai("aid:angry_decel")]),
             sec("Driver mistakes", &[
                 it("aid:flaws", "Drivers make mistakes", "A few drivers forget to indicate or switch on their lights, some cars have a broken bulb"),
