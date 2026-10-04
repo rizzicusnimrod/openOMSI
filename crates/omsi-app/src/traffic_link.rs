@@ -86,6 +86,7 @@ pub(crate) fn traffic_inputs(
         );
     }
     t.weekday = clock.weekday();
+    t.date = clock.date_code();
     t.walkers = humans.map(|h| h.strollers()).unwrap_or_default();
     t.people = humans.map(|h| h.on_foot()).unwrap_or_default();
     // the player's obstacle boxes follow the streamed tiles; without a player the world's

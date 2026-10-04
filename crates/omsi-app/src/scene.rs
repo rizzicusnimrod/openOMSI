@@ -9173,10 +9173,15 @@ impl World {
         (!list.is_empty()).then(|| list[(seed % list.len() as u64) as usize].clone())
     }
 
+    /// The map's `Holidays.txt` (empty without one), read the first time it is wanted.
+    pub fn calendar(&self) -> &omsi_map::Calendar {
+        self.calendar.get_or_init(|| omsi_map::Calendar::load(&self.map_dir.join("Holidays.txt")).unwrap_or_default())
+    }
+
     /// Working day, holiday and school holidays at `clock`'s date, from the map's
     /// `Holidays.txt`.
     pub fn day_kind(&self, clock: &omsi_sim::SimClock) -> DayKind {
-        let cal = self.calendar.get_or_init(|| omsi_map::Calendar::load(&self.map_dir.join("Holidays.txt")).unwrap_or_default());
+        let cal = self.calendar();
         let date = clock.date_code();
         DayKind { workday: clock.weekday() < 5, holiday: cal.is_holiday(date), school_holiday: cal.in_holiday_range(date) }
     }
