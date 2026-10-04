@@ -600,10 +600,11 @@ pub struct Traffic {
     pub time_scale: f64,
     /// Day of the week (0 Monday … 6 Sunday) for the traffic density curves.
     pub weekday: i32,
-    /// Today as YYYYMMDD: on the map's public holidays the traffic keeps Sunday's curves.
+    /// Today as YYYYMMDD: on the map's public holidays the traffic keeps Sunday's curves, in
+    /// the school holidays their own (`day_wants`).
     pub date: i32,
-    /// The map's public holidays (`Holidays.txt` `[holiday]`), YYYYMMDD.
-    holidays: Vec<i32>,
+    /// The map's `Holidays.txt`.
+    calendar: omsi_map::Calendar,
     /// The date whose day curves were last logged.
     logged_date: i32,
     /// Street lights on → AI vehicles switch their lights on.
@@ -1568,7 +1569,7 @@ impl Traffic {
             time_scale: 1.0,
             weekday: 0,
             date: 0,
-            holidays: world.calendar().holidays.iter().map(|h| h.date).collect(),
+            calendar: world.calendar().clone(),
             logged_date: 0,
             night: false,
             dark: false,
@@ -1853,6 +1854,11 @@ impl Traffic {
         (self.rand() >> 11) as f64 / (1u64 << 53) as f64
     }
 
+    /// The day curves today looks for (see `day_wants`).
+    fn day_wants(&self) -> &'static [i32] {
+        day_wants(self.weekday, self.calendar.is_holiday(self.date), self.calendar.in_holiday_range(self.date))
+    }
+
     /// How much traffic group `g` makes now: its `unsched_trafficdens.txt` factor times its
     /// curve for this day (see `day_curve`).
     fn group_density(&self, g: usize) -> f32 {
@@ -1862,10 +1868,9 @@ impl Traffic {
         if !self.group_curves {
             return 1.0;
         }
-        let holiday = self.holidays.contains(&self.date);
         let hour = (self.day_time.rem_euclid(86400.0) / 3600.0) as f32;
-        match day_curve(&gr.densities, self.weekday, holiday) {
-            Some(curve) => gr.factor * omsi_map::global::curve_at(curve, hour).max(0.0),
+        match day_curve(&gr.densities, self.day_wants()) {
+            Some((_, curve)) => gr.factor * omsi_map::global::curve_at(curve, hour).max(0.0),
             None => 0.0,
         }
     }
@@ -2287,15 +2292,14 @@ impl Traffic {
         let density = self.street_density();
         if self.group_curves && self.date != self.logged_date {
             self.logged_date = self.date;
-            let holiday = self.holidays.contains(&self.date);
-            let day = match self.weekday {
-                _ if holiday => "Sunday's (a public holiday)",
-                4 if self.groups.iter().any(|g| g.densities.iter().any(|(m, _)| m & FRIDAY != 0)) => "Friday's",
-                0..=4 => "Monday to Friday's",
-                5 => "Saturday's",
-                _ => "Sunday's",
-            };
-            log::info!("traffic: the day curves of {} are {day}, density now {density:.2}", self.date);
+            let wants = self.day_wants();
+            let day = self.groups.iter().filter_map(|g| day_curve(&g.densities, wants)).map(|(w, _)| w).next();
+            let holiday = if self.calendar.is_holiday(self.date) { " (a public holiday)" } else { "" };
+            log::info!(
+                "traffic: the day curves of {} are {}{holiday}, density now {density:.2}",
+                self.date,
+                day.map(day_name).unwrap_or("none")
+            );
         }
         // ... and so does how much road there is around: the same number of cars looks
         // empty on a six-lane Berlin junction and crowded on a village lane, so the count
@@ -7867,48 +7871,97 @@ fn in_player_box(p: DVec3, centre: DVec3, fwd: DVec2, right: DVec2, wide: f64, a
     x.abs() <= wide && y <= ahead && y >= -behind && (p.z - centre.z).abs() < 4.0
 }
 
-/// `[set_day_of_week]` of the fork for Fridays alone: on a Friday a curve that has it comes
-/// before the Monday-to-Friday one (Omsi.exe knows no such day and passes it by).
+/// `[set_day_of_week]`s of the fork's own, which Omsi.exe knows nothing of and passes by:
+/// Fridays alone, and Monday to Friday in the school holidays (`Holidays.txt` `[holidays]`);
+/// both together are the Fridays in the school holidays.
 const FRIDAY: i32 = 8;
+const SCHOOL_HOLIDAYS: i32 = 16;
+const FORK_DAYS: i32 = FRIDAY | SCHOOL_HOLIDAYS;
 
-/// The curve of an `unsched_trafficdens.txt` group for the day: the first whose
-/// `[set_day_of_week]` has the day (+1 Monday to Friday, +2 Saturday, +4 Sunday, 0 every
-/// day). Public holidays take Sunday's, and Fridays a `FRIDAY` curve where there is one.
-fn day_curve(densities: &[(i32, Vec<(f32, f32)>)], weekday: i32, holiday: bool) -> Option<&Vec<(f32, f32)>> {
-    let bit = match weekday {
-        _ if holiday => 4,
-        0..=4 => 1,
-        5 => 2,
-        _ => 4,
-    };
-    let friday = (weekday == 4 && !holiday)
-        .then(|| densities.iter().find(|(mask, _)| mask & FRIDAY != 0))
-        .flatten();
-    friday
-        .or_else(|| densities.iter().find(|(mask, _)| *mask == 0 || mask & bit != 0))
-        .map(|(_, curve)| curve)
+/// The `[set_day_of_week]`s a day looks for, the most particular first: public holidays
+/// take Sunday's (+4), Saturdays +2, Monday to Friday +1, with a Friday and school holiday
+/// curve before it where the map has one (a Friday in the school holidays: its own, else
+/// Friday's, else the school holidays').
+fn day_wants(weekday: i32, holiday: bool, school_holidays: bool) -> &'static [i32] {
+    match weekday {
+        _ if holiday => &[4],
+        5 => &[2],
+        6 => &[4],
+        4 if school_holidays => &[FORK_DAYS, FRIDAY, SCHOOL_HOLIDAYS, 1],
+        4 => &[FRIDAY, 1],
+        _ if school_holidays => &[SCHOOL_HOLIDAYS, 1],
+        _ => &[1],
+    }
+}
+
+/// The first curve of an `unsched_trafficdens.txt` group for the first of `wants` it has,
+/// and that want. A fork day wants exactly its days (a Friday curve is not the school
+/// holidays' Friday one); Omsi's own (+1, +2, +4) any curve that has the day, or 0 (every
+/// day).
+fn day_curve<'a>(densities: &'a [(i32, Vec<(f32, f32)>)], wants: &[i32]) -> Option<(i32, &'a Vec<(f32, f32)>)> {
+    wants.iter().find_map(|&want| {
+        densities
+            .iter()
+            .find(|(mask, _)| {
+                if want & FORK_DAYS != 0 {
+                    mask & FORK_DAYS == want
+                } else {
+                    *mask == 0 || mask & want != 0
+                }
+            })
+            .map(|(_, curve)| (want, curve))
+    })
+}
+
+/// A `[set_day_of_week]` as the log names it.
+fn day_name(want: i32) -> &'static str {
+    match want {
+        2 => "Saturday's",
+        4 => "Sunday's",
+        FRIDAY => "Friday's",
+        SCHOOL_HOLIDAYS => "Monday to Friday's in the school holidays",
+        FORK_DAYS => "Friday's in the school holidays",
+        _ => "Monday to Friday's",
+    }
 }
 
 #[cfg(test)]
 mod day_curve_tests {
-    use super::{day_curve, FRIDAY};
+    use super::{day_curve, day_wants, FORK_DAYS, FRIDAY, SCHOOL_HOLIDAYS};
 
     #[test]
-    fn fridays_and_holidays_have_their_own_curves() {
-        let d = vec![(1, vec![(0.0, 1.0)]), (2, vec![(0.0, 2.0)]), (4, vec![(0.0, 4.0)]), (FRIDAY, vec![(0.0, 8.0)])];
-        let at = |wd, hol| day_curve(&d, wd, hol).map(|c| c[0].1);
-        assert_eq!(at(0, false), Some(1.0));
-        assert_eq!(at(4, false), Some(8.0));
-        assert_eq!(at(5, false), Some(2.0));
-        assert_eq!(at(6, false), Some(4.0));
-        // a Monday, a Friday and a Saturday that are public holidays
-        assert_eq!(at(0, true), Some(4.0));
-        assert_eq!(at(4, true), Some(4.0));
-        assert_eq!(at(5, true), Some(4.0));
-        // a map without a Friday curve: Fridays keep Monday to Friday's
-        assert_eq!(day_curve(&d[..3], 4, false).map(|c| c[0].1), Some(1.0));
-        // every day (0)
-        assert_eq!(day_curve(&[(0, vec![(0.0, 0.5)])], 6, true).map(|c| c[0].1), Some(0.5));
+    fn fridays_holidays_and_school_holidays_have_their_own_curves() {
+        let curve = |v| vec![(0.0, v)];
+        let d = vec![
+            (1, curve(1.0)),
+            (2, curve(2.0)),
+            (4, curve(4.0)),
+            (FRIDAY, curve(8.0)),
+            (SCHOOL_HOLIDAYS, curve(16.0)),
+            (FORK_DAYS, curve(24.0)),
+        ];
+        let at = |d: &[(i32, Vec<(f32, f32)>)], wd, hol, school| day_curve(d, day_wants(wd, hol, school)).map(|c| c.1[0].1);
+        assert_eq!(at(&d, 0, false, false), Some(1.0));
+        assert_eq!(at(&d, 4, false, false), Some(8.0));
+        assert_eq!(at(&d, 5, false, false), Some(2.0));
+        assert_eq!(at(&d, 6, false, false), Some(4.0));
+        // a Monday, a Friday and a Saturday that are public holidays (in the school
+        // holidays too)
+        assert_eq!(at(&d, 0, true, false), Some(4.0));
+        assert_eq!(at(&d, 4, true, true), Some(4.0));
+        assert_eq!(at(&d, 5, true, false), Some(4.0));
+        // the school holidays: Monday to Thursday, Friday, and the weekend as ever
+        assert_eq!(at(&d, 2, false, true), Some(16.0));
+        assert_eq!(at(&d, 4, false, true), Some(24.0));
+        assert_eq!(at(&d, 5, false, true), Some(2.0));
+        // a school holiday Friday without its own curve: Friday's, else the school
+        // holidays', else Monday to Friday's
+        assert_eq!(at(&d[..5], 4, false, true), Some(8.0));
+        assert_eq!(at(&[d[0].clone(), d[4].clone()], 4, false, true), Some(16.0));
+        assert_eq!(at(&d[..3], 4, false, true), Some(1.0));
+        // the fork's curves leave the other days alone, and every day (0) is any day
+        assert_eq!(at(&d[3..], 0, false, false), None);
+        assert_eq!(at(&[(0, curve(0.5))], 6, true, true), Some(0.5));
     }
 }
 
