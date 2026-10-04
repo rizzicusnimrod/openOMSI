@@ -814,6 +814,9 @@ fn slider_row(app: &App, id: &str, name: &str, desc: &str, fmt: &dyn Fn(f32) -> 
 
 /// The values a slider's setting runs through.
 fn steps_of(verb: &str) -> Option<Vec<f32>> {
+    if let Some(name) = verb.strip_prefix("aid:") {
+        return crate::ai_drivers::option_row(name).filter(|r| r.unit != crate::ai_drivers::Unit::Switch).map(|r| r.steps());
+    }
     Some(match verb {
         "vr_nav_x" | "vr_nav_y" | "vr_nav_z" => (-100..=100).map(|v| v as f32 * 0.02).collect(),
         "triple_width_mm" => (20..=200).map(|v| v as f32 * 10.0).collect(),
@@ -1535,6 +1538,9 @@ pub(crate) static LIST_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic:
 
 /// Change the setting `verb` (a switch or a slider) as `mv` says; false when it is neither.
 fn option_do(app: &mut App, verb: &str, arg: &str, mv: Move) -> bool {
+    if let Some(name) = verb.strip_prefix("aid:") {
+        return ai_driver_do(app, name, mv);
+    }
     // (the weather is the METAR report's while the sync is on)
     if app.metar_locked() && matches!(verb, "visibility" | "rain_amt" | "wet" | "brightness" | "humidity" | "temp" | "wind_speed" | "wind_dir" | "snow_cover" | "snow_road") {
         app.service_msg = Some(("The weather cannot be changed while the METAR sync is on".into(), 3.0));
@@ -1571,6 +1577,59 @@ fn option_do(app: &mut App, verb: &str, arg: &str, mv: Move) -> bool {
         return true;
     }
     false
+}
+
+/// A row of the AI drivers' pages (`aid:<name>`): switch or slide it, keep it as
+/// `ai_drivers.<name>` and hand the settings to the traffic at once (every driver is made
+/// again from its car's seed with them).
+fn ai_driver_do(app: &mut App, name: &str, mv: Move) -> bool {
+    use crate::ai_drivers::{option_row, Unit};
+    let Some(r) = option_row(name) else { return false };
+    let Some(now) = app.settings.ai_drivers.value(name) else { return false };
+    let to = if r.unit == Unit::Switch {
+        let on = match mv {
+            Move::Next => now < 0.5,
+            Move::Inc => true,
+            Move::Dec => false,
+            Move::To(f) => f >= 0.5,
+        };
+        on as i32 as f32
+    } else {
+        step_move(&r.steps(), now, mv)
+    };
+    if (to - now).abs() > 1e-6 {
+        let cfg = &mut app.settings.ai_drivers;
+        cfg.set_value(name, to);
+        if let Some(v) = cfg.get(name) {
+            remember_setting(&format!("ai_drivers.{name}"), &v);
+        }
+        if let Some(t) = app.traffic.as_mut() {
+            t.set_driver_cfg(app.settings.ai_drivers.clone());
+        }
+        LIST_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    true
+}
+
+/// The rows of one of the AI drivers' pages: switches, sliders and headings.
+fn ai_driver_rows(app: &App, rows: &[crate::ai_drivers::OptionRow]) -> Vec<(String, String)> {
+    use crate::ai_drivers::Unit;
+    let cfg = &app.settings.ai_drivers;
+    rows.iter()
+        .map(|r| {
+            if r.name.is_empty() {
+                return (row(r.label, 'i', "", r.desc, None), String::new());
+            }
+            let v = cfg.value(r.name).unwrap_or(0.0);
+            let id = format!("aid:{}", r.name);
+            if r.unit == Unit::Switch {
+                return (row(r.label, 's', if v >= 0.5 { "on" } else { "off" }, r.desc, None), id);
+            }
+            let steps = r.steps();
+            let frac = if steps.len() > 1 { nearest(&steps, v) as f32 / (steps.len() - 1) as f32 } else { 0.0 };
+            (row(r.label, 'v', &r.unit.text(v), r.desc, Some(frac)), id)
+        })
+        .collect()
 }
 
 /// The name of the weather in force (the file's name without its ending).
@@ -2112,7 +2171,12 @@ fn options_pages(app: &App) -> Vec<Page> {
         .into_iter()
         .flatten()
         .collect();
-    let mut pages = vec![("Gameplay", game), ("Graphics", graphics), ("Display and memory", display), ("Sound", sound), ("Camera", camera), ("Controls", controls), ("Interface", interface)];
+    let mut pages = vec![("Gameplay", game)];
+    // (the random cars' drivers: lights, hazards, horn, habits, two-stroke smoke)
+    for (title, rows) in crate::ai_drivers::OPTION_PAGES {
+        pages.push((*title, ai_driver_rows(app, rows)));
+    }
+    pages.extend([("Graphics", graphics), ("Display and memory", display), ("Sound", sound), ("Camera", camera), ("Controls", controls), ("Interface", interface)]);
     if app.vr_active() && app.player.is_some() {
         let desc = "Navigator position (this bus)";
         let mut rows = vec![

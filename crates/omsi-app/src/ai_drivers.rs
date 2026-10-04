@@ -169,8 +169,36 @@ macro_rules! config_fields {
                     _ => None,
                 }
             }
+
+            /// One by its name as a number (a share 0..1, a switch 0 or 1): what the
+            /// options' sliders and switches show.
+            pub fn value(&self, name: &str) -> Option<f32> {
+                match name {
+                    $(stringify!($name) => Some(config_fields!(@value $kind, self.$name)),)*
+                    _ => None,
+                }
+            }
+
+            /// Set one by its name to a number, as `value` gives it.
+            pub fn set_value(&mut self, name: &str, v: f32) -> bool {
+                if !v.is_finite() {
+                    return false;
+                }
+                match name {
+                    $(stringify!($name) => { config_fields!(@set_value $kind, self.$name, v); true })*
+                    _ => false,
+                }
+            }
         }
     };
+    (@value share, $f:expr) => { $f };
+    (@value num, $f:expr) => { $f };
+    (@value count, $f:expr) => { $f as f32 };
+    (@value switch, $f:expr) => { $f as i32 as f32 };
+    (@set_value share, $f:expr, $v:expr) => { $f = $v.clamp(0.0, 1.0) };
+    (@set_value num, $f:expr, $v:expr) => { $f = $v.max(0.0) };
+    (@set_value count, $f:expr, $v:expr) => { $f = $v.round().max(0.0) as u32 };
+    (@set_value switch, $f:expr, $v:expr) => { $f = $v >= 0.5 };
     (@set share, $f:expr, $v:expr) => {
         $v.trim().trim_end_matches('%').trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| $f = (x / 100.0).clamp(0.0, 1.0)).is_some()
     };
@@ -207,6 +235,160 @@ config_fields! {
     rear_fog_misuse: share, broken_bulb: share,
     smoke: switch, smoke_puff: num, smoke_cold: num, smoke_cold_time: num, smoke_density: num, smoke_base: num,
     smokers: share, smoke_smoker: num,
+}
+
+/// How a setting is shown in the options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unit {
+    Switch,
+    /// A share of the drivers (0..1, shown in percent).
+    Percent,
+    Seconds,
+    Metres,
+    Kmh,
+    /// m/s²
+    Accel,
+    /// The light outside, 0 night … 1 day.
+    Light,
+    /// `PrecipRate`, 0..1.
+    Rain,
+    /// A factor (times).
+    Times,
+    Count,
+    /// Particles a second per unit of smoke.
+    Rate,
+}
+
+impl Unit {
+    /// `v` as the options show it.
+    pub fn text(self, v: f32) -> String {
+        match self {
+            Unit::Switch => (if v >= 0.5 { "on" } else { "off" }).into(),
+            Unit::Percent => format!("{:.0} %", v * 100.0),
+            Unit::Seconds => format!("{v:.0} s"),
+            Unit::Metres => format!("{v:.0} m"),
+            Unit::Kmh => format!("{v:.0} km/h"),
+            Unit::Accel => format!("{v:.1} m/s²"),
+            Unit::Light | Unit::Rain => format!("{v:.2}"),
+            Unit::Times => format!("{v:.2}×"),
+            Unit::Count | Unit::Rate => format!("{v:.0}"),
+        }
+    }
+}
+
+/// One setting in the options: its name (`Config::set`), label, what it does, how it is
+/// shown and the slider's range and step. A row without a name is a heading.
+#[derive(Debug, Clone, Copy)]
+pub struct OptionRow {
+    pub name: &'static str,
+    pub label: &'static str,
+    pub desc: &'static str,
+    pub unit: Unit,
+    pub min: f32,
+    pub max: f32,
+    pub step: f32,
+}
+
+impl OptionRow {
+    /// The values the slider runs through.
+    pub fn steps(&self) -> Vec<f32> {
+        if self.unit == Unit::Switch || self.step <= 0.0 {
+            return vec![0.0, 1.0];
+        }
+        let n = ((self.max - self.min) / self.step).round().max(0.0) as usize;
+        // (rounded to the step's decimals: 7 times 0.05 is 0.35 in the file, not 0.35000002)
+        (0..=n).map(|i| ((self.min + i as f32 * self.step) * 1000.0).round() / 1000.0).collect()
+    }
+}
+
+const fn row(name: &'static str, label: &'static str, desc: &'static str, unit: Unit, min: f32, max: f32, step: f32) -> OptionRow {
+    OptionRow { name, label, desc, unit, min, max, step }
+}
+
+const fn switch(name: &'static str, label: &'static str, desc: &'static str) -> OptionRow {
+    OptionRow { name, label, desc, unit: Unit::Switch, min: 0.0, max: 1.0, step: 1.0 }
+}
+
+const fn heading(label: &'static str, desc: &'static str) -> OptionRow {
+    OptionRow { name: "", label, desc, unit: Unit::Switch, min: 0.0, max: 0.0, step: 0.0 }
+}
+
+/// The options' pages for the drivers, in order: title and rows.
+pub const OPTION_PAGES: &[(&str, &[OptionRow])] = {
+    use Unit::*;
+    &[
+        ("AI lights", &[
+            switch("enabled", "AI drivers", "Random cars and lorries switch their lights, indicate, honk and smoke as drivers do (off: as the traffic says)"),
+            row("always_on", "Always lights on", "Drivers who drive with their lights on all day, even in sunshine", Percent, 0.0, 1.0, 0.05),
+            heading("Dusk and a dark sky", "Each driver switches on at a light of their own between these (0 night, 1 day)"),
+            row("bright_min", "Switch on at the earliest below", "The least careful drivers", Light, 0.0, 1.0, 0.05),
+            row("bright_max", "Switch on at the latest below", "The most careful drivers", Light, 0.0, 1.0, 0.05),
+            row("bright_hyst", "Off only when brighter by", "Keeps the lights from flickering at the threshold", Light, 0.0, 0.3, 0.01),
+            heading("Rain and snow", "Each driver switches on at a rain rate of their own between these (0..1)"),
+            row("precip_min", "Lights on from rain of", "The most careful drivers", Rain, 0.0, 0.5, 0.01),
+            row("precip_max", "Lights on at the latest in rain of", "The least careful drivers", Rain, 0.0, 0.5, 0.01),
+            row("snow_factor", "Snow counts as", "Times the rain threshold (0.5: on in half as much snow)", Times, 0.1, 1.0, 0.05),
+            heading("Fog", "Each driver switches on below a visibility of their own between these"),
+            row("fog_min_m", "Lights on in fog below", "The least careful drivers", Metres, 50.0, 3000.0, 50.0),
+            row("fog_max_m", "Lights on in fog at the latest below", "The most careful drivers", Metres, 50.0, 3000.0, 50.0),
+            heading("Reaction", "How quickly the drivers notice"),
+            row("on_delay_max", "Switch on within", "Seconds after it gets bad (each driver their own)", Seconds, 0.0, 60.0, 1.0),
+            row("off_delay_min", "Switch off at the earliest after", "Seconds after it clears up", Seconds, 0.0, 300.0, 5.0),
+            row("off_delay_max", "Switch off at the latest after", "Seconds after it clears up", Seconds, 0.0, 600.0, 5.0),
+            heading("Rear fog lamp", "A bright red lamp at the back, in thick fog"),
+            row("rear_fog", "Drivers who use it", "Share of the drivers who switch it on in fog", Percent, 0.0, 1.0, 0.05),
+            row("rear_fog_m", "On below a visibility of", "How thick the fog must be", Metres, 25.0, 500.0, 25.0),
+        ]),
+        ("AI hazards & horn", &[
+            heading("Hazard lights", "Braking hard, e.g. at the end of a jam"),
+            row("hazard", "Drivers who use them", "Share of the drivers who put the hazards on when braking hard", Percent, 0.0, 1.0, 0.05),
+            row("hazard_decel", "Braking that counts as hard", "Normal braking is 2-3 m/s², an emergency up to 8", Accel, 2.0, 9.0, 0.5),
+            row("hazard_speed", "Only from a speed of", "Slower than this, nobody puts them on", Kmh, 0.0, 120.0, 5.0),
+            row("hazard_hold_min", "On after the stop for at least", "Seconds (each driver their own; off when they drive off)", Seconds, 0.0, 30.0, 1.0),
+            row("hazard_hold_max", "On after the stop for at most", "Seconds", Seconds, 0.0, 30.0, 1.0),
+            heading("Honking when stuck", "Far longer than a red light lasts: a jam, a deadlock, a bus in the way"),
+            row("honk", "Impatient drivers", "Share of the drivers who honk when stuck", Percent, 0.0, 1.0, 0.05),
+            row("patience_min", "Patience at least", "Seconds standing before the first honk (keep it above your longest red light)", Seconds, 10.0, 600.0, 10.0),
+            row("patience_max", "Patience at most", "Seconds", Seconds, 10.0, 600.0, 10.0),
+            row("honk_repeat_min", "Again after at least", "Seconds between the honks while still stuck", Seconds, 5.0, 180.0, 5.0),
+            row("honk_repeat_max", "Again after at most", "Seconds", Seconds, 5.0, 180.0, 5.0),
+            row("honk_max", "Honks at most", "Once, then twice, then three times ...", Count, 1.0, 6.0, 1.0),
+            heading("Honking when cut off", "Two toots after an emergency stop"),
+            row("angry", "Drivers who honk", "Share of the drivers", Percent, 0.0, 1.0, 0.05),
+            row("angry_decel", "Braking that makes them honk", "m/s², from 20 km/h or more", Accel, 3.0, 9.0, 0.5),
+        ]),
+        ("AI driver habits", &[
+            switch("flaws", "Imperfect drivers", "Some drivers have one of the bad habits below (off: none of them)"),
+            row("no_indicator", "Never indicate", "Share of the drivers", Percent, 0.0, 0.5, 0.01),
+            heading("Forgotten indicator", "Left blinking after a turn"),
+            row("forget_indicator", "Forgetful drivers", "Share of the drivers", Percent, 0.0, 0.5, 0.01),
+            row("forget_chance", "Forget it after", "Share of their turns", Percent, 0.0, 1.0, 0.05),
+            row("forget_min", "Blinking on for at least", "Seconds", Seconds, 5.0, 180.0, 5.0),
+            row("forget_max", "Blinking on for at most", "Seconds", Seconds, 5.0, 180.0, 5.0),
+            heading("Forgotten lights", "At dusk, and in fog or rain by day, until it is really dark"),
+            row("no_lights", "Drivers who forget them", "Share of the drivers", Percent, 0.0, 0.5, 0.01),
+            row("no_lights_bright_min", "They notice at the latest below", "The light outside (0 night, 1 day)", Light, 0.0, 0.5, 0.01),
+            row("no_lights_bright_max", "They notice at the earliest below", "The light outside", Light, 0.0, 0.5, 0.01),
+            heading("Other habits", "A few drivers"),
+            row("rear_fog_misuse", "Rear fog lamp in rain and at night", "Share of the drivers", Percent, 0.0, 0.5, 0.01),
+            row("broken_bulb", "A broken bulb", "Share of the cars with one headlight or brake light out", Percent, 0.0, 0.5, 0.01),
+        ]),
+        ("AI two-stroke smoke", &[
+            switch("smoke", "Two-stroke smoke", "Trabants and Wartburgs leave a blue-grey trail (Display, Vehicle smoke thins it with the rest)"),
+            row("smoke_base", "Smoke all the time", "The light haze every two-stroke makes", Times, 0.0, 1.0, 0.05),
+            row("smoke_puff", "Pulling away", "Extra smoke when a car moves off", Times, 0.0, 5.0, 0.25),
+            row("smoke_cold", "Cold engine", "Extra smoke for the first minutes (full below 10 °C, a third above)", Times, 0.0, 5.0, 0.25),
+            row("smoke_cold_time", "Engine warm after", "Seconds", Seconds, 0.0, 900.0, 30.0),
+            row("smokers", "Badly tuned cars", "Share of the two-strokes that smoke heavily all the time", Percent, 0.0, 1.0, 0.05),
+            row("smoke_smoker", "How much they smoke", "Extra smoke of a badly tuned car", Times, 0.0, 3.0, 0.25),
+            row("smoke_density", "Cloud density", "Particles a second for each unit of smoke", Rate, 0.0, 100.0, 5.0),
+        ]),
+    ]
+};
+
+/// The options row of setting `name`.
+pub fn option_row(name: &str) -> Option<&'static OptionRow> {
+    OPTION_PAGES.iter().flat_map(|(_, rows)| rows.iter()).find(|r| !r.name.is_empty() && r.name == name)
 }
 
 /// What a driver sees of the weather and the light, the same for every car.
@@ -688,6 +870,29 @@ mod tests {
         assert_eq!(cloud_cover("Cumulus 1"), 0.35);
         assert_eq!(cloud_cover("-1"), 0.0);
         assert_eq!(cloud_cover(""), 0.0);
+    }
+
+    #[test]
+    fn every_setting_has_its_row_in_the_options() {
+        let d = Config::default();
+        let mut shown = Vec::new();
+        for (_, rows) in OPTION_PAGES {
+            for r in rows.iter().filter(|r| !r.name.is_empty()) {
+                assert!(Config::NAMES.contains(&r.name), "{} is no setting", r.name);
+                assert!(!shown.contains(&r.name), "{} twice", r.name);
+                shown.push(r.name);
+                // the default lies on the slider, and a value set from it reads back
+                let v = d.value(r.name).unwrap();
+                assert!(v >= r.min - 1e-4 && v <= r.max + 1e-4, "{} default {v} outside {}..{}", r.name, r.min, r.max);
+                let mut c = d.clone();
+                let to = *r.steps().last().unwrap();
+                assert!(c.set_value(r.name, to));
+                assert!((c.value(r.name).unwrap() - to).abs() < 1e-4, "{}", r.name);
+            }
+        }
+        for n in Config::NAMES {
+            assert!(shown.contains(n), "{n} is not in the options");
+        }
     }
 
     #[test]

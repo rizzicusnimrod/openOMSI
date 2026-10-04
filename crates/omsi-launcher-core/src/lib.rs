@@ -1888,6 +1888,9 @@ pub fn settings_from_text(text: Option<&str>) -> Value {
                 }
             }
             "version" => version = val.parse::<i64>().unwrap_or(0),
+            // the random cars' drivers (the custom fork's options): `ai_drivers` and
+            // `ai_drivers.<name>`, kept as they are written (the game reads them)
+            k if k == "ai_drivers" || k.starts_with("ai_drivers.") => v[k] = json!(val),
             _ => {}
         }
     }
@@ -2198,6 +2201,22 @@ pub fn settings_to_text(v: &Value, old: Option<&str>) -> String {
     text.push_str(&format!("info_bar={}\n", b("info_bar", false)));
     text.push_str(&format!("exhaust={}\n", n("exhaust", 67).clamp(0, 200)));
     text.push_str(&format!("triple_left_angle_deg={}\ntriple_right_angle_deg={}\ntriple_eye_height_mm={}\n", f("triple_left_angle_deg", 45.0).clamp(0.0, 90.0), f("triple_right_angle_deg", 45.0).clamp(0.0, 90.0), f("triple_eye_height_mm", 0.0).clamp(-500.0, 500.0)));
+    // the drivers' settings the options changed (see `settings_from_text`)
+    if let Some(m) = v.as_object() {
+        let mut keys: Vec<&String> = m.keys().filter(|k| *k == "ai_drivers" || k.starts_with("ai_drivers.")).collect();
+        keys.sort();
+        for k in keys {
+            let val = match &m[k.as_str()] {
+                Value::String(x) => x.trim().to_string(),
+                Value::Number(x) => x.to_string(),
+                Value::Bool(x) => (*x as u8).to_string(),
+                _ => continue,
+            };
+            if !val.is_empty() && !val.contains('\n') {
+                text.push_str(&format!("{k}={val}\n"));
+            }
+        }
+    }
     let written: Vec<String> = text.lines().filter_map(|l| l.split_once('=')).map(|(k, _)| k.trim().to_ascii_lowercase()).collect();
     for line in old.unwrap_or("").lines() {
         let t = line.trim();
@@ -2715,6 +2734,21 @@ mod tests {
         omsi_cfg::remove_content_root(&root);
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(packs, vec!["Other".to_string()]);
+    }
+
+    #[test]
+    fn the_ai_drivers_settings_survive_a_save() {
+        // what the options set (numbers), what a hand-written file says (text), both kept
+        let mut v = settings_from_text(Some("ai_drivers.honk=10\nai_drivers=1\n"));
+        assert_eq!(v["ai_drivers.honk"], json!("10"));
+        v["ai_drivers.always_on"] = json!(35);
+        v["ai_drivers.flaws"] = json!(0);
+        let text = settings_to_text(&v, Some("ai_drivers.honk=10\nai_drivers=1\n"));
+        for line in ["ai_drivers.always_on=35", "ai_drivers.flaws=0", "ai_drivers.honk=10", "ai_drivers=1"] {
+            assert_eq!(text.lines().filter(|l| *l == line).count(), 1, "{line} in\n{text}");
+        }
+        let back = settings_from_text(Some(&text));
+        assert_eq!(back["ai_drivers.always_on"], json!("35"));
     }
 
     #[test]

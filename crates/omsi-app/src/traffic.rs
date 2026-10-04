@@ -5257,6 +5257,23 @@ impl Traffic {
         out
     }
 
+    /// New settings for the random cars' drivers (the options): every car's driver is made
+    /// again from its seed with them on its next frame, so a share changed shows at once.
+    pub fn set_driver_cfg(&mut self, cfg: crate::ai_drivers::Config) {
+        if cfg == self.driver_cfg {
+            return;
+        }
+        // (models loaded from now on get the drivers' lamps or not; those loaded keep theirs,
+        // and lamps without a driver light as the traffic has them)
+        omsi_sim::ai_patch::set_enabled(cfg.enabled);
+        self.driver_cfg = cfg;
+        for c in &mut self.cars {
+            c.driver = None;
+            c.two_stroke = None;
+            c.driver_checked = false;
+        }
+    }
+
     pub fn tick(&mut self, dt: f32, player: Option<PlayerBox>) {
         self.lamp_dt += dt;
         if self.mirror {
