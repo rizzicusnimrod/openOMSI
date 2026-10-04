@@ -1591,6 +1591,14 @@ impl App {
                     let (dx, dy) = xy();
                     self.look_by(dx, dy);
                 }
+                // `search <text>`: the open settings window's search, as typed (`search` alone
+                // gives the field the keys, nothing typed)
+                "search" => {
+                    let text = cmd.split_once(' ').map(|x| x.1).unwrap_or("");
+                    self.start_settings_search();
+                    self.menu_search = Some(text.to_string());
+                    self.settings_search_changed();
+                }
                 // `focus 0|1`, `minimize`, `restore`: the window losing and getting back the
                 // keyboard and the mouse, as the window's own events do it
                 "focus" if arg == "0" => self.input_lost(),
@@ -2027,8 +2035,72 @@ impl App {
     }
 
     /// The open list is closed: back to the game menu.
+    /// The settings window's search field and the keys: Ctrl+F or / starts a search, then
+    /// what is typed goes into the field (Backspace takes a letter back, Escape ends the
+    /// search). The arrows, Enter, Tab and the page keys stay the list's: they choose and
+    /// change the settings found. True when the key was the field's.
+    pub(crate) fn settings_search_key(&mut self, code: KeyCode, text: Option<&str>) -> bool {
+        if self.chooser.is_none() || !crate::game_lists::is_settings(self.list_kind.as_ref()) || self.dropdown.is_some() || self.menu_edit.is_some() {
+            return false;
+        }
+        // (the modifiers go on to the game, which keeps account of what is held)
+        if matches!(code, KeyCode::ControlLeft | KeyCode::ControlRight | KeyCode::ShiftLeft | KeyCode::ShiftRight | KeyCode::AltLeft | KeyCode::AltRight | KeyCode::SuperLeft | KeyCode::SuperRight) {
+            return false;
+        }
+        let ctrl = self.keys.iter().any(|k| matches!(k, KeyCode::ControlLeft | KeyCode::ControlRight));
+        let Some(q) = self.menu_search.as_mut() else {
+            if (ctrl && code == KeyCode::KeyF) || (!ctrl && text == Some("/")) {
+                self.start_settings_search();
+                return true;
+            }
+            return false;
+        };
+        match code {
+            KeyCode::Escape => {
+                self.menu_search = None;
+            }
+            KeyCode::Backspace => {
+                q.pop();
+            }
+            KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::ArrowLeft | KeyCode::ArrowRight | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Tab | KeyCode::Home | KeyCode::End => return false,
+            KeyCode::KeyF if ctrl => return true,
+            _ => {
+                if ctrl {
+                    return false;
+                }
+                let add: String = text.unwrap_or("").chars().filter(|c| !c.is_control()).collect();
+                if add.is_empty() {
+                    // (a function key, a key of no letter: not the game's while typing)
+                    return true;
+                }
+                q.push_str(&add);
+            }
+        }
+        self.settings_search_changed();
+        true
+    }
+
+    /// Give the settings window's search field the keys (a click on it, Ctrl+F).
+    pub(crate) fn start_settings_search(&mut self) {
+        if self.menu_search.is_none() {
+            self.menu_search = Some(String::new());
+        }
+        self.menu_kbd = true;
+    }
+
+    /// The search changed: the rows it finds, the first of them chosen, from the top.
+    pub(crate) fn settings_search_changed(&mut self) {
+        self.menu_top = None;
+        self.dropdown = None;
+        self.refresh_list();
+        let first = self.admin_list.as_ref().and_then(|l| l.iter().position(|x| x.1 != crate::game_lists::HEADING)).unwrap_or(0);
+        self.chooser = Some(first);
+        self.menu_kbd = true;
+    }
+
     pub(crate) fn close_list(&mut self) {
         self.dropdown = None;
+        self.menu_search = None;
         if self.menu_edit_icao { if let Some(w)=self.window.as_ref(){w.set_ime_allowed(false);} }
         self.menu_edit_icao=false;
         self.menu_edit = None;
@@ -2063,6 +2135,8 @@ impl App {
     /// A click on the sidebar of a settings window: page `i`, or (the last box) the way back.
     pub(crate) fn settings_side_click(&mut self, i: usize) {
         let Some(kind) = self.list_kind.clone() else { return };
+        // (a page chosen ends a search)
+        self.menu_search = None;
         let n = crate::game_lists::page_titles(self, &kind).map(|t| t.0.len()).unwrap_or(0);
         if i < n {
             self.settings_tab(i);

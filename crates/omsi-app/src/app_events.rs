@@ -123,6 +123,14 @@ impl ApplicationHandler for App {
                 if event.state == ElementState::Pressed && self.menu_edit_icao {
                     if let Some(text)=event.text.as_deref(){ self.icao_edit_text(text); }
                 }
+                // the settings window's search field: what is typed goes into it
+                if event.state == ElementState::Pressed {
+                    if let PhysicalKey::Code(code) = event.physical_key {
+                        if self.settings_search_key(code, event.text.as_deref()) {
+                            return;
+                        }
+                    }
+                }
                 // Route numbers are free display text in OMSI. Take the text produced by
                 // the keyboard layout (rather than only the physical key) so '-', shifted
                 // symbols and non-US layouts reach the destination display unchanged.
@@ -2250,6 +2258,7 @@ impl ApplicationHandler for App {
                             pane_first: self.pane_scroll.filter(|p| Some(p.0) == chooser_sel).map(|p| p.1),
                             menu_tabs,
                             dropdown,
+                            menu_search: self.menu_search.as_deref().filter(|_| crate::game_lists::is_settings(self.list_kind.as_ref())),
                             menu_kbd: self.menu_kbd,
                             menu_top: self.menu_top,
                             // (not over the city map, which has the stops and their times: it
@@ -3055,6 +3064,12 @@ impl App {
                         self.menu_scroll_drag = true;
                         return;
                     }
+                }
+
+                // The search field of a settings window: it takes the keys.
+                if self.chooser.is_some() && self.ui.as_ref().and_then(|u| u.menu_search_rect).is_some_and(|r| self.cursor.0 >= r[0] && self.cursor.0 <= r[2] && self.cursor.1 >= r[1] && self.cursor.1 <= r[3]) {
+                    self.start_settings_search();
+                    return;
                 }
 
                 // The sidebar of a settings window: a page, or the way back.

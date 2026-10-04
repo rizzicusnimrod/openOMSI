@@ -143,6 +143,9 @@ pub(crate) struct App {
     /// The digits of a time being typed in the world page of the game menu (None: not typing).
     pub(crate) menu_edit: Option<String>,
     pub(crate) menu_edit_icao: bool,
+    /// What is typed into the settings window's search field (None: no search; empty: the
+    /// field has the keys, nothing typed yet). See `game_lists::search_items`.
+    pub(crate) menu_search: Option<String>,
     /// The vehicle being chosen in "Place a vehicle" takes the place of the one driven
     /// (the game menu's "Swap for another vehicle", #728).
     pub(crate) swap_pending: bool,

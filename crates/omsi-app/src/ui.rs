@@ -9,6 +9,14 @@
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont, VariableFont};
 use omsi_render::{Renderer, Scene, TextureId};
 
+// the custom fork's look: its colours and sizes, and the settings windows drawn in it
+mod settings_v2;
+mod theme;
+
+/// The settings windows as they were (`classic_ui=1` in the settings file): the new drawer
+/// otherwise, except in VR.
+pub(crate) static CLASSIC_SETTINGS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Roboto (Apache 2.0), the interface font.
 const ROBOTO: &[u8] = include_bytes!("../../../assets/fonts/Roboto-VariableFont_wdth,wght.ttf");
 
@@ -467,6 +475,9 @@ pub struct Frame<'a> {
     pub menu_kbd: bool,
     /// The drop-down open over a row of the settings window.
     pub dropdown: Option<DropdownView<'a>>,
+    /// The settings window's search: what is typed (empty: the field has the keys, nothing
+    /// typed yet); none while the field is not in use.
+    pub menu_search: Option<&'a str>,
 }
 
 pub struct Ui {
@@ -527,6 +538,8 @@ pub struct Ui {
     /// Where the information bar was drawn (within the panel, before `origin_x`), for the
     /// navigator to keep out of its way.
     pub info_rect: Option<[f32; 4]>,
+    /// The settings window's search field (a click there starts a search).
+    pub menu_search_rect: Option<[f32; 4]>,
 }
 
 /// Between the information bar's parts.
@@ -606,7 +619,7 @@ impl Ui {
         self.chat.rect[2] += x;
     }
     pub fn new() -> Option<Ui> {
-        Some(Ui { origin_x: 0.0, text: TextCache::new()?, chat: ChatWidget::default(), menu_rects: Vec::new(), menu_arrows: Vec::new(), menu_scroll_thumb: None, menu_scroll_track: None, menu_ctl: Vec::new(), dd_rects: Vec::new(), dd_top: 0, dd_rows: 8, dd_scroll: None, menu_side: Vec::new(), menu_pane: Vec::new(), menu_pane_start: 0, menu_pane_go: None, menu_pane_box: None, menu_pane_scroll: None, menu_time: Vec::new(), anim: Default::default(), anim_dt: 0.0, menu_overlay_range: 0..0, vr_cursor_overlay: None, vr_tooltip_overlay: None, menu_start: 0, menu_rows: 0, menu_row_h: 1.0, images: Default::default(), info_rect: None })
+        Some(Ui { origin_x: 0.0, text: TextCache::new()?, chat: ChatWidget::default(), menu_rects: Vec::new(), menu_arrows: Vec::new(), menu_scroll_thumb: None, menu_scroll_track: None, menu_ctl: Vec::new(), dd_rects: Vec::new(), dd_top: 0, dd_rows: 8, dd_scroll: None, menu_side: Vec::new(), menu_pane: Vec::new(), menu_pane_start: 0, menu_pane_go: None, menu_pane_box: None, menu_pane_scroll: None, menu_time: Vec::new(), anim: Default::default(), anim_dt: 0.0, menu_overlay_range: 0..0, vr_cursor_overlay: None, vr_tooltip_overlay: None, menu_start: 0, menu_rows: 0, menu_row_h: 1.0, images: Default::default(), info_rect: None, menu_search_rect: None })
     }
 
     /// Draw the frame's interface: its overlays go after the HUD's in `scene.overlays`.
@@ -1448,6 +1461,7 @@ impl Ui {
         self.menu_scroll_track = None;
         self.dd_rects.clear();
         self.dd_scroll = None;
+        self.menu_search_rect = None;
         let overlay_start = scene.overlays.len();
         let Some((sel, items)) = f.menu else {
             self.menu_overlay_range = overlay_start..overlay_start;
@@ -1456,7 +1470,11 @@ impl Ui {
         };
         // a settings window has its own layout
         if f.menu_kind == MenuKind::Options && f.menu_tabs.is_some() {
-            self.draw_settings(r, scene, f, sel, items);
+            if f.vr || CLASSIC_SETTINGS.load(std::sync::atomic::Ordering::Relaxed) {
+                self.draw_settings(r, scene, f, sel, items);
+            } else {
+                self.draw_settings_v2(r, scene, f, sel, items);
+            }
             self.menu_overlay_range = overlay_start..scene.overlays.len();
             return;
         }

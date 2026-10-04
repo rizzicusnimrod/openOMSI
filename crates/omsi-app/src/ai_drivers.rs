@@ -151,6 +151,7 @@ macro_rules! config_fields {
     ($($name:ident: $kind:ident),* $(,)?) => {
         impl Config {
             /// Every setting's name.
+            #[allow(dead_code)]
             pub const NAMES: &'static [&'static str] = &[$(stringify!($name)),*];
 
             /// Set one by its name. False for a name it does not know or a value that is

@@ -260,12 +260,57 @@ pub(crate) const HEADING: &str = "#";
 /// it as it is on Enter (see `App::chooser_adjust`).
 pub(crate) const ADJUST: &str = " ±";
 
+/// A settings window (options, vehicle, world): one with pages, and a search field.
+pub(crate) fn is_settings(kind: Option<&ListKind>) -> bool {
+    matches!(kind, Some(ListKind::Options(_) | ListKind::Vehicle(_) | ListKind::World(_)))
+}
+
+/// The rows of every page of the settings window `kind` that the search `query` finds: each
+/// word of it in the row's name, its description or its page's title (as written or in the
+/// interface's language, any case). A row found is the row itself - its switch, slider or
+/// list work as on its page - with its page's title before its description
+/// ("Page — description").
+pub(crate) fn search_items(app: &App, kind: &ListKind, query: &str) -> Vec<(String, String)> {
+    let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
+    let Some((pages, _)) = pages_of(app, kind) else { return Vec::new() };
+    let mut out = Vec::new();
+    for (title, rows) in pages {
+        // (the heading the rows come under: part of where a row is, and of what it is about)
+        let mut section = String::new();
+        for (label, id) in rows {
+            let parts: Vec<&str> = label.split('\u{1f}').collect();
+            let (name, kind_c, value, desc) = (parts.first().copied().unwrap_or(""), parts.get(1).copied().unwrap_or(""), parts.get(2).copied().unwrap_or(""), parts.get(3).copied().unwrap_or(""));
+            if id == HEADING || (kind_c == "i" && value.is_empty()) {
+                section = omsi_ui::tr(name).into_owned();
+                continue;
+            }
+            // (information lines are no settings)
+            if id.is_empty() || kind_c == "i" || name.is_empty() {
+                continue;
+            }
+            let hay = format!("{name} {desc} {title} {section} {} {} {}", omsi_ui::tr(name), omsi_ui::tr(desc), omsi_ui::tr(title)).to_lowercase();
+            if !words.iter().all(|w| hay.contains(w.as_str())) {
+                continue;
+            }
+            let mut p: Vec<String> = parts.iter().map(|x| x.to_string()).collect();
+            p.resize(5, String::new());
+            let place = if section.is_empty() { omsi_ui::tr(title).into_owned() } else { format!("{} › {section}", omsi_ui::tr(title)) };
+            p[3] = if desc.is_empty() { place } else { format!("{place} — {desc}") };
+            out.push((p.join("\u{1f}"), id));
+        }
+    }
+    out
+}
+
 pub(crate) fn items(app: &App, kind: &ListKind) -> Vec<(String, String)> {
     let tr = |t: &str| omsi_ui::tr(t).into_owned();
     let mut out: Vec<(String, String)> = Vec::new();
     match kind {
         ListKind::Admin => return crate::admin::items(app),
         ListKind::Options(_) | ListKind::Vehicle(_) | ListKind::World(_) => {
+            if let Some(q) = app.menu_search.as_deref().filter(|q| !q.trim().is_empty()) {
+                return search_items(app, kind, q);
+            }
             let Some((mut pages, tab)) = pages_of(app, kind) else { return out };
             if pages.is_empty() {
                 return vec![(row("Nothing to set here", 'i', "", "", None), "noop".to_string())];
@@ -1618,7 +1663,7 @@ fn ai_driver_rows(app: &App, rows: &[crate::ai_drivers::OptionRow]) -> Vec<(Stri
     rows.iter()
         .map(|r| {
             if r.name.is_empty() {
-                return (row(r.label, 'i', "", r.desc, None), String::new());
+                return (row(r.label, 'i', "", r.desc, None), HEADING.to_string());
             }
             let v = cfg.value(r.name).unwrap_or(0.0);
             let id = format!("aid:{}", r.name);
