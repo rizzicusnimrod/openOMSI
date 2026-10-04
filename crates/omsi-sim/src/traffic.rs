@@ -1820,6 +1820,11 @@ pub struct AiState {
     /// Sideways acceleration the driver accepts in a bend (m/s²): the speed through a
     /// curve of radius r is at most sqrt(this × r).
     pub lat_accel: f32,
+    /// How hard the driver brakes for a bend ahead (m/s²): the speed profile `curve_speed`
+    /// lays out, and the braking that follows it.
+    pub bend_decel: f32,
+    /// How briskly the driver accelerates: `accel` times this (1 as ever).
+    pub accel_style: f32,
     /// The driver (`TPathInfo`'s rowdy_factor & co): how fast they like to go relative to
     /// the limit, the time gap they keep to the car ahead (s), the distance they stop
     /// behind it (m), the gap in the cross traffic they accept at a junction (s) and how
@@ -1997,7 +2002,7 @@ impl LaneSeq {
 
 impl AiState {
     pub fn new(lane: usize, s: f32, seed: u64) -> AiState {
-        AiState { traffic_pool: None, veh_type: 0, lane, s, speed: 0.0, max_speed_kmh: 50.0, accel: 1.2, decel: 3.0, length: 5.0, rng: seed | 1, blinker: 0, braking: false, odometer: 0.0, planned_next: None, ahead: Vec::new(), change_plan: Vec::new(), prev_lane: None, yield_time: 0.0, route: Vec::new(), route_index: 0, change: None, change_cooldown: 5.0, lateral: 0.0, lateral_target: 0.0, lateral_ramp: (0.0, 0.0, 0.0, 1.0), turn_wish: 0, signal: 0, signal_time: 0.0, lat_accel: 2.8, desire: 1.0, headway: 1.4, min_gap: 2.0, accept_gap: 4.0, reaction: 0.7, front: 2.5, rear: 2.5, held: false, start_timer: 0.0, acc: 0.0, accel_cap: None }
+        AiState { traffic_pool: None, veh_type: 0, lane, s, speed: 0.0, max_speed_kmh: 50.0, accel: 1.2, decel: 3.0, length: 5.0, rng: seed | 1, blinker: 0, braking: false, odometer: 0.0, planned_next: None, ahead: Vec::new(), change_plan: Vec::new(), prev_lane: None, yield_time: 0.0, route: Vec::new(), route_index: 0, change: None, change_cooldown: 5.0, lateral: 0.0, lateral_target: 0.0, lateral_ramp: (0.0, 0.0, 0.0, 1.0), turn_wish: 0, signal: 0, signal_time: 0.0, lat_accel: 2.8, bend_decel: 2.0, accel_style: 1.0, desire: 1.0, headway: 1.4, min_gap: 2.0, accept_gap: 4.0, reaction: 0.7, front: 2.5, rear: 2.5, held: false, start_timer: 0.0, acc: 0.0, accel_cap: None }
     }
 
     fn rand(&mut self) -> u64 {
@@ -2309,7 +2314,7 @@ impl AiState {
                 // (a bend may begin anywhere up to a sample's spacing before the sample
                 // that finds it: the speed is taken from there, or the car met the start of
                 // a tight turn half a metre after its profile had allowed 1 m/s more)
-                best = best.min((v * v + 2.0 * 2.0 * (d - 2.5).max(0.0)).sqrt());
+                best = best.min((v * v + 2.0 * self.bend_decel * (d - 2.5).max(0.0)).sqrt());
             }
             d = next;
             next += 2.5;
@@ -2381,7 +2386,7 @@ impl AiState {
     /// has to stop (a light, a junction it gives way at, a bus stop).
     pub fn desired_accel(&self, net: &Network, lead: Option<Lead>, stop: Option<f32>) -> f32 {
         let Some(lane) = net.lanes.get(self.lane) else { return 0.0 };
-        let (a, b) = (self.accel.max(0.1), self.decel.max(0.5));
+        let (a, b) = ((self.accel * self.accel_style).max(0.1), self.decel.max(0.5));
         let v = self.speed;
         let limit = |l: &Lane| (l.speed_limit_kmh * self.desire).min(self.max_speed_kmh).max(3.0) / 3.6;
         let mut v0 = limit(lane);
@@ -2410,7 +2415,7 @@ impl AiState {
         // braking), blending in over the last metre per second above it
         let bend = self.curve_speed(net);
         if bend < v0 && v > bend - 1.0 {
-            let track = -2.0 + (bend - v) / 0.6;
+            let track = -self.bend_decel + (bend - v) / 0.6;
             let k = ((v - (bend - 1.0)) / 1.0).clamp(0.0, 1.0);
             acc = acc.min(acc + (track - acc) * k);
         }

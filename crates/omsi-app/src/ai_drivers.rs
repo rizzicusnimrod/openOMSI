@@ -24,6 +24,10 @@ pub use omsi_sim::ai_patch::{
 pub struct Config {
     /// Everything here off: the cars light up and indicate as the traffic says.
     pub enabled: bool,
+    /// How the cars and lorries take bends and junctions: 0 calm (as the traffic always
+    /// drove), 0.5 normal, 1 brisk - how much sideways force the drivers accept and how
+    /// late and firmly they brake for a bend (`apply_style`).
+    pub style: f32,
     /// Drivers who drive with their lights on all day.
     pub always_on: f32,
     /// How dark it must get (`Conditions::light`, 0 night … 1 day) for a driver to switch
@@ -94,6 +98,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             enabled: true,
+            style: 0.5,
             always_on: 0.2,
             bright_min: 0.3,
             bright_max: 0.5,
@@ -221,6 +226,7 @@ macro_rules! config_fields {
 
 config_fields! {
     enabled: switch,
+    style: num,
     always_on: share,
     bright_min: num, bright_max: num, bright_hyst: num,
     precip_min: num, precip_max: num, snow_factor: num,
@@ -258,6 +264,8 @@ pub enum Unit {
     Count,
     /// Particles a second per unit of smoke.
     Rate,
+    /// The driving style: calm, normal, brisk.
+    Style,
 }
 
 impl Unit {
@@ -273,6 +281,7 @@ impl Unit {
             Unit::Light | Unit::Rain => format!("{v:.2}"),
             Unit::Times => format!("{v:.2}×"),
             Unit::Count | Unit::Rate => format!("{v:.0}"),
+            Unit::Style => (if v < 0.25 { "Calm" } else if v < 0.75 { "Normal" } else { "Brisk" }).into(),
         }
     }
 }
@@ -327,6 +336,7 @@ pub const OPTION_PAGES: &[(&str, &[OptionRow])] = {
     &[
         ("AI lights", &[
             switch("enabled", "AI drivers", "Random cars and lorries switch their lights, indicate, honk and smoke as drivers do (off: as the traffic says)"),
+            row("style", "Driving style", "How firmly the cars take bends and junctions: calm, normal or brisk", Style, 0.0, 1.0, 0.5),
             row("always_on", "Always lights on", "Drivers who drive with their lights on all day, even in sunshine", Percent, 0.0, 1.0, 0.05),
             heading("Dusk and a dark sky", "Each driver switches on at a light of their own between these (0 night, 1 day)"),
             adv("bright_min", "Switch on at the earliest below", "The least careful drivers", Light, 0.0, 1.0, 0.05),
@@ -397,6 +407,22 @@ pub const OPTION_PAGES: &[(&str, &[OptionRow])] = {
 /// The options row of setting `name`.
 pub fn option_row(name: &str) -> Option<&'static OptionRow> {
     OPTION_PAGES.iter().flat_map(|(_, rows)| rows.iter()).find(|r| !r.name.is_empty() && r.name == name)
+}
+
+/// Give a car or lorry the driving style of `cfg` (`Config::style`): the sideways force
+/// it accepts in a bend and how firmly it brakes for one. Calm is the traffic as it always
+/// drove (2.4-3.0 m/s² for cars, 1.6 for lorries and buses, bends braked for at 2 m/s²,
+/// which had them crawl round junctions at 18 km/h); normal and brisk take them as town
+/// drivers do, at 3.5-4 m/s² and more, braking later and firmer, and pull away a tenth and
+/// a quarter quicker.
+pub fn apply_style(state: &mut omsi_sim::traffic::AiState, seed: u64, heavy: bool, cfg: &Config) {
+    let t = cfg.style.clamp(0.0, 1.0);
+    // (calm, normal, brisk), between them in a line
+    let pick = |c: f32, n: f32, b: f32| if t < 0.5 { c + (n - c) * t * 2.0 } else { n + (b - n) * (t - 0.5) * 2.0 };
+    let own = (seed % 7) as f32 / 6.0;
+    state.lat_accel = if heavy { pick(1.6, 2.1, 2.6) } else { pick(2.4, 3.2, 3.8) + own * pick(0.6, 0.6, 0.8) };
+    state.bend_decel = pick(2.0, 2.6, 3.2);
+    state.accel_style = pick(1.0, 1.1, 1.25);
 }
 
 /// What a driver sees of the weather and the light, the same for every car.
@@ -878,6 +904,27 @@ mod tests {
         assert_eq!(cloud_cover("Cumulus 1"), 0.35);
         assert_eq!(cloud_cover("-1"), 0.0);
         assert_eq!(cloud_cover(""), 0.0);
+    }
+
+    #[test]
+    fn the_driving_style_calm_is_as_ever_and_brisk_is_firmer() {
+        let style = |s: f32, heavy: bool, seed: u64| {
+            let mut st = omsi_sim::traffic::AiState::new(0, 0.0, seed);
+            apply_style(&mut st, seed, heavy, &cfg_all(|c| c.style = s));
+            (st.lat_accel, st.bend_decel, st.accel_style)
+        };
+        // calm: the traffic's own values (2.4 + 0.1 per seed step for cars, 1.6 for lorries)
+        for seed in 0..7u64 {
+            let (lat, bend, acc) = style(0.0, false, seed);
+            assert!((lat - (2.4 + 0.1 * seed as f32)).abs() < 1e-5, "{seed}: {lat}");
+            assert_eq!((bend, acc), (2.0, 1.0));
+        }
+        assert_eq!(style(0.0, true, 3).0, 1.6);
+        // each step firmer than the last, for cars and lorries alike
+        for heavy in [false, true] {
+            let (c, n, b) = (style(0.0, heavy, 5), style(0.5, heavy, 5), style(1.0, heavy, 5));
+            assert!(c.0 < n.0 && n.0 < b.0 && c.1 < n.1 && n.1 < b.1 && c.2 < n.2 && n.2 < b.2, "{c:?} {n:?} {b:?}");
+        }
     }
 
     #[test]

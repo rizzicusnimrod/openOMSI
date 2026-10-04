@@ -79,6 +79,7 @@ pub const OPTIONS: &[PageDef] = &[
             ]),
             sec("AI drivers", &[
                 it("aid:enabled", "Realistic AI drivers", "Cars switch their lights on by the weather, use hazard lights, honk and make small mistakes"),
+                it("aid:style", "Driving style", "How firmly cars and lorries take bends and junctions: calm, normal or brisk"),
             ]),
             sec("Headlights", &[ai("aid:always_on"), ai("aid:bright_min"), ai("aid:bright_max"), ai("aid:bright_hyst")]),
             sec("Headlights in rain, snow and fog", &[ai("aid:precip_min"), ai("aid:precip_max"), ai("aid:snow_factor"), ai("aid:fog_min_m"), ai("aid:fog_max_m")]),

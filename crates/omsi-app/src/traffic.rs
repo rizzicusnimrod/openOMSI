@@ -1636,6 +1636,8 @@ impl Traffic {
         new.state.accel = old.state.accel;
         new.state.decel = old.state.decel;
         new.state.lat_accel = old.state.lat_accel;
+        new.state.bend_decel = old.state.bend_decel;
+        new.state.accel_style = old.state.accel_style;
         new.state.min_gap = old.state.min_gap;
         new.state.speed = 0.0;
         new.consist_reversed = reversed;
@@ -2889,14 +2891,12 @@ impl Traffic {
         } else {
             100.0
         };
-        // lorries and vans take bends more gently than cars
-        state.lat_accel = if kind == LaneKind::Air {
-            50.0
-        } else if heavy {
-            1.6
+        // lorries and vans take bends more gently than cars; how firmly, the driving style says
+        if kind == LaneKind::Air {
+            state.lat_accel = 50.0;
         } else {
-            2.4 + (seed % 7) as f32 * 0.1
-        };
+            crate::ai_drivers::apply_style(&mut state, seed, heavy, &self.driver_cfg);
+        }
         if bus.is_some() {
             // it brakes for its stops the way the town's drivers brake for a light: with
             // 1.5 m/s² of "comfortable" braking the planner braked at half that and crept
@@ -5266,11 +5266,17 @@ impl Traffic {
         // (models loaded from now on get the drivers' lamps or not; those loaded keep theirs,
         // and lamps without a driver light as the traffic has them)
         omsi_sim::ai_patch::set_enabled(cfg.enabled);
+        let restyle = cfg.style != self.driver_cfg.style;
         self.driver_cfg = cfg;
         for c in &mut self.cars {
             c.driver = None;
             c.two_stroke = None;
             c.driver_checked = false;
+            // (the driving style at once, on the road as it is)
+            if restyle && c.body.kind != MotionKind::Air {
+                let heavy = c.vehicle.ty.def.mass > 6.0 || c.bus.is_some();
+                crate::ai_drivers::apply_style(&mut c.state, c.seed, heavy, &self.driver_cfg);
+            }
         }
     }
 
