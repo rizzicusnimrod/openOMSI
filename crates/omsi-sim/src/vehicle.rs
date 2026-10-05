@@ -1016,6 +1016,11 @@ pub struct VehicleInstance {
     /// the coupled parts and the scripts still run every frame.
     pub ai_visuals: bool,
     ai_visuals_missed: f32,
+    /// Run the `{frame}` scripts even though the type has `{frame_ai}` ones: another
+    /// player's bus whose every variable comes over the network (`lan`) - what its scripts
+    /// draw (an IBIS, a passenger display, a ticket printer: `[scripttexture]`) then shows
+    /// their state, where the AI scripts drew nothing.
+    pub run_all_scripts: bool,
     var_index: HashMap<String, omsi_script::VarId>,
     /// Where each mesh's material properties come from, resolved against `var_index`
     /// (rebuilt when the vehicle gains engine variables).
@@ -1289,6 +1294,7 @@ impl VehicleInstance {
             cabin_air: None,
             ai_visuals: true,
             ai_visuals_missed: 0.0,
+            run_all_scripts: false,
             var_index,
             props_plan: PropsPlan::default(),
         }
@@ -2454,7 +2460,7 @@ impl VehicleInstance {
             self.put(Some(id), v);
         }
         let p = self.ty.program.clone();
-        if p.frame_ai.is_empty() {
+        if p.frame_ai.is_empty() || self.run_all_scripts {
             self.vm.run_frame(&p, &mut self.state, &mut self.host);
         } else {
             self.vm.run_frame_ai(&p, &mut self.state, &mut self.host);

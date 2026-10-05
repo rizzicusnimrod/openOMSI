@@ -3041,6 +3041,8 @@ fn sync_vars(lan: &mut LanSession, game: &mut LanGame, player: Option<&Player>, 
                 rv.synced_strings.insert(id, s);
             }
         }
+        // their whole state comes: the full scripts draw their displays from it
+        rv.vehicle.run_all_scripts = true;
     }
 }
 
@@ -3391,8 +3393,12 @@ pub fn tick(
             }
             None => drive_remote(rv, &pose, dt, false),
         }
-        show_display_texts(&mut rv.vehicle, &pose.texts);
-        show_freetex(&mut rv.vehicle, &pose.freetex);
+        // (a game that sends its strings with all its variables has them shown whole in
+        // `drive_remote`: the pose's display texts are cut at 32 characters)
+        if rv.synced_strings.is_empty() {
+            show_display_texts(&mut rv.vehicle, &pose.texts);
+            show_freetex(&mut rv.vehicle, &pose.freetex);
+        }
         let inside = frame.inside_of == Some(pose.id);
         sound_remote(rv, frame.audio, frame.listener, frame.muffled, inside);
     }
