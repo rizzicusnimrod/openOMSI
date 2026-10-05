@@ -933,6 +933,10 @@ impl InstanceBounds {
 }
 
 const CULL_BLOCK: usize = 128;
+/// How far the depth prepass reaches when the ambient occlusion alone reads it (m): the
+/// occlusion fades out between 60 and 200 m (ssao.wgsl), and what lies wholly beyond this
+/// cannot shade anything nearer.
+const AO_PREPASS_REACH: f32 = 220.0;
 const CULL_BLOCK_REBUILDS: usize = 8;
 
 fn transform_scale(transform: Mat4) -> f32 {
@@ -8654,12 +8658,27 @@ impl Renderer {
         }
         // the depth prepass: opaque and alpha-tested, single-sampled
         let mut prepass_batches: Vec<Batch> = Vec::new();
+        // When only the ambient occlusion reads it (multisampled plain graphics, no glass
+        // picture or puddles reusing its depth), what is wholly beyond the occlusion's reach
+        // stays out of it: drawn as far as the objects go (1.5 km and more), every object
+        // was recorded twice, a few milliseconds of the frame for a shade nobody sees there.
+        let prepass_reach = (ao_on
+            && self.options.msaa > 1
+            && !enhanced
+            && !glass_on
+            && !puddles_wanted
+            && omsi_cfg::env::var_os("OMSI_FULL_PREPASS").is_none())
+        .then_some(AO_PREPASS_REACH);
         let prepass_job = || -> (Vec<u32>, Vec<Batch>) {
             let mut items: Vec<DrawItem> = Vec::new();
             let mut list: Vec<u32> = Vec::new();
             let mut batches: Vec<Batch> = Vec::new();
-            for &(i, _, _) in &visible {
+            for &(i, z, _) in &visible {
                 let inst = &scene.instances[i];
+                // (`z` is the depth of the object's middle: all of it must be beyond)
+                if prepass_reach.is_some_and(|reach| z > reach && z - Self::bounding_sphere(scene, inst).1 > reach) {
+                    continue;
+                }
                 let cull = culls_back_faces(scene, inst);
                 for (ri, (_, _, slot)) in scene.meshes[inst.mesh].ranges.iter().enumerate() {
                     let mat_id = inst.materials.get(*slot as usize).copied().unwrap_or(0);

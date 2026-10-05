@@ -294,7 +294,18 @@ pub struct ScriptedObject {
     /// `[htmltexture]` pages shown on the object: (script texture index, texture). The
     /// pages themselves are `inst.html_textures`.
     pub htmls: Vec<(usize, TextureId)>,
+    /// Far away its script runs every `FAR_SCRIPT_EVERY` frames (`update_scripted`): the
+    /// time it has not run yet (s), and the frames since it last did.
+    pub pending_dt: f32,
+    pub idle_frames: u8,
 }
+
+/// Beyond this distance (m) a scripted object without sounds runs its script every
+/// `FAR_SCRIPT_EVERY` frames, in turn, with the time it missed: a junction's lamps or a
+/// turning sign that far off show no difference, and the scripts of everything within
+/// 800 m were a few milliseconds of every frame.
+const FAR_SCRIPT_RANGE: f64 = 250.0;
+const FAR_SCRIPT_EVERY: u8 = 4;
 
 /// Where a ray lands on a page (`[htmltexture]`) of a scenery object: see
 /// [`World::html_object_hit`].
@@ -4989,6 +5000,8 @@ impl World {
                         texts: Vec::new(),
                         arrivals: false,
                         htmls: Vec::new(),
+                        pending_dt: 0.0,
+                        idle_frames: o.id.rem_euclid(FAR_SCRIPT_EVERY as i64) as u8,
                     });
                 }
                 // An editor-only object still lays its paths out: OMSI's invisible
@@ -7746,6 +7759,8 @@ impl World {
                                 texts: script_texts,
                                 arrivals,
                                 htmls: html_pages,
+                                pending_dt: 0.0,
+                                idle_frames: map_id.rem_euclid(FAR_SCRIPT_EVERY as i64) as u8,
                             });
                         }
                     }
@@ -9466,17 +9481,29 @@ impl World {
         // boards are read here), then the scripts themselves, side by side on the worker
         // threads (a city's hundreds of scripted objects took a core's worth of a frame),
         // then what they did, in order again.
-        let mut inputs: Vec<Option<omsi_sim::scenery::SceneryVars>> = Vec::with_capacity(scripted.len());
+        let mut inputs: Vec<Option<(omsi_sim::scenery::SceneryVars, f32)>> = Vec::with_capacity(scripted.len());
         let controllers = self.controller_of_object.lock();
         for o in scripted.iter_mut() {
             let dist = (o.pos - center).length();
             if dist > 800.0 {
                 inputs.push(None);
+                o.pending_dt = 0.0;
                 if let (Some(a), Some(mut ss)) = (audio, o.sounds.take()) {
                     ss.stop_all(a);
                 }
                 continue;
             }
+            // far away (and silent) the script runs every few frames, in turn, on the time
+            // it missed
+            o.pending_dt += dt;
+            o.idle_frames = o.idle_frames.saturating_add(1);
+            let due = dist <= FAR_SCRIPT_RANGE || o.sounds.is_some() || o.idle_frames >= FAR_SCRIPT_EVERY;
+            let step = if due {
+                o.idle_frames = 0;
+                std::mem::take(&mut o.pending_dt)
+            } else {
+                0.0
+            };
             // the object's own hours ([NightMapMode]): in use, and lit while in use and the
             // daylight under its own threshold (0.6, or 0.3-0.75 with a [NightMapMode])
             let use_ = InUse::new(o.ty.sco.night_map_mode, o.map_id as u64);
@@ -9494,13 +9521,13 @@ impl World {
                 switch: None,
             };
             // the scripts read the simulation's time of day (clocks, the display's blinking)
-            if let Some(c) = &boards.clock {
+            if let (Some(c), true) = (&boards.clock, due) {
                 let own = &mut o.inst.host.clock;
                 *own = c.clone();
-                // (the update moves it on by `dt` again)
+                // (the update moves it on by `step` again)
                 if !own.paused {
-                    own.time -= dt as f64;
-                    own.run_time -= dt as f64;
+                    own.time -= step as f64;
+                    own.run_time -= step as f64;
                 }
             }
             // a departure display: the buses due at its stop
@@ -9539,19 +9566,19 @@ impl World {
                     o.inst.host.html_departures_gen = boards.departures_gen;
                 }
             }
-            inputs.push(Some(vars));
+            inputs.push(due.then_some((vars, step)));
         }
         drop(controllers);
         {
             use rayon::prelude::*;
             scripted.par_iter_mut().zip(inputs.par_iter()).for_each(|(o, vars)| {
-                if let Some(vars) = vars {
-                    o.inst.update(dt, vars);
+                if let Some((vars, step)) = vars {
+                    o.inst.update(*step, vars);
                 }
             });
         }
         for (o, vars) in scripted.iter_mut().zip(inputs.iter()) {
-            let Some(nightlight) = vars.as_ref().map(|v| v.nightlight) else {
+            let Some(nightlight) = vars.as_ref().map(|v| v.0.nightlight) else {
                 continue;
             };
             let dist = (o.pos - center).length();
