@@ -95,6 +95,11 @@ impl<T: Copy> Track<T> {
     /// The samples around `ms` and how far between them it lies (0..1, more when guessing
     /// on past the last).
     fn around(&self, ms: f64) -> Option<(&T, &T, f64)> {
+        self.around_span(ms).map(|(a, b, k, _)| (a, b, k))
+    }
+
+    /// `around`, with the time between the two samples (s; 0 for one alone).
+    fn around_span(&self, ms: f64) -> Option<(&T, &T, f64, f64)> {
         let s = &self.samples;
         let last = s.last()?;
         if s.len() == 1 || ms >= last.ms {
@@ -105,14 +110,16 @@ impl<T: Copy> Track<T> {
             } else {
                 1.0
             };
-            return Some((&prev.v, &last.v, t));
+            let secs = if s.len() > 1 { span / 1000.0 } else { 0.0 };
+            return Some((&prev.v, &last.v, t, secs));
         }
         if ms <= s[0].ms {
-            return Some((&s[0].v, &s[0].v, 0.0));
+            return Some((&s[0].v, &s[0].v, 0.0, 0.0));
         }
         let k = s.iter().position(|x| x.ms > ms)?;
         let (a, b) = (&s[k - 1], &s[k]);
-        Some((&a.v, &b.v, (ms - a.ms) / (b.ms - a.ms).max(1.0)))
+        let span = (b.ms - a.ms).max(1.0);
+        Some((&a.v, &b.v, (ms - a.ms) / span, span / 1000.0))
     }
 }
 
@@ -155,6 +162,48 @@ fn lerp_angle(a: f64, b: f64, t: f64) -> f64 {
     (a + d * t).rem_euclid(360.0)
 }
 
+/// Where a car is between two of the host's poses, `k` of the way (more than 1: guessed on
+/// past the last), `span` seconds apart. Along a curve through both that leaves each the
+/// way it was heading at its speed (a cubic Hermite curve): drawn along the straight line
+/// between them, a car went round a bend as a polygon and changed its pace with a jolt at
+/// every pose, ten times a second. Past the last pose it goes on the way it was heading.
+/// The straight line where the poses do not fit a drive between them (a car reversing or
+/// coming to a stop, a pose missing, a jump).
+fn car_path(a: &CarState, b: &CarState, k: f64, span: f64) -> DVec2 {
+    let (pa, pb) = (DVec2::new(a.x, a.y), DVec2::new(b.x, b.y));
+    let straight = pa + (pb - pa) * k;
+    let ahead = |c: &CarState| {
+        let h = (c.heading as f64).to_radians();
+        DVec2::new(h.sin(), h.cos()) * c.speed as f64
+    };
+    let (sa, sb) = (a.speed as f64, b.speed as f64);
+    let chord = (pb - pa).length();
+    let expect = (sa.abs() + sb.abs()) * 0.5 * span;
+    let fits = span > 0.0 && sa > 0.5 && sb > 0.5 && (chord - expect).abs() < 0.35 * expect;
+    if !fits {
+        return straight;
+    }
+    let (va, vb) = (ahead(a) * span, ahead(b) * span);
+    if k > 1.0 {
+        return pb + vb * (k - 1.0);
+    }
+    let (k2, k3) = (k * k, k * k * k);
+    pa * (2.0 * k3 - 3.0 * k2 + 1.0) + va * (k3 - 2.0 * k2 + k) + pb * (3.0 * k2 - 2.0 * k3) + vb * (k3 - k2)
+}
+
+/// What a client keeps of each of the host's cars beyond its poses: the horn's toots heard,
+/// its speed a frame ago and how hard it accelerates (m/s², smoothed: the screeching tyres
+/// and a two-stroke's puff pulling away), how long it has been drawn here, its two-stroke's
+/// smoke.
+#[derive(Default)]
+struct CarExtras {
+    horns: u8,
+    speed: f32,
+    acc: f32,
+    age: f64,
+    smoke: Option<crate::ai_drivers::TwoStroke>,
+}
+
 /// A client's copy of the host's world.
 #[derive(Default)]
 struct Mirror {
@@ -178,6 +227,11 @@ struct Mirror {
     drawn_people: HashSet<u32>,
     /// Distance each car has rolled (its wheels).
     odometer: HashMap<u32, f32>,
+    /// What its driver does, by car (`CarExtras`).
+    extras: HashMap<u32, CarExtras>,
+    /// `OMSI_DEBUG_DRIVERS`: seconds since the last report, toots heard in all.
+    debug_t: f32,
+    toots_heard: u32,
     /// The host's clock minus ours (ms), from the frames that came fastest.
     offset: Option<f64>,
     play: PlayClock,
@@ -684,15 +738,24 @@ impl LanWorld {
                         bank: c.vehicle.bank as f32,
                         speed,
                         steer: c.body.steer,
-                        blinker: c.state.blinker.clamp(0, 3) as u8,
+                        // (as its driver shows them: their own lights, hazards, a
+                        // forgotten indicator - `ai_drivers`)
+                        blinker: c.shown.blinker.clamp(0, 3) as u8,
                         brake: c.state.braking,
-                        lights: t.night,
+                        lights: c.shown.lights,
                         at_station: if c.at_station() {
                             1
                         } else if !c.vehicle.station_released() {
                             -1
                         } else {
                             0
+                        },
+                        looks: nw::CarLooks {
+                            rear_fog: c.shown.rear_fog,
+                            high_beam: c.shown.high_beam,
+                            horns: c.shown.horns & 3,
+                            bulb: c.shown.bulb,
+                            smoker: c.shown.smoker,
                         },
                     });
                 }
@@ -927,6 +990,7 @@ impl LanWorld {
             m.drawn_people.clear();
             m.shown.clear();
             m.odometer.clear();
+            m.extras.clear();
             log::info!(
                 "LAN: {}",
                 if want_on {
@@ -1062,6 +1126,7 @@ impl LanWorld {
                 m.drawn_cars.remove(&id);
                 m.shown.remove(&id);
                 m.odometer.remove(&id);
+                m.extras.remove(&id);
             }
             let new: Vec<u32> = m
                 .cars
@@ -1132,7 +1197,7 @@ impl LanWorld {
                 let Some(&i) = index.get(&(*id as u64)) else {
                     continue;
                 };
-                let Some((a, b, k)) = track.around(render_ms) else {
+                let Some((a, b, k, span)) = track.around_span(render_ms) else {
                     continue;
                 };
                 let mut c = *b;
@@ -1142,8 +1207,9 @@ impl LanWorld {
                 // (a jump of more than 30 m is a teleport, not a drive: no gliding)
                 let far = (DVec2::new(b.x - a.x, b.y - a.y)).length() > 30.0;
                 if !far {
-                    c.x = a.x + (b.x - a.x) * k;
-                    c.y = a.y + (b.y - a.y) * k;
+                    let p = car_path(a, b, k, span);
+                    c.x = p.x;
+                    c.y = p.y;
                     c.z = a.z + (b.z - a.z) * kk;
                     c.heading = lerp_angle(a.heading as f64, b.heading as f64, k) as f32;
                     c.pitch = a.pitch + (b.pitch - a.pitch) * kk as f32;
@@ -1156,6 +1222,8 @@ impl LanWorld {
                     c.blinker = a.blinker;
                     c.brake = a.brake;
                     c.at_station = a.at_station;
+                    c.lights = a.lights;
+                    c.looks = nw::CarLooks { horns: b.looks.horns, ..a.looks };
                 }
                 work.push((i, c, far as u8 as f64));
             }
@@ -1221,6 +1289,74 @@ impl LanWorld {
                     .filter_map(|(i, car)| frames.get(&i).map(|f| (&mut car.vehicle, f)))
                     .collect();
                 run.par_iter_mut().for_each(|(v, f)| v.update_ai(dt, f));
+            }
+            // what the host's drivers do beyond lights and indicators (`ai_drivers`): the
+            // model's lamps of each side (a broken bulb), the rear fog lamp, a flash of the
+            // high beams, the horn, a two-stroke's smoke - and how hard each brakes, for the
+            // screeching tyres. Without this a client's cars, whose models have their lamps
+            // switched side by side, drove without headlights or brake lights.
+            {
+                use crate::ai_drivers::{
+                    VAR_BRAKE_L, VAR_BRAKE_R, VAR_HEAD_L, VAR_HEAD_R, VAR_HIGH_BEAM, VAR_REAR_FOG, VAR_SMOKE_ALPHA, VAR_SMOKE_FREQ,
+                    VAR_SMOKE_LIFE, VAR_SMOKE_SPEED,
+                };
+                let (cfg, conditions) = (t.driver_cfg.clone(), t.conditions);
+                // OMSI_DEBUG_DRIVERS: every 10 s what the host's drivers show here
+                m.debug_t += dt;
+                if m.debug_t >= 10.0 && omsi_cfg::env::var_os("OMSI_DEBUG_DRIVERS").is_some() {
+                    m.debug_t = 0.0;
+                    let count = |f: &dyn Fn(&CarState) -> bool| work.iter().filter(|w| f(&w.1)).count();
+                    log::info!(
+                        "LAN: the host's cars here: {} drawn, {} lit, {} braking, {} hazards, {} rear fog lamps, {} high beams, {} broken bulbs, {} smoky two-strokes; {} toots heard",
+                        work.len(),
+                        count(&|c| c.lights),
+                        count(&|c| c.brake),
+                        count(&|c| c.blinker == 3),
+                        count(&|c| c.looks.rear_fog),
+                        count(&|c| c.looks.high_beam),
+                        count(&|c| c.looks.bulb != 0),
+                        count(&|c| c.looks.smoker),
+                        m.toots_heard
+                    );
+                }
+                for (i, c, _) in &work {
+                    let car = &mut t.cars[*i];
+                    let x = m.extras.entry(c.id).or_insert_with(|| CarExtras { horns: c.looks.horns, speed: c.speed, ..Default::default() });
+                    if dt > 0.0 {
+                        let a = (c.speed - x.speed) / dt;
+                        x.acc += (a - x.acc) * (dt / 0.3).min(1.0);
+                    }
+                    x.speed = c.speed;
+                    x.age += dt as f64;
+                    car.state.acc = x.acc;
+                    let v = &mut car.vehicle;
+                    if v.ty.ai_patch.lamps {
+                        let on = |b: bool| b as i32 as f32;
+                        let high = v.ty.ai_patch.high_beam;
+                        let head = c.lights || (c.looks.high_beam && high);
+                        v.set_engine_var(VAR_HEAD_L, on(head && c.looks.bulb != 1));
+                        v.set_engine_var(VAR_HEAD_R, on(head && c.looks.bulb != 2));
+                        v.set_engine_var(VAR_BRAKE_L, on(c.brake && c.looks.bulb != 3));
+                        v.set_engine_var(VAR_BRAKE_R, on(c.brake && c.looks.bulb != 4));
+                        v.set_engine_var(VAR_REAR_FOG, on(c.looks.rear_fog));
+                        v.set_engine_var(VAR_HIGH_BEAM, on(c.looks.high_beam && high));
+                    }
+                    // a toot for each the host's driver gave since
+                    let toots = c.looks.horns.wrapping_sub(x.horns) & 3;
+                    x.horns = c.looks.horns;
+                    for _ in 0..toots {
+                        v.host.fired_triggers.push("ev_AI_Horn".into());
+                    }
+                    m.toots_heard += toots as u32;
+                    if v.ty.ai_patch.two_stroke {
+                        let s = x.smoke.get_or_insert_with(|| crate::ai_drivers::TwoStroke::with_smoker(c.looks.smoker));
+                        let smoke = s.step(&cfg, &conditions, dt, c.speed, -x.acc, x.age);
+                        v.set_engine_var(VAR_SMOKE_FREQ, smoke.freq);
+                        v.set_engine_var(VAR_SMOKE_LIFE, smoke.life);
+                        v.set_engine_var(VAR_SMOKE_ALPHA, smoke.alpha);
+                        v.set_engine_var(VAR_SMOKE_SPEED, smoke.speed);
+                    }
+                }
             }
             // the timetable buses' displays
             for (i, id) in shown {
@@ -1498,7 +1634,7 @@ fn describe(
 
 #[cfg(test)]
 mod tests {
-    use super::{relative_to_roots, PlayClock};
+    use super::{car_path, relative_to_roots, CarState, PlayClock};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -1548,5 +1684,45 @@ mod tests {
         // a new session: taken at once
         now += 16.0;
         assert_eq!(c.step(now, now + 5000.0, 500.0), now + 5000.0);
+    }
+
+    /// A car on a circle of radius `r` round the origin, `deg` degrees along it (from the
+    /// south, going round clockwise as seen from above), at `v` m/s.
+    fn on_circle(r: f64, deg: f64, v: f32) -> CarState {
+        let a = deg.to_radians();
+        // (heading: degrees clockwise from north; going round clockwise from (0, -r) it
+        // heads west at first)
+        CarState { x: -r * a.sin(), y: -r * a.cos(), heading: (270.0 + deg).rem_euclid(360.0) as f32, speed: v, ..Default::default() }
+    }
+
+    #[test]
+    fn a_car_between_two_poses_goes_round_the_bend() {
+        // straight on at 14 m/s: as on the straight line between them
+        let a = CarState { x: 0.0, y: 0.0, heading: 0.0, speed: 14.0, ..Default::default() };
+        let b = CarState { y: 1.4, ..a };
+        for k in [0.0, 0.25, 0.5, 0.8, 1.0] {
+            let p = car_path(&a, &b, k, 0.1);
+            assert!(p.x.abs() < 1e-9 && (p.y - 1.4 * k).abs() < 1e-9, "{k}: {p:?}");
+        }
+        // round a bend of 20 m at 10 m/s, poses a tenth of a second (2.9 degrees) apart: the
+        // middle lies on the arc, not on the chord inside it
+        let (r, v, span) = (20.0, 10.0f32, 0.1);
+        let step = (v as f64 * span / r).to_degrees();
+        let (a, b) = (on_circle(r, 30.0, v), on_circle(r, 30.0 + step, v));
+        let mid = car_path(&a, &b, 0.5, span);
+        let chord_mid = glam::DVec2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+        assert!((mid.length() - r).abs() < 0.001, "{} off the arc", mid.length() - r);
+        assert!((chord_mid.length() - r).abs() > 0.005);
+        // past the last pose: on the way it was heading
+        let on = car_path(&a, &b, 1.5, span);
+        let ahead = glam::DVec2::new(b.x, b.y) + glam::DVec2::new((b.heading as f64).to_radians().sin(), (b.heading as f64).to_radians().cos()) * 0.5;
+        assert!((on - ahead).length() < 1e-6);
+        // a car stopping, reversing or jumping: the straight line
+        let stop = CarState { speed: 0.2, ..b };
+        let p = car_path(&a, &stop, 0.5, span);
+        assert!((p - chord_mid).length() < 1e-9);
+        let jump = CarState { x: b.x + 5.0, ..b };
+        let p = car_path(&a, &jump, 0.5, span);
+        assert!((p - glam::DVec2::new((a.x + jump.x) / 2.0, (a.y + jump.y) / 2.0)).length() < 1e-9);
     }
 }

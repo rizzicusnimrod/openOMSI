@@ -243,6 +243,8 @@ pub struct AiCar {
     pub two_stroke: Option<crate::ai_drivers::TwoStroke>,
     /// `driver` has been looked at (a car none is made for is not asked again).
     pub driver_checked: bool,
+    /// What its driver shows this frame, for the LAN clients' copies (`lan_world`).
+    pub shown: Shown,
 }
 
 /// A free parking space beside a lane that a car means to park in: the space of parked car
@@ -258,6 +260,21 @@ pub struct ParkPlan {
     pub ramped: bool,
     /// In the space and standing: the parked object takes its place at the next sync.
     pub done: bool,
+}
+
+/// What a car's driver shows (`drive_driver`), as the LAN clients' copies draw it: its
+/// lights and indicators, the rear fog lamp, a flash of the high beams, the horn's toots so
+/// far (wrapping), a broken bulb (0 none, 1 head left, 2 head right, 3 brake left, 4 brake
+/// right) and a badly tuned two-stroke.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Shown {
+    pub lights: bool,
+    pub blinker: i32,
+    pub rear_fog: bool,
+    pub high_beam: bool,
+    pub horns: u8,
+    pub bulb: u8,
+    pub smoker: bool,
 }
 
 impl AiCar {
@@ -1011,6 +1028,7 @@ fn drive_driver(
                 v.set_engine_var(n, x);
             }
         }
+        car.shown = Shown { lights: night, blinker: car.state.blinker, horns: car.shown.horns, ..Default::default() };
         return (night, car.state.blinker);
     };
     let input = Input { dt, speed: car.state.speed, accel: car.state.acc, blinker: car.state.blinker, night: dark, at_stop, ..seen };
@@ -1033,6 +1051,21 @@ fn drive_driver(
     if out.horn {
         v.host.fired_triggers.push("ev_AI_Horn".into());
     }
+    car.shown = Shown {
+        lights: out.lights,
+        blinker: out.blinker,
+        rear_fog: out.rear_fog,
+        high_beam: out.flash,
+        horns: car.shown.horns.wrapping_add(out.horn as u8),
+        bulb: match d.bulb {
+            Bulb::None => 0,
+            Bulb::HeadLeft => 1,
+            Bulb::HeadRight => 2,
+            Bulb::BrakeLeft => 3,
+            Bulb::BrakeRight => 4,
+        },
+        smoker: car.two_stroke.as_ref().is_some_and(|s| s.smoker()),
+    };
     if let Some(s) = car.two_stroke.as_mut() {
         let smoke = s.step(cfg, conditions, dt, car.state.speed, d.decel(), d.age());
         v.set_engine_var(VAR_SMOKE_FREQ, smoke.freq);
@@ -3101,6 +3134,7 @@ impl Traffic {
             why: ("", 0.0),
             screech: None,
             hard_brake: 0.0,
+            shown: Shown::default(),
             held: false,
             geo_block: None,
             lead_info: None,
@@ -7873,6 +7907,7 @@ impl Traffic {
             why: ("", 0.0),
             screech: None,
             hard_brake: 0.0,
+            shown: Shown::default(),
             held: false,
             geo_block: None,
             lead_info: None,

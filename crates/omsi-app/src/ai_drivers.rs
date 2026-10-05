@@ -1094,6 +1094,16 @@ impl TwoStroke {
         TwoStroke { smoker: d.chance(cfg.smokers), puff: 0.0 }
     }
 
+    /// The copy of a car the LAN host has (`lan_world`): badly tuned or not as the host's.
+    pub fn with_smoker(smoker: bool) -> TwoStroke {
+        TwoStroke { smoker, puff: 0.0 }
+    }
+
+    /// A badly tuned car, smoking all the time.
+    pub fn smoker(&self) -> bool {
+        self.smoker
+    }
+
     /// `age` seconds since the car came onto the road (its engine runs from then on),
     /// `decel` the driver's smoothed deceleration (negative pulling away).
     pub fn step(&mut self, cfg: &Config, c: &Conditions, dt: f32, speed: f32, decel: f32, age: f64) -> Smoke {

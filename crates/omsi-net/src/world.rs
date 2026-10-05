@@ -36,6 +36,10 @@
 //!   gone 6, each: kind 1 (0 car, 1 person), id 24
 //!   (first datagram, once a second) parked 1: then complete 1, count 7, each: the map
 //!   id of a parking space whose car has driven off 32
+//!   (the custom fork) looks: tag 4 (0b1010), then for each car above, in order: rear fog
+//!   lamp 1, high beams 1, horn toots so far 2 (wrapping), broken bulb 3 (0 none, 1 head
+//!   left, 2 head right, 3 brake left, 4 brake right), a smoky two-stroke 1 - what its
+//!   driver does (`ai_drivers`); an older game neither sends nor reads it
 //! ```
 //!
 //! A car takes 17 bytes, a person 12 (17 while waiting at a stop), a light program 6.
@@ -57,6 +61,9 @@ pub const STANDING_EVERY: f32 = 1.0;
 pub const LIGHTS_EVERY: f32 = 1.0;
 
 const CAR_BITS: usize = 24 + 19 + 19 + 17 + 12 + 8 + 8 + 11 + 8 + 2 + 1 + 1 + 2;
+/// A car's looks at the end of the datagram, and the tag before them.
+const LOOKS_BITS: usize = 8;
+const LOOKS_TAG: u64 = 0b1010;
 const PERSON_FOOT_BITS: usize = 24 + 2 + 2 + 19 + 19 + 17 + 8 + 6 + 1;
 const PERSON_WAIT_BITS: usize = 32 + 8;
 const PERSON_ABOARD_BITS: usize = 24 + 2 + 2 + 24 + 12 + 13 + 10 + 8 + 8;
@@ -90,6 +97,41 @@ pub struct CarState {
     pub lights: bool,
     /// `AI_Scheduled_AtStation` as the host gives it: 0, 1 (boarding), -1 (leaving).
     pub at_station: i8,
+    /// What its driver does beyond the lights and the indicators (`ai_drivers`).
+    pub looks: CarLooks,
+}
+
+/// What a random car's driver does that the client's copy shows (`ai_drivers`): the rear
+/// fog lamp, a flash of the high beams, the horn (toots so far, wrapping at 4), a broken
+/// bulb (0 none, 1 head left, 2 head right, 3 brake left, 4 brake right) and whether it is
+/// a badly tuned two-stroke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CarLooks {
+    pub rear_fog: bool,
+    pub high_beam: bool,
+    pub horns: u8,
+    pub bulb: u8,
+    pub smoker: bool,
+}
+
+impl CarLooks {
+    fn bits(&self) -> u64 {
+        self.rear_fog as u64
+            | (self.high_beam as u64) << 1
+            | ((self.horns & 3) as u64) << 2
+            | ((self.bulb.min(7)) as u64) << 4
+            | (self.smoker as u64) << 7
+    }
+
+    fn from_bits(b: u64) -> CarLooks {
+        CarLooks {
+            rear_fog: b & 1 != 0,
+            high_beam: b >> 1 & 1 != 0,
+            horns: (b >> 2 & 3) as u8,
+            bulb: (b >> 4 & 7) as u8,
+            smoker: b >> 7 & 1 != 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -239,10 +281,10 @@ pub fn encode(frame: &WorldFrame, protocol: u8) -> Vec<Vec<u8>> {
             &[]
         };
         let parked: Option<(bool, &[u32])> = if first { frame.parked.as_ref().map(|(c, k)| (*c && k.len() <= 127, &k[..k.len().min(127)])) } else { None };
-        left = left.saturating_sub(lights.len() * LIGHT_BITS + gone.len() * GONE_BITS + 1 + parked.map(|p| 8 + p.1.len() * 32).unwrap_or(0));
+        left = left.saturating_sub(lights.len() * LIGHT_BITS + gone.len() * GONE_BITS + 1 + parked.map(|p| 8 + p.1.len() * 32).unwrap_or(0) + 4);
         let c0 = ci;
-        while ci < cars.len() && ci - c0 < 127 && left >= CAR_BITS {
-            left -= CAR_BITS;
+        while ci < cars.len() && ci - c0 < 127 && left >= CAR_BITS + LOOKS_BITS {
+            left -= CAR_BITS + LOOKS_BITS;
             ci += 1;
         }
         let p0 = pi;
@@ -367,6 +409,10 @@ pub fn encode(frame: &WorldFrame, protocol: u8) -> Vec<Vec<u8>> {
                 w.put(*k as u64, 32);
             }
         }
+        w.put(LOOKS_TAG, 4);
+        for c in &cars[c0..ci] {
+            w.put(c.looks.bits(), LOOKS_BITS as u32);
+        }
         out.push(w.finish());
         first = false;
         if ci >= cars.len() && pi >= people.len() {
@@ -430,6 +476,7 @@ pub fn decode(data: &[u8], protocol: u8) -> Option<WorldFrame> {
             brake,
             lights,
             at_station,
+            looks: CarLooks::default(),
         });
     }
     let n = r.get(8)?;
@@ -498,6 +545,21 @@ pub fn decode(data: &[u8], protocol: u8) -> Option<WorldFrame> {
             keys.push(r.get(32)? as u32);
         }
         f.parked = Some((complete, keys));
+    }
+    // the cars' looks (the custom fork's; an older game's datagram has only its padding here)
+    if r.get(4) == Some(LOOKS_TAG) {
+        let mut looks = Vec::with_capacity(f.cars.len());
+        for _ in 0..f.cars.len() {
+            match r.get(LOOKS_BITS as u32) {
+                Some(b) => looks.push(CarLooks::from_bits(b)),
+                None => break,
+            }
+        }
+        if looks.len() == f.cars.len() {
+            for (c, l) in f.cars.iter_mut().zip(looks) {
+                c.looks = l;
+            }
+        }
     }
     Some(f)
 }
@@ -644,6 +706,7 @@ mod tests {
             brake: true,
             lights: true,
             at_station: -1,
+            looks: CarLooks { rear_fog: true, high_beam: false, horns: 3, bulb: 2, smoker: true },
         }
     }
 
@@ -713,8 +776,9 @@ mod tests {
         };
         let d = encode(&f, 4);
         assert_eq!(d.len(), 1);
-        // (two parked spaces add 9 bytes: 1 + 1 + 7 + 2 x 32 bits)
-        assert!(d[0].len() <= 132, "{} bytes", d[0].len());
+        // (two parked spaces add 9 bytes: 1 + 1 + 7 + 2 x 32 bits; the cars' looks 3: a
+        // tag of 4 bits and a byte a car)
+        assert!(d[0].len() <= 135, "{} bytes", d[0].len());
         let g = decode(&d[0], 4).unwrap();
         assert_eq!((g.seq, g.host_ms), (65535, 123_456_789));
         assert_eq!(g.cars.len(), 2);
@@ -724,6 +788,7 @@ mod tests {
         assert!((a.pitch - b.pitch).abs() < 0.051 && (a.bank - b.bank).abs() < 0.051);
         assert!((a.speed - b.speed).abs() < 0.026 && (a.steer - b.steer).abs() < 0.26);
         assert_eq!((b.blinker, b.brake, b.lights, b.at_station), (2, true, true, -1));
+        assert_eq!(b.looks, a.looks);
         assert_eq!(g.cars[1].id, MAX_ID);
         assert_eq!(g.people.len(), 4);
         match g.people[0].place {
