@@ -103,6 +103,7 @@ pub const OPTIONS: &[PageDef] = &[
                 ai("aid:flash_decel"),
                 ai("aid:flash_dazzle"),
                 ai("aid:flash_dazzle_m"),
+                ai("aid:flash_courtesy"),
             ]),
             sec("Driver mistakes", &[
                 it("aid:flaws", "Drivers make mistakes", "A few drivers forget to indicate or switch on their lights, some cars have a broken bulb"),

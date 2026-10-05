@@ -607,7 +607,13 @@ pub(crate) fn run_offscreen(
             t.others.extend(own_outlines(player.as_ref(), &[]));
             t.player_priority = player.as_ref().and_then(|p| p.vehicle.var("TrafficPriority")).is_some_and(|v| v > 0.5);
             t.player_blinker = player.as_ref().map(|p| lan::indicator(&p.vehicle)).unwrap_or(0);
+            // OMSI_PLAYER_BLINKER=1 (left) or 2 (right): the bus indicates that way for 15 s in
+            // every 30 (a run has nobody at the switch), for trying the cars that let it out
+            if let Some(side) = omsi_cfg::env::var("OMSI_PLAYER_BLINKER").ok().and_then(|v| v.trim().parse::<u8>().ok()) {
+                t.player_blinker = if t_s % 30.0 < 15.0 { side } else { 0 };
+            }
             t.player_high_beam = player.as_ref().is_some_and(|p| crate::traffic_link::high_beam(&p.vehicle));
+            t.others_signals = crate::traffic_link::lan_signals(&remotes_off);
             t.tick(dt, player.as_ref().map(|p| player_outline(p)));
             world.set_switches(&t.switch_requests());
             world.set_signals(&t.signal_aspects(&world.signal_routes, None));

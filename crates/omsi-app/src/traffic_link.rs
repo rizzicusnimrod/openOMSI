@@ -71,6 +71,11 @@ pub(crate) fn lan_outlines(game: &lan::LanGame) -> Vec<(u32, traffic::PlayerBox)
         .collect()
 }
 
+/// The LAN players' high beams and indicators by session id (`Traffic::others_signals`).
+pub(crate) fn lan_signals(game: &lan::LanGame) -> hashbrown::HashMap<u32, (bool, u8)> {
+    game.remotes.iter().map(|(id, r)| (*id, (high_beam(r.vehicle()), r.last.blinker))).collect()
+}
+
 /// What the traffic needs to know every frame besides the time: where the player looks
 /// from, the day of the week, who walks the footpaths, what hides what.
 pub(crate) fn traffic_inputs(

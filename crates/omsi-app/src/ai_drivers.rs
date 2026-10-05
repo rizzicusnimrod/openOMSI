@@ -95,6 +95,9 @@ pub struct Config {
     /// `flash_dazzle_m` metres.
     pub flash_dazzle: f32,
     pub flash_dazzle_m: f32,
+    /// Drivers who flash to say "go ahead" when they let someone go first: a bus out of its
+    /// stop, a car in beside them at a merge.
+    pub flash_courtesy: f32,
     /// The bad habits (all off when `flaws` is false): never indicating; leaving the
     /// indicator on after a turn (`forget_chance` of the turns, for 15-60 s); forgetting the
     /// lights until it is really dark (`nolights_bright`); the rear fog lamp in rain and at
@@ -169,6 +172,7 @@ impl Default for Config {
             flash_decel: 5.0,
             flash_dazzle: 0.6,
             flash_dazzle_m: 250.0,
+            flash_courtesy: 0.4,
             flaws: true,
             no_indicator: 0.05,
             forget_indicator: 0.05,
@@ -284,6 +288,7 @@ config_fields! {
     flash_wait_min: num, flash_wait_max: num, flash_repeat_min: num, flash_repeat_max: num, flash_max: count,
     flash_angry: share, flash_decel: num,
     flash_dazzle: share, flash_dazzle_m: num,
+    flash_courtesy: share,
     flaws: switch,
     no_indicator: share, forget_indicator: share, forget_chance: share, forget_min: num, forget_max: num,
     no_lights: share, no_lights_bright_min: num, no_lights_bright_max: num,
@@ -440,6 +445,7 @@ pub const OPTION_PAGES: &[(&str, &[OptionRow])] = {
             adv("flash_decel", "Braking that provokes them", "m/s², for the vehicle ahead from 20 km/h or more", Accel, 3.0, 9.0, 0.5),
             row("flash_dazzle", "Dazzled drivers", "Share of the oncoming drivers who flash when your high beams are on in the dark", Percent, 0.0, 1.0, 0.05),
             adv("flash_dazzle_m", "Dazzled from", "Metres: how far away your high beams dazzle them", Metres, 50.0, 500.0, 25.0),
+            row("flash_courtesy", "Courteous drivers", "Share of the drivers who flash \"go ahead\" when they let a bus out of its stop or a car in beside them", Percent, 0.0, 1.0, 0.05),
         ]),
         ("AI driver habits", &[
             switch("flaws", "Imperfect drivers", "Some drivers have one of the bad habits below (off: none of them)"),
@@ -622,6 +628,9 @@ pub struct Input {
     pub held_ahead: bool,
     /// An oncoming bus's high beams are in the driver's eyes.
     pub dazzled: bool,
+    /// The vehicle the driver lets go first by choice, close by (a bus out of its stop, a
+    /// car in beside them at a merge), by id.
+    pub courtesy: Option<u64>,
 }
 
 /// The vehicle in front, as the driver sees it.
@@ -667,6 +676,7 @@ pub struct Driver {
     pusher: bool,
     provokable: bool,
     dazzlable: bool,
+    courteous: bool,
     pub bulb: Bulb,
     bright_thr: f32,
     precip_thr: f32,
@@ -715,6 +725,9 @@ pub struct Driver {
     provoked_cool: f64,
     dazzled: f32,
     dazzle_cool: f64,
+    /// Whom the driver last let go first with a flash, and not again before this.
+    courtesy_for: Option<u64>,
+    courtesy_cool: f64,
     /// Why the driver last decided to flash, until `take_flash_reason` (for the log).
     flash_reason: Option<&'static str>,
 }
@@ -752,6 +765,7 @@ impl Driver {
         let follow_patience = d.between(cfg.flash_follow_min, cfg.flash_follow_max);
         let wait_patience = d.between(cfg.flash_wait_min, cfg.flash_wait_max);
         let dazzle_reaction = d.between(0.5, 2.0);
+        let courteous = d.chance(cfg.flash_courtesy);
         Driver {
             dice: d,
             clock: 0.0,
@@ -767,6 +781,7 @@ impl Driver {
             pusher,
             provokable,
             dazzlable,
+            courteous,
             bulb,
             bright_thr,
             precip_thr,
@@ -810,6 +825,8 @@ impl Driver {
             provoked_cool: 0.0,
             dazzled: 0.0,
             dazzle_cool: 0.0,
+            courtesy_for: None,
+            courtesy_cool: 0.0,
             flash_reason: None,
         }
     }
@@ -960,7 +977,7 @@ impl Driver {
     }
 
     /// Why the driver has decided to flash since the last call ("provoked", "cut in",
-    /// "slowcoach", "blocked", "dazzled").
+    /// "slowcoach", "blocked", "dazzled", "courtesy").
     pub fn take_flash_reason(&mut self) -> Option<&'static str> {
         self.flash_reason.take()
     }
@@ -976,8 +993,8 @@ impl Driver {
 
     /// The high beams: provoked (made to brake hard by the vehicle ahead, or one cutting in
     /// close), pushy (held up by a slowcoach, or behind the player's bus standing for no
-    /// reason the driver can see) or dazzled by an oncoming bus's high beams. True while
-    /// one of the flashes is on.
+    /// reason the driver can see), dazzled by an oncoming bus's high beams, or courteous
+    /// (letting someone go first). True while one of the flashes is on.
     fn flash_lights(&mut self, cfg: &Config, i: &Input, kmh: f32) -> bool {
         let t = self.clock;
         let dt = i.dt.max(0.0);
@@ -1054,6 +1071,19 @@ impl Driver {
             }
         } else {
             self.dazzled = 0.0;
+        }
+
+        // --- courteous: "go ahead" to whom they let go first ---------------------------
+        // (not in the first seconds on the road: a car put down behind a bus has let it
+        // go first since before anybody saw it)
+        if let Some(id) = i.courtesy.filter(|_| t > 3.0) {
+            if self.courteous && self.courtesy_for != Some(id) && t >= self.courtesy_cool {
+                self.courtesy_for = Some(id);
+                let n = 1 + self.dice.chance(0.3) as u32;
+                let delay = self.dice.between(0.3, 0.9) as f64;
+                self.flash(n, delay, "courtesy");
+                self.courtesy_cool = t + 10.0;
+            }
         }
 
         // --- the flashes: each 0.25-0.45 s on, about as long off ----------------------
@@ -1502,6 +1532,23 @@ mod tests {
         assert!(!f.is_empty() && f.len() <= 2 && f[0] >= 0.45 && f[0] <= 2.1, "{f:?}");
         // by day the high beams dazzle nobody
         assert!(flashes(&cfg, 8, 20.0, dazzled(false)).is_empty());
+    }
+
+    #[test]
+    fn a_courteous_driver_flashes_once_to_whom_they_let_go() {
+        let cfg = flash_cfg(|c| c.flash_courtesy = 1.0);
+        // the same bus let out for 20 s: one "go ahead", then another bus a minute later
+        let letting = |t: f32| Input {
+            courtesy: if t < 20.0 { Some(7) } else if t > 80.0 { Some(9) } else { None },
+            ..Default::default()
+        };
+        let f = flashes(&cfg, 4, 100.0, letting);
+        let rounds: Vec<f32> = f.iter().copied().filter(|t| !f.iter().any(|s| s < t && t - s < 5.0)).collect();
+        assert_eq!(rounds.len(), 2, "{f:?}");
+        assert!(rounds[0] > 3.25 && rounds[0] < 4.0 && rounds[1] > 80.0 && rounds[1] < 81.0, "{f:?}");
+        // nobody courteous: nothing
+        let cfg = flash_cfg(|c| c.flash_courtesy = 0.0);
+        assert!(flashes(&cfg, 4, 100.0, letting).is_empty());
     }
 
     #[test]

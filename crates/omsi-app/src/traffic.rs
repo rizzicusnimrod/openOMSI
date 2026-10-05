@@ -703,9 +703,13 @@ pub struct Traffic {
     /// The player's high beams are on (the bus script's `lights_fern`), set before each
     /// `tick`: they dazzle the oncoming drivers in the dark (`ai_drivers`).
     pub player_high_beam: bool,
-    /// The player's bus is held up close behind a car itself, as of this tick: the drivers
-    /// behind it do not flash it for that.
-    player_stuck_too: bool,
+    /// The LAN players' high beams and indicators (`lan::indicator`), by session id, set
+    /// before each `tick` as `others`: the drivers they dazzle, and a bus let out of its
+    /// stop as the player's is.
+    pub others_signals: HashMap<u32, (bool, u8)>,
+    /// Per LAN player: seconds since its bus last showed the indicator towards the traffic,
+    /// and for how long it has been indicating (as `player_signal_age`, `player_signalling`).
+    others_signal_age: HashMap<u32, (f32, f32)>,
     /// Seconds since the player's bus last showed the indicator towards the traffic (the
     /// lamps go dark half of the time).
     player_signal_age: f32,
@@ -1675,7 +1679,8 @@ impl Traffic {
             player_priority: false,
             player_blinker: 0,
             player_high_beam: false,
-            player_stuck_too: false,
+            others_signals: HashMap::new(),
+            others_signal_age: HashMap::new(),
             player_signal_age: f32::MAX,
             player_signalling: 0.0,
             way_users: Vec::new(),
@@ -5263,12 +5268,13 @@ impl Traffic {
     /// the road), as OMSI's traffic lets a bus leave its stop. Only a car going the bus's
     /// way that can still stop comfortably: one already beside the bus, or too close to
     /// stop, drives on. The gap from the car's front, or None.
-    fn letting_out(&self, i: usize, player: &PlayerBox) -> Option<f32> {
+    /// `signal_age`, `signalling`: that bus's `player_signal_age` and `player_signalling`.
+    fn letting_out(&self, i: usize, player: &PlayerBox, signal_age: f32, signalling: f32) -> Option<f32> {
         let car = &self.cars[i];
         let st = &car.state;
         let (centre, heading, half_len, _, speed) = *player;
         // (a bus that indicates and stays for long is not waited for: it is passed)
-        if self.player_signal_age > 1.0 || speed.abs() > 3.0 || (self.player_signalling > 20.0 && speed.abs() < 0.3) || (car.vehicle.position - centre).length() > 120.0 {
+        if signal_age > 1.0 || speed.abs() > 3.0 || (signalling > 20.0 && speed.abs() < 0.3) || (car.vehicle.position - centre).length() > 120.0 {
             return None;
         }
         let h = heading.to_radians();
@@ -5667,13 +5673,24 @@ impl Traffic {
         }
         self.others_still = others_still;
         self.player_acc = player.map(|p| follow_acc(self.player_acc, p.4, dt));
-        self.player_stuck_too = player.is_some_and(|p| self.player_held_up(&p));
         self.others_acc = others.iter().map(|(id, b)| (*id, follow_acc(self.others_acc.get(id).copied(), b.4, dt))).collect();
         // the indicator towards the traffic (left, or right on a left-hand-traffic map),
         // remembered across the dark half of the lamps' cycle
         let out_side = if self.net.left_hand { 2 } else { 1 };
         self.player_signal_age = if self.player_blinker == out_side { 0.0 } else { self.player_signal_age + dt };
         self.player_signalling = if self.player_signal_age < 1.0 { self.player_signalling + dt } else { 0.0 };
+        // ... and the LAN players' alike
+        let ages: HashMap<u32, (f32, f32)> = others
+            .iter()
+            .filter(|(id, _)| *id < 0xFFF0_0000)
+            .map(|(id, _)| {
+                let (age, signalling) = self.others_signal_age.get(id).copied().unwrap_or((f32::MAX, 0.0));
+                let showing = self.others_signals.get(id).is_some_and(|s| s.1 == out_side);
+                let age = if showing { 0.0 } else { age + dt };
+                (*id, (age, if age < 1.0 { signalling + dt } else { 0.0 }))
+            })
+            .collect();
+        self.others_signal_age = ages;
         // the player's vehicle and the LAN players' on the lanes, for the right of way (the
         // rear sections and the vehicles placed by hand stand, they do not come)
         let mut users: Vec<WayUser> = Vec::new();
@@ -5703,6 +5720,15 @@ impl Traffic {
                 })
                 .map(|(_, j)| self.cars[j].id);
             self.cars[i].merge_after = merging;
+            // a car let in at the merge while it is still beside or behind this one, close by:
+            // its driver may say "go ahead" (`ai_drivers`)
+            let merge_courtesy = ahead.filter(|(_, j)| Some(self.cars[*j].id) == merging).and_then(|(_, j)| {
+                let (me, other) = (&self.cars[i], &self.cars[j]);
+                let h = me.vehicle.heading.to_radians();
+                let d = (other.vehicle.position - me.vehicle.position).truncate();
+                let along = d.dot(DVec2::new(h.sin(), h.cos()));
+                (d.length() < 25.0 && along < me.state.front as f64 + 2.0).then_some(other.id)
+            });
             let mut lead = ahead.map(|(l, j)| (l, Some(j)));
             // the player's bus, wherever it overlaps this car's way, or a LAN player's (the
             // nearest in the way stands for "the player's bus" in what follows)
@@ -6135,7 +6161,20 @@ impl Traffic {
             let parked_wait = (self.cars[i].pull_out > 0.0).then(|| self.cars[i].state.front + 0.1);
             self.cars[i].pull_out = (self.cars[i].pull_out - dt).max(0.0);
             // the player's bus indicating out of its stop
-            let let_out = self.player.and_then(|p| self.letting_out(i, &p)).map(|g| self.cars[i].state.front + (g - 1.0).max(0.0));
+            // a bus pulling out of its stop: the player's, or a LAN player's
+            let mut let_out_of: Option<(f32, u64)> = self
+                .player
+                .and_then(|p| self.letting_out(i, &p, self.player_signal_age, self.player_signalling))
+                .map(|g| (g, u64::MAX));
+            for (id, o) in others.iter().filter(|(id, _)| *id < 0xFFF0_0000) {
+                let Some(&(age, signalling)) = self.others_signal_age.get(id) else { continue };
+                if let Some(g) = self.letting_out(i, o, age, signalling) {
+                    if let_out_of.is_none_or(|(x, _)| g < x) {
+                        let_out_of = Some((g, 0xFFFF_0000_0000_0000 | *id as u64));
+                    }
+                }
+            }
+            let let_out = let_out_of.map(|(g, _)| self.cars[i].state.front + (g - 1.0).max(0.0));
             let mut stop_at = [light, yield_at, merge_wait, keep_back, people, parked_wait, let_out]
                 .into_iter()
                 .flatten()
@@ -6333,7 +6372,8 @@ impl Traffic {
             let front = self.cars[i].state.front;
             let ahead_seen = lead.filter(|(l, _)| l.gap + front < why.1 || why.0 == "keep_back").and_then(|(l, who)| {
                 let (id, player, stuck_too) = match who {
-                    Some(usize::MAX) => (u64::MAX, true, self.player_stuck_too),
+                    // (whichever player's bus it is: the one `player` stands for now)
+                    Some(usize::MAX) => (u64::MAX, true, player.is_some_and(|p| self.player_held_up(&p))),
                     Some(j) if j < self.cars.len() => {
                         let c = &self.cars[j];
                         (c.id, false, !c.why.0.is_empty() && c.why.1 < c.state.speed.abs() * 2.5 + 15.0)
@@ -6488,23 +6528,36 @@ impl Traffic {
                 } else {
                     0.0
                 };
-                let dazzled = self.player_high_beam
-                    && self.dark
-                    && self.player.is_some_and(|p| dazzles(&p, car.vehicle.position, car.vehicle.heading, self.driver_cfg.flash_dazzle_m));
+                // the high beams of any player's bus in the driver's eyes
+                let range = self.driver_cfg.flash_dazzle_m;
+                let (pos, heading) = (car.vehicle.position, car.vehicle.heading);
+                let dazzled = self.dark
+                    && ((self.player_high_beam && self.player.is_some_and(|p| dazzles(&p, pos, heading, range)))
+                        || others.iter().any(|(id, o)| self.others_signals.get(id).is_some_and(|s| s.0) && dazzles(o, pos, heading, range)));
                 // (what holds the way ahead besides the vehicle in front itself)
                 let held_ahead = [light, yield_at, merge_wait, people, parked_wait, let_out].iter().any(Option::is_some);
-                crate::ai_drivers::Input { wanted, ahead: ahead_seen, held_ahead, dazzled, ..Default::default() }
+                // whom it lets go first by choice: a bus out of its stop once it waits for it
+                // close by (or stands), a car in at the merge
+                // (only the first in the queue behind the bus: a car behind another holds back
+                // for that one, not for the bus)
+                let first = |g: f32| !matches!(lead, Some((l, Some(j))) if j != usize::MAX && l.gap < g);
+                let courtesy = let_out_of
+                    .filter(|(g, _)| (*g < 40.0 || car.state.speed.abs() < 0.5) && first(*g))
+                    .map(|(_, who)| who)
+                    .or(merge_courtesy);
+                crate::ai_drivers::Input { wanted, ahead: ahead_seen, held_ahead, dazzled, courtesy, ..Default::default() }
             } else {
                 Default::default()
             };
             let (lights, blinker) = drive_driver(car, &self.driver_cfg, &self.conditions, self.night, self.dark, dt, seen);
             if let Some(why) = car.driver.as_deref_mut().and_then(|d| d.take_flash_reason()).filter(|_| self.debug_drivers) {
-                let at = match seen.ahead {
-                    Some(a) if a.player => format!(", wanting {:.0}: the player's bus {:.0} m ahead at {:.0} km/h", seen.wanted * 3.6, a.gap, a.speed * 3.6),
-                    Some(a) => format!(", wanting {:.0}: car {} {:.0} m ahead at {:.0} km/h", seen.wanted * 3.6, a.id, a.gap, a.speed * 3.6),
-                    None => String::new(),
+                let at = match (seen.ahead, seen.courtesy) {
+                    (_, Some(c)) if why == "courtesy" => format!(": lets {} go first", if c == u64::MAX { "the player's bus".to_string() } else if c >> 48 == 0xFFFF { format!("LAN player {}'s bus", c & 0xFFFF_FFFF) } else { format!("car {c}") }),
+                    (Some(a), _) if a.player => format!(", wanting {:.0}: the player's bus {:.0} m ahead at {:.0} km/h", seen.wanted * 3.6, a.gap, a.speed * 3.6),
+                    (Some(a), _) => format!(", wanting {:.0}: car {} {:.0} m ahead at {:.0} km/h", seen.wanted * 3.6, a.id, a.gap, a.speed * 3.6),
+                    (None, _) => String::new(),
                 };
-                log::info!("t={:.1}: car {} flashes its high beams ({why}) at {:.0} km/h{at}", self.time, car.id, car.state.speed * 3.6);
+                log::info!("t={:.1}: car {} at ({:.0}, {:.0}) flashes its high beams ({why}) at {:.0} km/h{at}", self.time, car.id, car.vehicle.position.x, car.vehicle.position.y, car.state.speed * 3.6);
             }
             if self.force_high_beam && car.vehicle.ty.ai_patch.high_beam {
                 use crate::ai_drivers::{VAR_HEAD_L, VAR_HEAD_R, VAR_HIGH_BEAM};
