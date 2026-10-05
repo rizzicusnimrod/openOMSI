@@ -1,13 +1,14 @@
 //! What the random cars' and lorries' models get for their drivers (`ai_drivers` in the
 //! game): a rear fog lamp, the left and right headlights and brake lights switched each on
-//! their own (for a broken bulb), and for the two-stroke cars (Trabant, Wartburg) a smoke
-//! emitter for their blue cloud - made in memory when an AI copy's type is loaded, as the
-//! AI Headlights mod's installer writes them into the OMSI 2 files. The player's vehicles
-//! are loaded without them, and a model the mod has already changed is left as it is.
+//! their own (for a broken bulb), high beams to flash, and for the two-stroke cars
+//! (Trabant, Wartburg) a smoke emitter for their blue cloud - made in memory when an AI
+//! copy's type is loaded, as the AI Headlights mod's installer writes them into the OMSI 2
+//! files. The player's vehicles are loaded without them, and a model the mod has already
+//! changed is left as it is.
 //!
 //! The lamps and the emitter are switched by the variables below, which the driver sets
 //! every frame; their names are the mod's, so that a model it changed and one changed here
-//! work alike.
+//! work alike (the high beams' is the fork's own).
 
 use omsi_model::{LightEnh2, Model};
 use omsi_vehicle::Vehicle;
@@ -18,6 +19,8 @@ pub const VAR_HEAD_L: &str = "AIHL_head_l";
 pub const VAR_HEAD_R: &str = "AIHL_head_r";
 pub const VAR_BRAKE_L: &str = "AIHL_brake_l";
 pub const VAR_BRAKE_R: &str = "AIHL_brake_r";
+/// The high beams (the custom fork's: the mod has none), for flashing them.
+pub const VAR_HIGH_BEAM: &str = "AIHL_highbeam";
 pub const VAR_SMOKE_FREQ: &str = "AIHL2_freq";
 pub const VAR_SMOKE_LIFE: &str = "AIHL2_life";
 pub const VAR_SMOKE_ALPHA: &str = "AIHL2_alpha";
@@ -27,6 +30,14 @@ pub const VAR_SMOKE_SPEED: &str = "AIHL2_speed";
 /// a lamp has) and its glow 1.6 times as wide as the brake light's it is copied from.
 const FOG_FACTOR: f32 = 2.0;
 const FOG_SIZE: f32 = 1.6;
+
+/// A high beam's glow is the headlight's at full strength, white, two and a half times as
+/// wide (a flash must show by day too, where a glow adds little to the bright scene), and
+/// narrower in its cone: it is aimed down the road.
+const HIGH_FACTOR: f32 = 2.0;
+const HIGH_SIZE: f32 = 2.5;
+const HIGH_CONE: f32 = 0.6;
+const HIGH_COLOR: [f32; 3] = [255.0, 255.0, 255.0];
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
 
@@ -40,6 +51,8 @@ pub fn set_enabled(on: bool) {
 pub struct AiPatch {
     /// The rear fog lamp or the lamps of each side (their `VAR_*` decide).
     pub lamps: bool,
+    /// High beams (`VAR_HIGH_BEAM`).
+    pub high_beam: bool,
     /// A two-stroke car: the cloud's emitter (`VAR_SMOKE_*`).
     pub two_stroke: bool,
 }
@@ -67,8 +80,9 @@ pub fn patch(def: &Vehicle, model: &mut Model) -> AiPatch {
     }
     let fog = add_rear_fog_lamp(model);
     let sides = split_sides(model);
+    let high = add_high_beams(model);
     let two_stroke = is_two_stroke(def) && add_two_stroke_smoke(model);
-    AiPatch { lamps: fog || sides, two_stroke }
+    AiPatch { lamps: fog || sides || high, high_beam: high, two_stroke }
 }
 
 /// The model uses one of the variables already (the mod has changed it).
@@ -142,6 +156,41 @@ fn split_sides(model: &mut Model) -> bool {
                 l.variable = v.into();
                 any = true;
             }
+        }
+    }
+    any
+}
+
+/// A high beam beside each headlight (`VAR_HEAD_L`/`VAR_HEAD_R`, so after `split_sides`),
+/// right after it on the same mesh, switched by `VAR_HIGH_BEAM`: brighter, wider and with
+/// the star of a lamp shining straight at the viewer. False when the model has none.
+fn add_high_beams(model: &mut Model) -> bool {
+    let mut any = false;
+    for m in &mut model.meshes {
+        let mut li = 0;
+        while li < m.light_enh_2.len() {
+            let l = &m.light_enh_2[li];
+            if !(is_var(l, VAR_HEAD_L) || is_var(l, VAR_HEAD_R)) {
+                li += 1;
+                continue;
+            }
+            let mut high = l.clone();
+            high.variable = VAR_HIGH_BEAM.into();
+            high.factor = HIGH_FACTOR;
+            high.size *= HIGH_SIZE;
+            high.color = HIGH_COLOR;
+            high.cone_inner *= HIGH_CONE;
+            high.cone_outer *= HIGH_CONE;
+            // the effect bits: the star (1) on, the glow itself (4) not left out
+            let bits = high.values.first().map(|v| omsi_cfg::parse_f32(v) as i32).unwrap_or(0).clamp(0, 7);
+            let bits = ((bits | 1) & !4).to_string();
+            match high.values.first_mut() {
+                Some(v) => *v = bits,
+                None => high.values.push(bits),
+            }
+            m.light_enh_2.insert(li + 1, high);
+            any = true;
+            li += 2;
         }
     }
     any
@@ -224,6 +273,24 @@ mod tests {
         assert!(split_sides(&mut m));
         let vars: Vec<&str> = m.meshes[0].light_enh_2.iter().map(|l| l.variable.as_str()).collect();
         assert_eq!(vars, [VAR_HEAD_L, VAR_HEAD_R, VAR_BRAKE_L, VAR_REAR_FOG, VAR_BRAKE_R, "AI_Brakelight"]);
+    }
+
+    #[test]
+    fn high_beams_beside_the_headlights() {
+        let mut m = car_model();
+        split_sides(&mut m);
+        assert!(add_high_beams(&mut m));
+        let l = &m.meshes[0].light_enh_2;
+        let vars: Vec<&str> = l.iter().map(|l| l.variable.as_str()).collect();
+        assert_eq!(vars, [VAR_HEAD_L, VAR_HIGH_BEAM, VAR_HEAD_R, VAR_HIGH_BEAM, VAR_BRAKE_L, VAR_BRAKE_R, "AI_Brakelight"]);
+        assert_eq!(l[1].pos, l[0].pos);
+        assert_eq!(l[1].factor, 2.0);
+        assert!((l[1].size - 0.5).abs() < 1e-6);
+        assert_eq!(l[1].values[0], "1");
+        // a model without headlights gets none
+        let mut bare = Model::default();
+        bare.meshes.push(MeshDef::default());
+        assert!(!add_high_beams(&mut bare));
     }
 
     #[test]

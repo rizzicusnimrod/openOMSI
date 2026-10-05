@@ -661,6 +661,11 @@ pub struct Traffic {
     light_prev: Vec<Vec<i32>>,
     /// `OMSI_DEBUG_POPULATION`: log where cars appear and vanish relative to the view.
     debug_population: bool,
+    /// `OMSI_DEBUG_DRIVERS`: what the drivers do, in the log.
+    debug_drivers: bool,
+    /// `OMSI_AI_HIGH_BEAM`: every car's high beams on (`ai_drivers`), for seeing them in a
+    /// picture.
+    force_high_beam: bool,
     /// Cars placed since the last look inside the view frustum (hidden behind something):
     /// (id, position). `OMSI_POPULATION_SHOTS` photographs them to check.
     pub framed_spawns: Vec<(u64, DVec3)>,
@@ -678,6 +683,12 @@ pub struct Traffic {
     /// The player's indicators (0 off, 1 left, 2 right, 3 hazard; `lan::indicator`), set
     /// before each `tick`.
     pub player_blinker: u8,
+    /// The player's high beams are on (the bus script's `lights_fern`), set before each
+    /// `tick`: they dazzle the oncoming drivers in the dark (`ai_drivers`).
+    pub player_high_beam: bool,
+    /// The player's bus is held up close behind a car itself, as of this tick: the drivers
+    /// behind it do not flash it for that.
+    player_stuck_too: bool,
     /// Seconds since the player's bus last showed the indicator towards the traffic (the
     /// lamps go dark half of the time).
     player_signal_age: f32,
@@ -956,7 +967,9 @@ fn extents(ty: &VehicleType, length: f32) -> (f32, f32, f32) {
 /// traffic's own indicating), or as its driver makes of them (`ai_drivers`: the weather as
 /// they see it on top of `dark`, the time of day; hazard lights, a forgotten indicator ...).
 /// The driver also sets the lamps `vehicle_patch` gives the model (rear fog lamp, a broken
-/// bulb, the two-stroke cloud) and sounds the horn.
+/// bulb, the high beams, the two-stroke cloud) and sounds the horn. `seen` is what the
+/// driver sees beyond their own car (the vehicle in front, an oncoming bus's high beams).
+#[allow(clippy::too_many_arguments)]
 fn drive_driver(
     car: &mut AiCar,
     cfg: &crate::ai_drivers::Config,
@@ -964,10 +977,11 @@ fn drive_driver(
     night: bool,
     dark: bool,
     dt: f32,
+    seen: crate::ai_drivers::Input,
 ) -> (bool, i32) {
     use crate::ai_drivers::{
-        Bulb, Driver, Input, TwoStroke, VAR_BRAKE_L, VAR_BRAKE_R, VAR_HEAD_L, VAR_HEAD_R, VAR_REAR_FOG, VAR_SMOKE_ALPHA,
-        VAR_SMOKE_FREQ, VAR_SMOKE_LIFE, VAR_SMOKE_SPEED,
+        Bulb, Driver, Input, TwoStroke, VAR_BRAKE_L, VAR_BRAKE_R, VAR_HEAD_L, VAR_HEAD_R, VAR_HIGH_BEAM, VAR_REAR_FOG,
+        VAR_SMOKE_ALPHA, VAR_SMOKE_FREQ, VAR_SMOKE_LIFE, VAR_SMOKE_SPEED,
     };
     if !car.driver_checked {
         car.driver_checked = true;
@@ -993,23 +1007,28 @@ fn drive_driver(
         let v = &mut car.vehicle;
         if v.ty.ai_patch.lamps {
             let (lit, brake) = (night as i32 as f32, car.state.braking as i32 as f32);
-            for (n, x) in [(VAR_HEAD_L, lit), (VAR_HEAD_R, lit), (VAR_BRAKE_L, brake), (VAR_BRAKE_R, brake), (VAR_REAR_FOG, 0.0)] {
+            for (n, x) in [(VAR_HEAD_L, lit), (VAR_HEAD_R, lit), (VAR_BRAKE_L, brake), (VAR_BRAKE_R, brake), (VAR_REAR_FOG, 0.0), (VAR_HIGH_BEAM, 0.0)] {
                 v.set_engine_var(n, x);
             }
         }
         return (night, car.state.blinker);
     };
-    let input = Input { dt, speed: car.state.speed, accel: car.state.acc, blinker: car.state.blinker, night: dark, at_stop };
+    let input = Input { dt, speed: car.state.speed, accel: car.state.acc, blinker: car.state.blinker, night: dark, at_stop, ..seen };
     let out = d.step(cfg, conditions, &input);
     let v = &mut car.vehicle;
+    // a flash: the headlights with the high beams, or the lights as a whole on a model
+    // given no high beams
+    let high_beam = v.ty.ai_patch.high_beam;
     if v.ty.ai_patch.lamps {
         let on = |b: bool| b as i32 as f32;
         let brake = car.state.braking;
+        let head = out.lights || (out.flash && high_beam);
         v.set_engine_var(VAR_REAR_FOG, on(out.rear_fog));
-        v.set_engine_var(VAR_HEAD_L, on(out.lights && d.bulb != Bulb::HeadLeft));
-        v.set_engine_var(VAR_HEAD_R, on(out.lights && d.bulb != Bulb::HeadRight));
+        v.set_engine_var(VAR_HEAD_L, on(head && d.bulb != Bulb::HeadLeft));
+        v.set_engine_var(VAR_HEAD_R, on(head && d.bulb != Bulb::HeadRight));
         v.set_engine_var(VAR_BRAKE_L, on(brake && d.bulb != Bulb::BrakeLeft));
         v.set_engine_var(VAR_BRAKE_R, on(brake && d.bulb != Bulb::BrakeRight));
+        v.set_engine_var(VAR_HIGH_BEAM, on(out.flash && high_beam));
     }
     if out.horn {
         v.host.fired_triggers.push("ev_AI_Horn".into());
@@ -1021,7 +1040,22 @@ fn drive_driver(
         v.set_engine_var(VAR_SMOKE_ALPHA, smoke.alpha);
         v.set_engine_var(VAR_SMOKE_SPEED, smoke.speed);
     }
-    (out.lights, out.blinker)
+    (out.lights || (out.flash && !high_beam), out.blinker)
+}
+
+/// The player's bus `p` has its high beams in the eyes of a driver at `pos` heading
+/// `heading` (degrees): coming towards each other, each in the other's beam (within 14°),
+/// nearer than `range` m.
+fn dazzles(p: &PlayerBox, pos: DVec3, heading: f64, range: f32) -> bool {
+    let d = p.0.truncate() - pos.truncate();
+    let dist = d.length();
+    if !(15.0..range as f64).contains(&dist) {
+        return false;
+    }
+    let ahead = |h: f64| DVec2::new(h.to_radians().sin(), h.to_radians().cos());
+    let towards = d / dist;
+    const BEAM: f64 = 0.97;
+    towards.dot(ahead(heading)) > BEAM && (-towards).dot(ahead(p.1)) > BEAM
 }
 
 /// The driver of a random car: how fast, how close, how patient (see `AiState`).
@@ -1601,10 +1635,14 @@ impl Traffic {
             light_log,
             light_prev,
             debug_population: omsi_cfg::env::var_os("OMSI_DEBUG_POPULATION").is_some(),
+            debug_drivers: omsi_cfg::env::var_os("OMSI_DEBUG_DRIVERS").is_some(),
+            force_high_beam: omsi_cfg::env::var_os("OMSI_AI_HIGH_BEAM").is_some(),
             framed_spawns: Vec::new(),
             player: None,
             player_priority: false,
             player_blinker: 0,
+            player_high_beam: false,
+            player_stuck_too: false,
             player_signal_age: f32::MAX,
             player_signalling: 0.0,
             way_users: Vec::new(),
@@ -5376,6 +5414,20 @@ impl Traffic {
         }
     }
 
+    /// A car stands or crawls close in front of the player's bus `p` (in its lane, nearer
+    /// than two and a half seconds and 15 m): the bus is held up itself.
+    fn player_held_up(&self, p: &PlayerBox) -> bool {
+        let h = p.1.to_radians();
+        let (fwd, right) = (DVec2::new(h.sin(), h.cos()), DVec2::new(h.cos(), -h.sin()));
+        let (nose, reach) = (p.2 as f64, p.2 as f64 + 15.0 + p.4.abs() as f64 * 2.5);
+        self.cars.iter().any(|c| {
+            let d = c.vehicle.position.truncate() - p.0.truncate();
+            // (from the bus's middle to the car's back)
+            let (back, side) = (d.dot(fwd) - c.state.rear as f64, d.dot(right));
+            back > nose - 1.0 && back < reach && side.abs() < 2.5 && c.state.speed < p.4.abs() + 2.0
+        })
+    }
+
     pub fn tick(&mut self, dt: f32, player: Option<PlayerBox>) {
         self.lamp_dt += dt;
         if self.mirror {
@@ -5581,6 +5633,7 @@ impl Traffic {
         }
         self.others_still = others_still;
         self.player_acc = player.map(|p| follow_acc(self.player_acc, p.4, dt));
+        self.player_stuck_too = player.is_some_and(|p| self.player_held_up(&p));
         self.others_acc = others.iter().map(|(id, b)| (*id, follow_acc(self.others_acc.get(id).copied(), b.4, dt))).collect();
         // the indicator towards the traffic (left, or right on a left-hand-traffic map),
         // remembered across the dark half of the lamps' cycle
@@ -6240,6 +6293,21 @@ impl Traffic {
                 .and_then(|l| l.1)
                 .filter(|&j| j < self.cars.len())
                 .map(|j| self.cars[j].id);
+            // the vehicle holding the car up as its driver sees it (`ai_drivers`: whom they
+            // flash), when it is nearer than any stop point (or the stop point is the room
+            // kept behind it to go round it)
+            let front = self.cars[i].state.front;
+            let ahead_seen = lead.filter(|(l, _)| l.gap + front < why.1 || why.0 == "keep_back").and_then(|(l, who)| {
+                let (id, player, stuck_too) = match who {
+                    Some(usize::MAX) => (u64::MAX, true, self.player_stuck_too),
+                    Some(j) if j < self.cars.len() => {
+                        let c = &self.cars[j];
+                        (c.id, false, !c.why.0.is_empty() && c.why.1 < c.state.speed.abs() * 2.5 + 15.0)
+                    }
+                    _ => return None,
+                };
+                Some(crate::ai_drivers::Ahead { id, gap: l.gap, speed: l.speed, player, stuck_too })
+            });
             let car = &mut self.cars[i];
             car.lead_car = lead_id;
             if car.state.speed.abs() < 0.1 && !car.at_stop() {
@@ -6378,7 +6446,38 @@ impl Traffic {
             let priority_warning = car.vehicle.var("TrafficPriority").is_some_and(|v| v > 0.5)
                 && (lead_now.is_some_and(|l| l.gap < PRIORITY_WARN_GAP && l.speed < car.state.speed + 0.5)
                     || stop_at.is_some_and(|x| x - car.state.front < PRIORITY_WARN_GAP));
-            let (lights, blinker) = drive_driver(car, &self.driver_cfg, &self.conditions, self.night, self.dark, dt);
+            let seen = if car.driver.is_some() {
+                let lane = &self.net.lanes[car.state.lane];
+                let wanted = if ahead_seen.is_some() {
+                    ((lane.speed_limit_kmh * car.state.desire).min(car.state.max_speed_kmh).max(3.0) / 3.6)
+                        .min(car.state.curve_speed(&self.net))
+                } else {
+                    0.0
+                };
+                let dazzled = self.player_high_beam
+                    && self.dark
+                    && self.player.is_some_and(|p| dazzles(&p, car.vehicle.position, car.vehicle.heading, self.driver_cfg.flash_dazzle_m));
+                // (what holds the way ahead besides the vehicle in front itself)
+                let held_ahead = [light, yield_at, merge_wait, people, parked_wait, let_out].iter().any(Option::is_some);
+                crate::ai_drivers::Input { wanted, ahead: ahead_seen, held_ahead, dazzled, ..Default::default() }
+            } else {
+                Default::default()
+            };
+            let (lights, blinker) = drive_driver(car, &self.driver_cfg, &self.conditions, self.night, self.dark, dt, seen);
+            if let Some(why) = car.driver.as_deref_mut().and_then(|d| d.take_flash_reason()).filter(|_| self.debug_drivers) {
+                let at = match seen.ahead {
+                    Some(a) if a.player => format!(", wanting {:.0}: the player's bus {:.0} m ahead at {:.0} km/h", seen.wanted * 3.6, a.gap, a.speed * 3.6),
+                    Some(a) => format!(", wanting {:.0}: car {} {:.0} m ahead at {:.0} km/h", seen.wanted * 3.6, a.id, a.gap, a.speed * 3.6),
+                    None => String::new(),
+                };
+                log::info!("t={:.1}: car {} flashes its high beams ({why}) at {:.0} km/h{at}", self.time, car.id, car.state.speed * 3.6);
+            }
+            if self.force_high_beam && car.vehicle.ty.ai_patch.high_beam {
+                use crate::ai_drivers::{VAR_HEAD_L, VAR_HEAD_R, VAR_HIGH_BEAM};
+                for n in [VAR_HEAD_L, VAR_HEAD_R, VAR_HIGH_BEAM] {
+                    car.vehicle.set_engine_var(n, 1.0);
+                }
+            }
             frames[i] = Some(AiFrame {
                 speed: car.state.speed,
                 odometer: car.state.odometer,
@@ -8100,6 +8199,22 @@ mod group_density_tests {
 mod way_user_tests {
     use super::*;
     use omsi_sim::traffic::{Crossing, LaneBuilder};
+
+    #[test]
+    fn high_beams_dazzle_the_oncoming_driver_in_their_beam() {
+        // the bus heading north (+y) at the origin
+        let bus: PlayerBox = (DVec3::ZERO, 0.0, 6.0, 1.25, 0.0);
+        // a car 100 m ahead in the other lane, coming south
+        assert!(dazzles(&bus, DVec3::new(-3.5, 100.0, 0.0), 180.0, 250.0));
+        // ... going north: it sees the bus's back
+        assert!(!dazzles(&bus, DVec3::new(-3.5, 100.0, 0.0), 0.0, 250.0));
+        // ... too far, or close by the side
+        assert!(!dazzles(&bus, DVec3::new(-3.5, 300.0, 0.0), 180.0, 250.0));
+        assert!(!dazzles(&bus, DVec3::new(-3.5, 10.0, 0.0), 180.0, 250.0));
+        // the bus turned away (a terminus at an angle to the road)
+        let turned: PlayerBox = (DVec3::ZERO, 40.0, 6.0, 1.25, 0.0);
+        assert!(!dazzles(&turned, DVec3::new(-3.5, 100.0, 0.0), 180.0, 250.0));
+    }
 
     #[test]
     fn the_tyre_screech_is_built_in() {

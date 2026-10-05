@@ -1,7 +1,7 @@
 //! The drivers of the random cars and trucks: when they switch their lights on (dusk,
 //! a dark sky, rain, snow, fog - each at a threshold of their own and after a moment of
 //! their own), the hazard lights when braking hard, the rear fog lamp, the horn when stuck
-//! or cut off, and a few bad habits (no indicating, a forgotten indicator, forgotten lights,
+//! or cut off, flashing the high beams when provoked or impatient, and a few bad habits (no indicating, a forgotten indicator, forgotten lights,
 //! the rear fog lamp in the rain, a broken bulb). The two-stroke cars' smoke is here too.
 //!
 //! What the AI Headlights mod for OMSI 2 does in its scripts, done by the engine for every
@@ -14,8 +14,8 @@
 
 use omsi_content::weather::Weather;
 pub use omsi_sim::ai_patch::{
-    VAR_BRAKE_L, VAR_BRAKE_R, VAR_HEAD_L, VAR_HEAD_R, VAR_REAR_FOG, VAR_SMOKE_ALPHA, VAR_SMOKE_FREQ, VAR_SMOKE_LIFE,
-    VAR_SMOKE_SPEED,
+    VAR_BRAKE_L, VAR_BRAKE_R, VAR_HEAD_L, VAR_HEAD_R, VAR_HIGH_BEAM, VAR_REAR_FOG, VAR_SMOKE_ALPHA, VAR_SMOKE_FREQ,
+    VAR_SMOKE_LIFE, VAR_SMOKE_SPEED,
 };
 
 /// The settings (`Settings::ai_drivers`), defaults as the mod ships them. Shares are
@@ -72,6 +72,29 @@ pub struct Config {
     /// stop; `traffic::Traffic::update_audio`).
     pub screech: bool,
     pub screech_decel: f32,
+    /// Flashing the high beams (all off when `flash` is false). Pushy drivers: stuck close
+    /// behind something at least `flash_slower_kmh` slower than they would like to drive,
+    /// for longer than their patience (`flash_follow_min..max` s), or standing behind the
+    /// player's bus with no light or junction holding it (`flash_wait_min..max` s) - one or
+    /// two flashes, again every `flash_repeat_min..max` s, `flash_max` rounds at most.
+    pub flash: bool,
+    pub flash_push: f32,
+    pub flash_slower_kmh: f32,
+    pub flash_follow_min: f32,
+    pub flash_follow_max: f32,
+    pub flash_wait_min: f32,
+    pub flash_wait_max: f32,
+    pub flash_repeat_min: f32,
+    pub flash_repeat_max: f32,
+    pub flash_max: u32,
+    /// Drivers who flash when provoked: made to brake at `flash_decel` m/s² or harder by
+    /// the vehicle ahead, or something cutting in close in front of them.
+    pub flash_angry: f32,
+    pub flash_decel: f32,
+    /// Drivers who flash at an oncoming bus whose high beams dazzle them in the dark, from
+    /// `flash_dazzle_m` metres.
+    pub flash_dazzle: f32,
+    pub flash_dazzle_m: f32,
     /// The bad habits (all off when `flaws` is false): never indicating; leaving the
     /// indicator on after a turn (`forget_chance` of the turns, for 15-60 s); forgetting the
     /// lights until it is really dark (`nolights_bright`); the rear fog lamp in rain and at
@@ -132,6 +155,20 @@ impl Default for Config {
             angry_decel: 6.0,
             screech: true,
             screech_decel: 7.0,
+            flash: true,
+            flash_push: 0.2,
+            flash_slower_kmh: 20.0,
+            flash_follow_min: 20.0,
+            flash_follow_max: 60.0,
+            flash_wait_min: 10.0,
+            flash_wait_max: 40.0,
+            flash_repeat_min: 15.0,
+            flash_repeat_max: 40.0,
+            flash_max: 3,
+            flash_angry: 0.35,
+            flash_decel: 5.0,
+            flash_dazzle: 0.6,
+            flash_dazzle_m: 250.0,
             flaws: true,
             no_indicator: 0.05,
             forget_indicator: 0.05,
@@ -243,6 +280,10 @@ config_fields! {
     honk: share, patience_min: num, patience_max: num, honk_repeat_min: num, honk_repeat_max: num, honk_max: count,
     angry: share, angry_decel: num,
     screech: switch, screech_decel: num,
+    flash: switch, flash_push: share, flash_slower_kmh: num, flash_follow_min: num, flash_follow_max: num,
+    flash_wait_min: num, flash_wait_max: num, flash_repeat_min: num, flash_repeat_max: num, flash_max: count,
+    flash_angry: share, flash_decel: num,
+    flash_dazzle: share, flash_dazzle_m: num,
     flaws: switch,
     no_indicator: share, forget_indicator: share, forget_chance: share, forget_min: num, forget_max: num,
     no_lights: share, no_lights_bright_min: num, no_lights_bright_max: num,
@@ -384,6 +425,21 @@ pub const OPTION_PAGES: &[(&str, &[OptionRow])] = {
             heading("Screeching tyres", "Heard when a car has to stop for an emergency"),
             switch("screech", "Screeching tyres", "Tyres squeal when a car or lorry brakes really hard"),
             adv("screech_decel", "Braking that makes them squeal", "m/s²: normal braking is 2-3, an emergency up to 9.5", Accel, 4.0, 9.5, 0.5),
+            heading("Flashing headlights", "A quick flash of the high beams, seen ahead and in your mirrors"),
+            switch("flash", "Flashing headlights", "Drivers flash their high beams when provoked or impatient"),
+            row("flash_push", "Pushy drivers", "Share of the drivers who flash a slowcoach ahead, or your bus standing in their way", Percent, 0.0, 1.0, 0.05),
+            adv("flash_slower_kmh", "Slower than they like by", "km/h: how slow the vehicle ahead must be", Kmh, 5.0, 60.0, 5.0),
+            adv("flash_follow_min", "Patience behind it at least", "Seconds close behind before the first flash", Seconds, 5.0, 300.0, 5.0),
+            adv("flash_follow_max", "Patience behind it at most", "Seconds", Seconds, 5.0, 300.0, 5.0),
+            adv("flash_wait_min", "Behind your standing bus at least", "Seconds standing behind it, nothing ahead holding it (they first try to go round)", Seconds, 3.0, 180.0, 1.0),
+            adv("flash_wait_max", "Behind your standing bus at most", "Seconds", Seconds, 3.0, 180.0, 1.0),
+            adv("flash_repeat_min", "Again after at least", "Seconds between the flashes while still held up", Seconds, 5.0, 180.0, 5.0),
+            adv("flash_repeat_max", "Again after at most", "Seconds", Seconds, 5.0, 180.0, 5.0),
+            adv("flash_max", "Flashes at most", "Times while held up by the same thing", Count, 1.0, 6.0, 1.0),
+            row("flash_angry", "Provoked drivers", "Share of the drivers who flash when cut off or made to brake hard", Percent, 0.0, 1.0, 0.05),
+            adv("flash_decel", "Braking that provokes them", "m/s², for the vehicle ahead from 20 km/h or more", Accel, 3.0, 9.0, 0.5),
+            row("flash_dazzle", "Dazzled drivers", "Share of the oncoming drivers who flash when your high beams are on in the dark", Percent, 0.0, 1.0, 0.05),
+            adv("flash_dazzle_m", "Dazzled from", "Metres: how far away your high beams dazzle them", Metres, 50.0, 500.0, 25.0),
         ]),
         ("AI driver habits", &[
             switch("flaws", "Imperfect drivers", "Some drivers have one of the bad habits below (off: none of them)"),
@@ -555,6 +611,30 @@ pub struct Input {
     pub night: bool,
     /// At a stop of its own (a bus serving it): standing there is no jam.
     pub at_stop: bool,
+    /// How fast the driver would like to go here (m/s): the limit as they take it, their
+    /// car's top speed, the bends.
+    pub wanted: f32,
+    /// The vehicle that holds the car up (none: a light, a junction, a parked car or
+    /// nothing at all is nearer).
+    pub ahead: Option<Ahead>,
+    /// A red light, a junction or a merge holds the way ahead: the vehicle in front waits
+    /// for it as well.
+    pub held_ahead: bool,
+    /// An oncoming bus's high beams are in the driver's eyes.
+    pub dazzled: bool,
+}
+
+/// The vehicle in front, as the driver sees it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ahead {
+    /// The car's id (`u64::MAX` the player's bus): another one now is one that cut in.
+    pub id: u64,
+    /// From the car's front to it (m), and its speed (m/s).
+    pub gap: f32,
+    pub speed: f32,
+    pub player: bool,
+    /// It is held up close behind another itself: flashing it would not help.
+    pub stuck_too: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -564,6 +644,8 @@ pub struct Output {
     pub rear_fog: bool,
     /// Sound the horn now (one toot).
     pub horn: bool,
+    /// The high beams flashed on.
+    pub flash: bool,
 }
 
 /// One driver.
@@ -582,6 +664,9 @@ pub struct Driver {
     forgetful: bool,
     no_lights: bool,
     rear_fog_misuse: bool,
+    pusher: bool,
+    provokable: bool,
+    dazzlable: bool,
     pub bulb: Bulb,
     bright_thr: f32,
     precip_thr: f32,
@@ -591,6 +676,9 @@ pub struct Driver {
     off_delay: f32,
     hazard_hold: f32,
     patience: f32,
+    follow_patience: f32,
+    wait_patience: f32,
+    dazzle_reaction: f32,
     // state
     started: bool,
     bad: bool,
@@ -613,6 +701,22 @@ pub struct Driver {
     blinker_prev: i32,
     forgot_side: i32,
     forgot_until: f64,
+    /// Flashes still to come, when the next one starts and until when the one now lasts.
+    flashes_left: u32,
+    flash_at: f64,
+    flash_until: f64,
+    /// Held up by the vehicle in front for so long (s), and free of it for so long.
+    held_up: f32,
+    free: f32,
+    pushes: u32,
+    next_push: f64,
+    /// The vehicle in front by id and when it was last there.
+    seen_ahead: Option<(u64, f64)>,
+    provoked_cool: f64,
+    dazzled: f32,
+    dazzle_cool: f64,
+    /// Why the driver last decided to flash, until `take_flash_reason` (for the log).
+    flash_reason: Option<&'static str>,
 }
 
 impl Driver {
@@ -641,6 +745,13 @@ impl Driver {
         } else {
             Bulb::None
         };
+        // (rolled after the older habits, which stay what they were for every seed)
+        let pusher = d.chance(cfg.flash_push);
+        let provokable = d.chance(cfg.flash_angry);
+        let dazzlable = d.chance(cfg.flash_dazzle);
+        let follow_patience = d.between(cfg.flash_follow_min, cfg.flash_follow_max);
+        let wait_patience = d.between(cfg.flash_wait_min, cfg.flash_wait_max);
+        let dazzle_reaction = d.between(0.5, 2.0);
         Driver {
             dice: d,
             clock: 0.0,
@@ -653,6 +764,9 @@ impl Driver {
             forgetful,
             no_lights,
             rear_fog_misuse,
+            pusher,
+            provokable,
+            dazzlable,
             bulb,
             bright_thr,
             precip_thr,
@@ -662,6 +776,9 @@ impl Driver {
             off_delay,
             hazard_hold,
             patience,
+            follow_patience,
+            wait_patience,
+            dazzle_reaction,
             started: false,
             bad: false,
             bad_since: None,
@@ -682,6 +799,18 @@ impl Driver {
             blinker_prev: 0,
             forgot_side: 0,
             forgot_until: 0.0,
+            flashes_left: 0,
+            flash_at: 0.0,
+            flash_until: 0.0,
+            held_up: 0.0,
+            free: 0.0,
+            pushes: 0,
+            next_push: 0.0,
+            seen_ahead: None,
+            provoked_cool: 0.0,
+            dazzled: 0.0,
+            dazzle_cool: 0.0,
+            flash_reason: None,
         }
     }
 
@@ -825,7 +954,115 @@ impl Driver {
             i.blinker | self.forgot_side
         };
 
-        Output { lights, blinker, rear_fog: self.rear_fog, horn }
+        let flash = self.flash_lights(cfg, i, kmh);
+
+        Output { lights, blinker, rear_fog: self.rear_fog, horn, flash }
+    }
+
+    /// Why the driver has decided to flash since the last call ("provoked", "cut in",
+    /// "slowcoach", "blocked", "dazzled").
+    pub fn take_flash_reason(&mut self) -> Option<&'static str> {
+        self.flash_reason.take()
+    }
+
+    /// `n` flashes, the first after `delay` seconds - unless some are still to come.
+    fn flash(&mut self, n: u32, delay: f64, why: &'static str) {
+        if self.flashes_left == 0 && self.clock >= self.flash_until {
+            self.flashes_left = n;
+            self.flash_at = self.clock + delay;
+            self.flash_reason = Some(why);
+        }
+    }
+
+    /// The high beams: provoked (made to brake hard by the vehicle ahead, or one cutting in
+    /// close), pushy (held up by a slowcoach, or behind the player's bus standing for no
+    /// reason the driver can see) or dazzled by an oncoming bus's high beams. True while
+    /// one of the flashes is on.
+    fn flash_lights(&mut self, cfg: &Config, i: &Input, kmh: f32) -> bool {
+        let t = self.clock;
+        let dt = i.dt.max(0.0);
+        let speed = i.speed.abs();
+        let ahead = i.ahead;
+        // a vehicle there now that was not a moment ago (the first seconds on the road, all
+        // of them are new)
+        let new_ahead = t > 3.0 && ahead.is_some_and(|a| !self.seen_ahead.is_some_and(|(id, when)| id == a.id && t - when < 2.0));
+        if let Some(a) = ahead {
+            self.seen_ahead = Some((a.id, t));
+        }
+        if !cfg.flash {
+            self.flashes_left = 0;
+            return false;
+        }
+
+        // --- provoked: an emergency stop for it, or it cut in close -----------------
+        if self.provokable && t >= self.provoked_cool {
+            // (close ahead: braking for the end of a queue seen from afar is no emergency,
+            // and the last car of the queue is not to blame for it)
+            let braked = self.decel >= cfg.flash_decel
+                && kmh >= 20.0
+                && ahead.is_some_and(|a| !a.stuck_too && a.gap < speed * 1.5 + 10.0);
+            let cut_in = new_ahead && kmh >= 30.0 && ahead.is_some_and(|a| a.gap < speed * 0.6 && a.speed < speed + 1.0);
+            if braked || cut_in {
+                let n = 2 + self.dice.chance(0.4) as u32;
+                let delay = self.dice.between(0.3, 0.8) as f64;
+                self.flash(n, delay, if braked { "provoked" } else { "cut in" });
+                self.provoked_cool = t + 20.0;
+            }
+        }
+
+        // --- pushy: held up close behind something far slower, or standing behind the
+        // player's bus with nothing ahead of it to wait for ---------------------------
+        // (slowing down for a light or a junction ahead is no dawdling)
+        let slowcoach = !i.held_ahead
+            && ahead.filter(|a| !a.stuck_too).is_some_and(|a| {
+                kmh >= 10.0 && a.gap < speed * 2.0 + 15.0 && (i.wanted - a.speed.max(0.0)) * 3.6 >= cfg.flash_slower_kmh
+            });
+        let blocked = ahead.filter(|a| a.player && !a.stuck_too).is_some_and(|a| a.speed.abs() < 0.3 && a.gap < 15.0)
+            && kmh < 1.0
+            && !i.held_ahead
+            && !i.at_stop;
+        if slowcoach || blocked {
+            self.held_up += dt;
+            self.free = 0.0;
+        } else {
+            self.free += dt;
+            if self.free > 8.0 {
+                self.held_up = 0.0;
+                self.pushes = 0;
+            }
+        }
+        let patience = if blocked { self.wait_patience } else { self.follow_patience };
+        if self.pusher
+            && (slowcoach || blocked)
+            && self.held_up >= patience
+            && t >= self.next_push
+            && self.pushes < cfg.flash_max
+        {
+            self.pushes += 1;
+            let n = 1 + self.dice.chance(0.5) as u32;
+            self.flash(n, 0.0, if blocked { "blocked" } else { "slowcoach" });
+            self.next_push = t + self.dice.between(cfg.flash_repeat_min, cfg.flash_repeat_max) as f64;
+        }
+
+        // --- dazzled: an oncoming bus with its high beams on in the dark --------------
+        if i.dazzled && i.night {
+            self.dazzled += dt;
+            if self.dazzlable && self.dazzled >= self.dazzle_reaction && t >= self.dazzle_cool {
+                let n = 1 + self.dice.chance(0.5) as u32;
+                self.flash(n, 0.0, "dazzled");
+                self.dazzle_cool = t + 30.0;
+            }
+        } else {
+            self.dazzled = 0.0;
+        }
+
+        // --- the flashes: each 0.25-0.45 s on, about as long off ----------------------
+        if self.flashes_left > 0 && t >= self.flash_at {
+            self.flashes_left -= 1;
+            self.flash_until = t + self.dice.between(0.25, 0.45) as f64;
+            self.flash_at = self.flash_until + self.dice.between(0.25, 0.4) as f64;
+        }
+        t < self.flash_until
     }
 }
 
@@ -1124,6 +1361,156 @@ mod tests {
         let mut i = input(0.1, 10.0);
         i.blinker = 2;
         assert_eq!(d.step(&cfg, &Conditions::default(), &i).blinker, 2);
+    }
+
+    /// Only the one kind of flashing on, all its drivers doing it.
+    fn flash_cfg(f: impl FnOnce(&mut Config)) -> Config {
+        cfg_all(|c| {
+            c.flaws = false;
+            c.hazard = 0.0;
+            c.honk = 0.0;
+            c.angry = 0.0;
+            c.flash_push = 0.0;
+            c.flash_angry = 0.0;
+            c.flash_dazzle = 0.0;
+            f(c);
+        })
+    }
+
+    /// When each flash comes on (s), driving `secs` seconds as `at` says at each moment.
+    fn flashes(cfg: &Config, seed: u64, secs: f32, at: impl Fn(f32) -> Input) -> Vec<f32> {
+        let mut d = Driver::new(seed, cfg);
+        let (mut on, mut out) = (false, Vec::new());
+        for k in 0..(secs * 50.0) as usize {
+            let t = k as f32 * 0.02;
+            let f = d.step(cfg, &Conditions::default(), &Input { dt: 0.02, ..at(t) }).flash;
+            if f && !on {
+                out.push(t);
+            }
+            on = f;
+        }
+        out
+    }
+
+    fn behind(id: u64, gap: f32, speed: f32) -> Option<Ahead> {
+        Some(Ahead { id, gap, speed, player: id == u64::MAX, stuck_too: false })
+    }
+
+    #[test]
+    fn pushy_driver_flashes_a_slowcoach_after_their_patience() {
+        let cfg = flash_cfg(|c| {
+            c.flash_push = 1.0;
+            c.flash_follow_min = 30.0;
+            c.flash_follow_max = 30.0;
+            c.flash_repeat_min = 20.0;
+            c.flash_repeat_max = 20.0;
+            c.flash_max = 3;
+        });
+        // 40 km/h close behind it, where they would drive 100
+        let slow = |_| Input { speed: 11.1, wanted: 27.8, ahead: behind(1, 15.0, 11.1), ..Default::default() };
+        let f = flashes(&cfg, 3, 120.0, slow);
+        assert!(f[0] >= 29.9 && f[0] < 30.1, "{f:?}");
+        // three rounds of one or two flashes, 20 s apart, then no more
+        let rounds: Vec<f32> = f.iter().copied().filter(|t| !f.iter().any(|s| s < t && t - s < 5.0)).collect();
+        assert_eq!(rounds.len(), 3, "{f:?}");
+        assert!((rounds[1] - rounds[0] - 20.0).abs() < 0.1 && (rounds[2] - rounds[1] - 20.0).abs() < 0.1, "{f:?}");
+        assert!(f.len() >= 3 && f.len() <= 6, "{f:?}");
+    }
+
+    #[test]
+    fn nobody_flashes_a_car_that_is_stuck_too_or_not_slow_enough() {
+        let cfg = flash_cfg(|c| c.flash_push = 1.0);
+        let stuck = |_| Input {
+            speed: 11.1,
+            wanted: 27.8,
+            ahead: Some(Ahead { id: 1, gap: 15.0, speed: 11.1, player: false, stuck_too: true }),
+            ..Default::default()
+        };
+        assert!(flashes(&cfg, 3, 300.0, stuck).is_empty());
+        // 45 km/h where they would drive 60: 15 km/h is not slow enough
+        let near = |_| Input { speed: 12.5, wanted: 16.7, ahead: behind(1, 15.0, 12.5), ..Default::default() };
+        assert!(flashes(&cfg, 3, 300.0, near).is_empty());
+        // far behind it: not pushing
+        let far = |_| Input { speed: 11.1, wanted: 27.8, ahead: behind(1, 80.0, 11.1), ..Default::default() };
+        assert!(flashes(&cfg, 3, 300.0, far).is_empty());
+        // a red light ahead: it slows down for that
+        let red = |_| Input { speed: 11.1, wanted: 27.8, ahead: behind(1, 15.0, 5.0), held_ahead: true, ..Default::default() };
+        assert!(flashes(&cfg, 3, 300.0, red).is_empty());
+    }
+
+    #[test]
+    fn standing_behind_the_players_bus_for_no_reason() {
+        let cfg = flash_cfg(|c| {
+            c.flash_push = 1.0;
+            c.flash_wait_min = 10.0;
+            c.flash_wait_max = 10.0;
+        });
+        let waiting = |_| Input { ahead: behind(u64::MAX, 5.0, 0.0), ..Default::default() };
+        let f = flashes(&cfg, 5, 30.0, waiting);
+        assert!(!f.is_empty() && f[0] >= 9.9 && f[0] < 10.1, "{f:?}");
+        // the bus waits at a red light: so do they
+        let red = |_| Input { ahead: behind(u64::MAX, 5.0, 0.0), held_ahead: true, ..Default::default() };
+        assert!(flashes(&cfg, 5, 120.0, red).is_empty());
+        // standing behind a car is the horn's
+        let car = |_| Input { ahead: behind(7, 5.0, 0.0), ..Default::default() };
+        assert!(flashes(&cfg, 5, 120.0, car).is_empty());
+    }
+
+    #[test]
+    fn provoked_driver_flashes_after_an_emergency_stop_for_a_vehicle() {
+        let cfg = flash_cfg(|c| c.flash_angry = 1.0);
+        // from 50 km/h at 7 m/s² to a stop, for the car ahead
+        let stop = |ahead: Option<Ahead>| move |t: f32| Input { speed: (13.9 - 7.0 * t).max(0.0), ahead, ..Default::default() };
+        let f = flashes(&cfg, 2, 10.0, stop(behind(1, 8.0, 0.0)));
+        assert!(f.len() == 2 || f.len() == 3, "{f:?}");
+        assert!(f[0] > 0.3 && f[0] < 2.0, "{f:?}");
+        // the same stop for a red light: nobody to flash
+        assert!(flashes(&cfg, 2, 10.0, stop(None)).is_empty());
+        // ... nor for the end of a queue seen from afar
+        let queue = Some(Ahead { id: 1, gap: 60.0, speed: 0.0, player: false, stuck_too: true });
+        assert!(flashes(&cfg, 2, 10.0, stop(queue)).is_empty());
+    }
+
+    #[test]
+    fn a_car_cutting_in_close_is_flashed_once() {
+        let cfg = flash_cfg(|c| c.flash_angry = 1.0);
+        // 60 km/h, a free road, then a car 6 m ahead and a little slower from 5 s on
+        let cut = |t: f32| Input { speed: 16.7, ahead: if t < 5.0 { None } else { behind(4, 6.0, 15.0) }, ..Default::default() };
+        let f = flashes(&cfg, 6, 60.0, cut);
+        assert!(f.len() == 2 || f.len() == 3, "{f:?}");
+        assert!(f[0] > 5.0 && f[0] < 6.0, "{f:?}");
+        // the car that was there all along, as close: nothing new
+        let along = |_| Input { speed: 16.7, ahead: behind(4, 6.0, 15.0), ..Default::default() };
+        assert!(flashes(&cfg, 6, 60.0, along).is_empty());
+    }
+
+    #[test]
+    fn dazzled_at_night_they_flash_back_once() {
+        let cfg = flash_cfg(|c| c.flash_dazzle = 1.0);
+        let dazzled = |night: bool| move |_| Input { speed: 13.9, dazzled: true, night, ..Default::default() };
+        let f = flashes(&cfg, 8, 20.0, dazzled(true));
+        assert!(!f.is_empty() && f.len() <= 2 && f[0] >= 0.45 && f[0] <= 2.1, "{f:?}");
+        // by day the high beams dazzle nobody
+        assert!(flashes(&cfg, 8, 20.0, dazzled(false)).is_empty());
+    }
+
+    #[test]
+    fn flashing_off_means_none() {
+        let cfg = flash_cfg(|c| {
+            c.flash = false;
+            c.flash_push = 1.0;
+            c.flash_angry = 1.0;
+            c.flash_dazzle = 1.0;
+        });
+        let all = |t: f32| Input {
+            speed: (13.9 - 7.0 * t).max(0.0),
+            wanted: 27.8,
+            ahead: behind(u64::MAX, 5.0, 0.0),
+            dazzled: true,
+            night: true,
+            ..Default::default()
+        };
+        assert!(flashes(&cfg, 1, 120.0, all).is_empty());
     }
 
     #[test]

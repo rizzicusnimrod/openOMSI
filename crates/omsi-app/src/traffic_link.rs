@@ -8,6 +8,12 @@ pub(crate) fn player_outline(p: &Player) -> traffic::PlayerBox {
     vehicle_outline(&p.vehicle, p.vehicle.physics.speed)
 }
 
+/// The vehicle's high beams are on: `lights_fern`, the stock buses' (and the add-on ones')
+/// variable for them (`OMSI_HIGH_BEAM=1`: on, for trying the oncoming drivers' flashing).
+pub(crate) fn high_beam(v: &omsi_sim::VehicleInstance) -> bool {
+    omsi_cfg::env::var_os("OMSI_HIGH_BEAM").is_some() || v.var("lights_fern").is_some_and(|x| x > 0.5)
+}
+
 /// `player_outline` of any vehicle moving at `speed` (m/s).
 pub(crate) fn vehicle_outline(v: &omsi_sim::VehicleInstance, speed: f32) -> traffic::PlayerBox {
     let bb =
