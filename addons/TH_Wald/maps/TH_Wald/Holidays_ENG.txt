@@ -1,0 +1,2701 @@
+-----------------1995------------------------------
+
+[holiday]
+19950101
+New Year
+
+[holiday]
+19950414
+Good Friday
+
+[holiday]
+19950417
+Easter Monday
+
+[holiday]
+19950501
+Labor Day
+
+[holiday]
+19950525
+Ascension Day
+
+[holiday]
+19950605
+Whit Monday
+
+[holiday]
+19951003
+German Unity Day
+
+[holiday]
+19951031
+Reformation Day
+
+[holiday]
+19951225
+1st Christmas Day
+
+[holiday]
+19951226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+19941222
+19950104
+Christmas vacations
+
+[holidays]
+19950206
+19950211
+Winter vacations
+
+[holidays]
+19950410
+19950422
+Easter vacations
+
+[holidays]
+19950602
+19950606
+Whitsun vacations
+
+[holidays]
+19950622
+19950802
+Summer vacations
+
+[holidays]
+19951009
+19951014
+Autumn vacations
+
+[holidays]
+19951222
+19960106
+Christmas vacations
+
+-----------------1996------------------------------
+
+[holiday]
+19960101
+New Year
+
+[holiday]
+19960405
+Good Friday
+
+[holiday]
+19960408
+Easter Monday
+
+[holiday]
+19960501
+Labor Day
+
+[holiday]
+19960516
+Ascension Day
+
+[holiday]
+19960527
+Whit Monday
+
+[holiday]
+19961003
+German Unity Day
+
+[holiday]
+19961031
+Reformation Day
+
+[holiday]
+19961225
+1st Christmas Day
+
+[holiday]
+19961226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+19960205
+19960210
+Winter vacations
+
+[holidays]
+19960401
+19960413
+Easter vacations
+
+[holidays]
+19960524
+19960528
+Whitsun vacations
+
+[holidays]
+19960627
+19960807
+Summer vacations
+
+[holidays]
+19961014
+19961019
+Autumn vacations
+
+[holidays]
+19961220
+19970104
+Christmas vacations
+
+-----------------1997------------------------------
+
+[holiday]
+19970101
+New Year
+
+[holiday]
+19970328
+Good Friday
+
+[holiday]
+19970331
+Easter Monday
+
+[holiday]
+19970501
+Labor Day
+
+[holiday]
+19970508
+Ascension Day
+
+[holiday]
+19970519
+Whit Monday
+
+[holiday]
+19971003
+German Unity Day
+
+[holiday]
+19971031
+Reformation Day
+
+[holiday]
+19971225
+1st Christmas Day
+
+[holiday]
+19971226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+19970210
+19970215
+Winter vacations
+
+[holidays]
+19970324
+19970405
+Easter vacations
+
+[holidays]
+19970516
+19970520
+Whitsun vacations
+
+[holidays]
+19970717
+19970827
+Summer vacations
+
+[holidays]
+19971020
+19971025
+Autumn vacations
+
+[holidays]
+19971222
+19980107
+Christmas vacations
+
+-----------------1998------------------------------
+
+[holiday]
+19980101
+New Year
+
+[holiday]
+19980410
+Good Friday
+
+[holiday]
+19980413
+Easter Monday
+
+[holiday]
+19980501
+Labor Day
+
+[holiday]
+19980521
+Ascension Day
+
+[holiday]
+19980601
+Whit Monday
+
+[holiday]
+19981003
+German Unity Day
+
+[holiday]
+19981031
+Reformation Day
+
+[holiday]
+19981225
+1st Christmas Day
+
+[holiday]
+19981226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+19980209
+19980214
+Winter vacations
+
+[holidays]
+19980406
+19980418
+Easter vacations
+
+[holidays]
+19980530
+19980602
+Whitsun vacations
+
+[holidays]
+19980723
+19980902
+Summer vacations
+
+[holidays]
+19981026
+19981030
+Autumn vacations
+
+[holidays]
+19981221
+19990106
+Christmas vacations
+
+-----------------1999------------------------------
+
+[holiday]
+19990101
+New Year
+
+[holiday]
+19990402
+Good Friday
+
+[holiday]
+19990405
+Easter Monday
+
+[holiday]
+19990501
+Labor Day
+
+[holiday]
+19990513
+Ascension Day
+
+[holiday]
+19990524
+Whit Monday
+
+[holiday]
+19991003
+German Unity Day
+
+[holiday]
+19991031
+Reformation Day
+
+[holiday]
+19991225
+1st Christmas Day
+
+[holiday]
+19991226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+19990208
+19990213
+Winter vacations
+
+[holidays]
+19990329
+19990410
+Easter vacations
+
+[holidays]
+19990521
+19990525
+Whitsun vacations
+
+[holidays]
+19990722
+19990901
+Summer vacations
+
+[holidays]
+19991025
+19991030
+Autumn vacations
+
+[holidays]
+19991220
+20000105
+Christmas vacations
+
+-----------------2000------------------------------
+
+[holiday]
+20000101
+New Year
+
+[holiday]
+20000421
+Good Friday
+
+[holiday]
+20000424
+Easter Monday
+
+[holiday]
+20000501
+Labor Day
+
+[holiday]
+20000601
+Ascension Day
+
+[holiday]
+20000612
+Whit Monday
+
+[holiday]
+20001003
+German Unity Day
+
+[holiday]
+20001031
+Reformation Day
+
+[holiday]
+20001225
+1st Christmas Day
+
+[holiday]
+20001226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20000207
+20000212
+Winter vacations
+
+[holidays]
+20000417
+20000429
+Easter vacations
+
+[holidays]
+20000610
+20000613
+Whitsun vacations
+
+[holidays]
+20000713
+20000823
+Summer vacations
+
+[holidays]
+20001016
+20001021
+Autumn vacations
+
+[holidays]
+20001222
+20010106
+Christmas vacations
+
+-----------------2001------------------------------
+
+[holiday]
+20010101
+New Year
+
+[holiday]
+20010413
+Good Friday
+
+[holiday]
+20010416
+Easter Monday
+
+[holiday]
+20010501
+Labor Day
+
+[holiday]
+20010524
+Ascension Day
+
+[holiday]
+20010604
+Whit Monday
+
+[holiday]
+20011003
+German Unity Day
+
+[holiday]
+20011031
+Reformation Day
+
+[holiday]
+20011225
+1st Christmas Day
+
+[holiday]
+20011226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20010205
+20010210
+Winter vacations
+
+[holidays]
+20010409
+20010421
+Easter vacations
+
+[holidays]
+20010601
+20010605
+Whitsun vacations
+
+[holidays]
+20010628
+20010808
+Summer vacations
+
+[holidays]
+20011015
+20011020
+Autumn vacations
+
+[holidays]
+20011221
+20020105
+Christmas vacations
+
+-----------------2002------------------------------
+
+[holiday]
+20020101
+New Year
+
+[holiday]
+20020329
+Good Friday
+
+[holiday]
+20020401
+Easter Monday
+
+[holiday]
+20020501
+Labor Day
+
+[holiday]
+20020509
+Ascension Day
+
+[holiday]
+20020520
+Whit Monday
+
+[holiday]
+20021003
+German Unity Day
+
+[holiday]
+20021031
+Reformation Day
+
+[holiday]
+20021225
+1st Christmas Day
+
+[holiday]
+20021226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20020204
+20020209
+Winter vacations
+
+[holidays]
+20020325
+20020406
+Easter vacations
+
+[holidays]
+20020517
+20020521
+Whitsun vacations
+
+[holidays]
+20020620
+20020731
+Summer vacations
+
+[holidays]
+20021014
+20021026
+Autumn vacations
+
+[holidays]
+20021223
+20030103
+Christmas vacations
+
+-----------------2003------------------------------
+
+[holiday]
+20030101
+New Year
+
+[holiday]
+20030418
+Good Friday
+
+[holiday]
+20030421
+Easter Monday
+
+[holiday]
+20030501
+Labor Day
+
+[holiday]
+20030529
+Ascension Day
+
+[holiday]
+20030609
+Whit Monday
+
+[holiday]
+20031003
+German Unity Day
+
+[holiday]
+20031031
+Reformation Day
+
+[holiday]
+20031225
+1st Christmas Day
+
+[holiday]
+20031226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20030210
+20030215
+Winter vacations
+
+[holidays]
+20030414
+20030425
+Easter vacations
+
+[holidays]
+20030607
+20030610
+Whitsun vacations
+
+[holidays]
+20030710
+20030820
+Summer vacations
+
+[holidays]
+20031027
+20031030
+Autumn vacations
+
+[holidays]
+20031222
+20040103
+Christmas vacations
+
+-----------------2004------------------------------
+
+[holiday]
+20040101
+New Year
+
+[holiday]
+20040409
+Good Friday
+
+[holiday]
+20040412
+Easter Monday
+
+[holiday]
+20040501
+Labor Day
+
+[holiday]
+20040520
+Ascension Day
+
+[holiday]
+20040531
+Whit Monday
+
+[holiday]
+20041003
+German Unity Day
+
+[holiday]
+20041031
+Reformation Day
+
+[holiday]
+20041225
+1st Christmas Day
+
+[holiday]
+20041226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20040209
+20040221
+Winter vacations
+
+[holidays]
+20040405
+20040416
+Easter vacations
+
+[holidays]
+20040528
+20040601
+Whitsun vacations
+
+[holidays]
+20040708
+20040818
+Summer vacations
+
+[holidays]
+20041011
+20041023
+Autumn vacations
+
+[holidays]
+20041222
+20041231
+Christmas vacations
+
+-----------------2005------------------------------
+
+[holiday]
+20050101
+New Year
+
+[holiday]
+20050325
+Good Friday
+
+[holiday]
+20050328
+Easter Monday
+
+[holiday]
+20050501
+Labor Day
+
+[holiday]
+20050505
+Ascension Day
+
+[holiday]
+20050516
+Whit Monday
+
+[holiday]
+20051003
+German Unity Day
+
+[holiday]
+20051031
+Reformation Day
+
+[holiday]
+20051225
+1st Christmas Day
+
+[holiday]
+20051226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20050207
+20050212
+Winter vacations
+
+[holidays]
+20050321
+20050402
+Easter vacations
+
+[holidays]
+20050514
+20050517
+Whitsun vacations
+
+[holidays]
+20050714
+20050824
+Summer vacations
+
+[holidays]
+20051017
+20051029
+Autumn vacations
+
+[holidays]
+20051223
+20060102
+Christmas vacations
+
+-----------------2006------------------------------
+
+[holiday]
+20060101
+New Year
+
+[holiday]
+20060414
+Good Friday
+
+[holiday]
+20060417
+Easter Monday
+
+[holiday]
+20060501
+Labor Day
+
+[holiday]
+20060525
+Ascension Day
+
+[holiday]
+20060605
+Whit Monday
+
+[holiday]
+20061003
+German Unity Day
+
+[holiday]
+20061031
+Reformation Day
+
+[holiday]
+20061225
+1st Christmas Day
+
+[holiday]
+20061226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20060206
+20060210
+Winter vacations
+
+[holidays]
+20060410
+20060421
+Easter vacations
+
+[holidays]
+20060603
+20060606
+Whitsun vacations
+
+[holidays]
+20060720
+20060830
+Summer vacations
+
+[holidays]
+20061023
+20061103
+Autumn vacations
+
+[holidays]
+20061223
+20070105
+Christmas vacations
+
+-----------------2007------------------------------
+
+[holiday]
+20070101
+New Year
+
+[holiday]
+20070406
+Good Friday
+
+[holiday]
+20070409
+Easter Monday
+
+[holiday]
+20070501
+Labor Day
+
+[holiday]
+20070517
+Ascension Day
+
+[holiday]
+20070528
+Whit Monday
+
+[holiday]
+20071003
+German Unity Day
+
+[holiday]
+20071031
+Reformation Day
+
+[holiday]
+20071225
+1st Christmas Day
+
+[holiday]
+20071226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20070205
+20070210
+Winter vacations
+
+[holidays]
+20070402
+20070413
+Easter vacations
+
+[holidays]
+20070526
+20070529
+Whitsun vacations
+
+[holidays]
+20070719
+20070829
+Summer vacations
+
+[holidays]
+20071015
+20071026
+Autumn vacations
+
+[holidays]
+20071222
+20080105
+Christmas vacations
+
+-----------------2008------------------------------
+
+[holiday]
+20080101
+New Year
+
+[holiday]
+20080321
+Good Friday
+
+[holiday]
+20080324
+Easter Monday
+
+[holiday]
+20080501
+Labor Day
+
+[holiday]
+20080501
+Ascension Day
+
+[holiday]
+20080512
+Whit Monday
+
+[holiday]
+20081003
+German Unity Day
+
+[holiday]
+20081031
+Reformation Day
+
+[holiday]
+20081225
+1st Christmas Day
+
+[holiday]
+20081226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20080204
+20080209
+Winter vacations
+
+[holidays]
+20080322
+20080328
+Easter vacations
+
+[holidays]
+20080513
+20080516
+Whitsun vacations
+
+[holidays]
+20080710
+20080820
+Summer vacations
+
+[holidays]
+20081013
+20081024
+Autumn vacations
+
+[holidays]
+20081220
+20090103
+Christmas vacations
+
+-----------------2009------------------------------
+
+[holiday]
+20090101
+New Year
+
+[holiday]
+20090410
+Good Friday
+
+[holiday]
+20090413
+Easter Monday
+
+[holiday]
+20090501
+Labor Day
+
+[holiday]
+20090521
+Ascension Day
+
+[holiday]
+20090601
+Whit Monday
+
+[holiday]
+20091003
+German Unity Day
+
+[holiday]
+20091031
+Reformation Day
+
+[holiday]
+20091225
+1st Christmas Day
+
+[holiday]
+20091226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20090202
+20090207
+Winter vacations
+
+[holidays]
+20090406
+20090417
+Easter vacations
+
+[holidays]
+20090625
+20090805
+Summer vacations
+
+[holidays]
+20091012
+20091024
+Autumn vacations
+
+[holidays]
+20091219
+20100102
+Christmas vacations
+
+-----------------2010------------------------------
+
+[holiday]
+20100101
+New Year
+
+[holiday]
+20100402
+Good Friday
+
+[holiday]
+20100405
+Easter Monday
+
+[holiday]
+20100501
+Labor Day
+
+[holiday]
+20100513
+Ascension Day
+
+[holiday]
+20100524
+Whit Monday
+
+[holiday]
+20101003
+German Unity Day
+
+[holiday]
+20101031
+Reformation Day
+
+[holiday]
+20101225
+1st Christmas Day
+
+[holiday]
+20101226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20100201
+20100206
+Winter vacations
+
+[holidays]
+20100329
+20100409
+Easter vacations
+
+[holidays]
+20100624
+20100804
+Summer vacations
+
+[holidays]
+20101009
+20101023
+Autumn vacations
+
+[holidays]
+20101223
+20110101
+Christmas vacations
+
+-----------------2011------------------------------
+
+[holiday]
+20110101
+New Year
+
+[holiday]
+20110422
+Good Friday
+
+[holiday]
+20110425
+Easter Monday
+
+[holiday]
+20110501
+Labor Day
+
+[holiday]
+20110602
+Ascension Day
+
+[holiday]
+20110613
+Whit Monday
+
+[holiday]
+20111003
+German Unity Day
+
+[holiday]
+20111031
+Reformation Day
+
+[holiday]
+20111225
+1st Christmas Day
+
+[holiday]
+20111226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20110131
+20110205
+Winter vacations
+
+[holidays]
+20110418
+20110430
+Easter vacations
+
+[holidays]
+20110611
+20110614
+Whitsun vacations
+
+[holidays]
+20110711
+20110819
+Summer vacations
+
+[holidays]
+20111017
+20111028
+Autumn vacations
+
+[holidays]
+20111223
+20120101
+Christmas vacations
+
+-----------------2012------------------------------
+
+[holiday]
+20120101
+New Year
+
+[holiday]
+20120406
+Good Friday
+
+[holiday]
+20120409
+Easter Monday
+
+[holiday]
+20120501
+Labor Day
+
+[holiday]
+20120517
+Ascension Day
+
+[holiday]
+20120528
+Whit Monday
+
+[holiday]
+20121003
+German Unity Day
+
+[holiday]
+20121031
+Reformation Day
+
+[holiday]
+20121225
+1st Christmas Day
+
+[holiday]
+20121226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20120206
+20120211
+Winter vacations
+
+[holidays]
+20120402
+20120413
+Easter vacations
+
+[holidays]
+20120525
+20120529
+Whitsun vacations
+
+[holidays]
+20120723
+20120831
+Summer vacations
+
+[holidays]
+20121022
+20121103
+Autumn vacations
+
+[holidays]
+20121224
+20130105
+Christmas vacations
+
+-----------------2013------------------------------
+
+[holiday]
+20130101
+New Year
+
+[holiday]
+20130329
+Good Friday
+
+[holiday]
+20130401
+Easter Monday
+
+[holiday]
+20130501
+Labor Day
+
+[holiday]
+20130509
+Ascension Day
+
+[holiday]
+20130520
+Whit Monday
+
+[holiday]
+20131003
+German Unity Day
+
+[holiday]
+20131031
+Reformation Day
+
+[holiday]
+20131225
+1st Christmas Day
+
+[holiday]
+20131226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20130218
+20130223
+Winter vacations
+
+[holidays]
+20130325
+20130406
+Easter vacations
+
+[holidays]
+20130510
+20130510
+Whitsun vacations
+
+[holidays]
+20130715
+20130823
+Summer vacations
+
+[holidays]
+20131021
+20131102
+Autumn vacations
+
+[holidays]
+20131223
+20140104
+Christmas vacations
+
+-----------------2014------------------------------
+
+[holiday]
+20140101
+New Year
+
+[holiday]
+20140418
+Good Friday
+
+[holiday]
+20140421
+Easter Monday
+
+[holiday]
+20140501
+Labor Day
+
+[holiday]
+20140529
+Ascension Day
+
+[holiday]
+20140609
+Whit Monday
+
+[holiday]
+20141003
+German Unity Day
+
+[holiday]
+20141031
+Reformation Day
+
+[holiday]
+20141225
+1st Christmas Day
+
+[holiday]
+20141226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20140217
+20140222
+Winter vacations
+
+[holidays]
+20140419
+20140502
+Easter vacations
+
+[holidays]
+20140721
+20140829
+Summer vacations
+
+[holidays]
+20141006
+20141018
+Autumn vacations
+
+[holidays]
+20141222
+20150103
+Christmas vacations
+
+-----------------2015------------------------------
+
+[holiday]
+20150101
+New Year
+
+[holiday]
+20150403
+Good Friday
+
+[holiday]
+20150406
+Easter Monday
+
+[holiday]
+20150501
+Labor Day
+
+[holiday]
+20150514
+Ascension Day
+
+[holiday]
+20150525
+Whit Monday
+
+[holiday]
+20151003
+German Unity Day
+
+[holiday]
+20151031
+Reformation Day
+
+[holiday]
+20151225
+1st Christmas Day
+
+[holiday]
+20151226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20150202
+20150207
+Winter vacations
+
+[holidays]
+20150330
+20150411
+Easter vacations
+
+[holidays]
+20150515
+20150515
+Whitsun vacations
+
+[holidays]
+20150713
+20150821
+Summer vacations
+
+[holidays]
+20151005
+20151017
+Autumn vacations
+
+[holidays]
+20151223
+20160102
+Christmas vacations
+
+-----------------2016------------------------------
+
+[holiday]
+20160101
+New Year
+
+[holiday]
+20160325
+Good Friday
+
+[holiday]
+20160328
+Easter Monday
+
+[holiday]
+20160501
+Labor Day
+
+[holiday]
+20160505
+Ascension Day
+
+[holiday]
+20160516
+Whit Monday
+
+[holiday]
+20161003
+German Unity Day
+
+[holiday]
+20161031
+Reformation Day
+
+[holiday]
+20161225
+1st Christmas Day
+
+[holiday]
+20161226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20160201
+20160206
+Winter vacations
+
+[holidays]
+20160324
+20160402
+Easter vacations
+
+[holidays]
+20160506
+20160506
+Whitsun vacations
+
+[holidays]
+20160627
+20160810
+Summer vacations
+
+[holidays]
+20161010
+20161022
+Autumn vacations
+
+[holidays]
+20161223
+20161231
+Christmas vacations
+
+-----------------2017------------------------------
+
+[holiday]
+20170101
+New Year
+
+[holiday]
+20170414
+Good Friday
+
+[holiday]
+20170417
+Easter Monday
+
+[holiday]
+20170501
+Labor Day
+
+[holiday]
+20170525
+Ascension Day
+
+[holiday]
+20170605
+Whit Monday
+
+[holiday]
+20171003
+German Unity Day
+
+[holiday]
+20171031
+Reformation Day
+
+[holiday]
+20171225
+1st Christmas Day
+
+[holiday]
+20171226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20170206
+20170211
+Winter vacations
+
+[holidays]
+20170410
+20170421
+Easter vacations
+
+[holidays]
+20170526
+20170526
+Whitsun vacations
+
+[holidays]
+20170626
+20170809
+Summer vacations
+
+[holidays]
+20171002
+20171014
+Autumn vacations
+
+[holidays]
+20171222
+20180105
+Christmas vacations
+
+-----------------2018------------------------------
+
+[holiday]
+20180101
+New Year
+
+[holiday]
+20180330
+Good Friday
+
+[holiday]
+20180402
+Easter Monday
+
+[holiday]
+20180501
+Labor Day
+
+[holiday]
+20180510
+Ascension Day
+
+[holiday]
+20180521
+Whit Monday
+
+[holiday]
+20181003
+German Unity Day
+
+[holiday]
+20181031
+Reformation Day
+
+[holiday]
+20181225
+1st Christmas Day
+
+[holiday]
+20181226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20180205
+20180209
+Winter vacations
+
+[holidays]
+20180326
+20180407
+Easter vacations
+
+[holidays]
+20180511
+20180511
+Whitsun vacations
+
+[holidays]
+20180702
+20180811
+Summer vacations
+
+[holidays]
+20181001
+20181013
+Autumn vacations
+
+[holidays]
+20181221
+20190104
+Christmas vacations
+
+-----------------2019------------------------------
+
+[holiday]
+20190101
+New Year
+
+[holiday]
+20190419
+Good Friday
+
+[holiday]
+20190422
+Easter Monday
+
+[holiday]
+20190501
+Labor Day
+
+[holiday]
+20190530
+Ascension Day
+
+[holiday]
+20190610
+Whit Monday
+
+[holiday]
+20190920
+World Children's Day
+
+[holiday]
+20191003
+German Unity Day
+
+[holiday]
+20191031
+Reformation Day
+
+[holiday]
+20191225
+1st Christmas Day
+
+[holiday]
+20191226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20190211
+20190215
+Winter vacations
+
+[holidays]
+20190415
+20190427
+Easter vacations
+
+[holidays]
+20190531
+20190531
+Whitsun vacations
+
+[holidays]
+20190708
+20190817
+Summer vacations
+
+[holidays]
+20191007
+20191019
+Autumn vacations
+
+[holidays]
+20191221
+20200103
+Christmas vacations
+
+-----------------2020------------------------------
+
+[holiday]
+20200101
+New Year
+
+[holiday]
+20200410
+Good Friday
+
+[holiday]
+20200413
+Easter Monday
+
+[holiday]
+20200501
+Labor Day
+
+[holiday]
+20200521
+Ascension Day
+
+[holiday]
+20200601
+Whit Monday
+
+[holiday]
+20200920
+World Children's Day
+
+[holiday]
+20201003
+German Unity Day
+
+[holiday]
+20201031
+Reformation Day
+
+[holiday]
+20201225
+1st Christmas Day
+
+[holiday]
+20201226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20200210
+20200214
+Winter vacations
+
+[holidays]
+20200406
+20200418
+Easter vacations
+
+[holidays]
+20200522
+20200522
+Whitsun vacations
+
+[holidays]
+20200720
+20200829
+Summer vacations
+
+[holidays]
+20201017
+20201030
+Autumn vacations
+
+[holidays]
+20201223
+20210102
+Christmas vacations
+
+-----------------2021------------------------------
+
+[holiday]
+20210101
+New Year
+
+[holiday]
+20210402
+Good Friday
+
+[holiday]
+20210405
+Easter Monday
+
+[holiday]
+20210501
+Labor Day
+
+[holiday]
+20210513
+Ascension Day
+
+[holiday]
+20210524
+Whit Monday
+
+[holiday]
+20210920
+World Children's Day
+
+[holiday]
+20211003
+German Unity Day
+
+[holiday]
+20211031
+Reformation Day
+
+[holiday]
+20211225
+1st Christmas Day
+
+[holiday]
+20211226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20210125
+20210130
+Winter vacations
+
+[holidays]
+20210329
+20210410
+Easter vacations
+
+[holidays]
+20210514
+20210514
+Whitsun vacations
+
+[holidays]
+20210726
+20210904
+Summer vacations
+
+[holidays]
+20211025
+20211106
+Autumn vacations
+
+[holidays]
+20211223
+20211231
+Christmas vacations
+
+-----------------2022------------------------------
+
+[holiday]
+20220101
+New Year
+
+[holiday]
+20220415
+Good Friday
+
+[holiday]
+20220418
+Easter Monday
+
+[holiday]
+20220501
+Labor Day
+
+[holiday]
+20220526
+Ascension Day
+
+[holiday]
+20220606
+Whit Monday
+
+[holiday]
+20220920
+World Children's Day
+
+[holiday]
+20221003
+German Unity Day
+
+[holiday]
+20221031
+Reformation Day
+
+[holiday]
+20221225
+1st Christmas Day
+
+[holiday]
+20221226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20220212
+20220219
+Winter vacations
+
+[holidays]
+20220411
+20220423
+Easter vacations
+
+[holidays]
+20220527
+20220527
+Whitsun vacations
+
+[holidays]
+20220718
+20220827
+Summer vacations
+
+[holidays]
+20221017
+20221029
+Autumn vacations
+
+[holidays]
+20221222
+20230103
+Christmas vacations
+
+-----------------2023------------------------------
+
+[holiday]
+20230101
+New Year
+
+[holiday]
+20230407
+Good Friday
+
+[holiday]
+20230410
+Easter Monday
+
+[holiday]
+20230501
+Labor Day
+
+[holiday]
+20230518
+Ascension Day
+
+[holiday]
+20230529
+Whit Monday
+
+[holiday]
+20230920
+World Children's Day
+
+[holiday]
+20231003
+German Unity Day
+
+[holiday]
+20231031
+Reformation Day
+
+[holiday]
+20231225
+1st Christmas Day
+
+[holiday]
+20231226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20230213
+20230217
+Winter vacations
+
+[holidays]
+20230403
+20230415
+Easter vacations
+
+[holidays]
+20230519
+20230519
+Whitsun vacations
+
+[holidays]
+20230710
+20230819
+Summer vacations
+
+[holidays]
+20231002
+20231014
+Autumn vacations
+
+[holidays]
+20231222
+20240105
+Christmas vacations
+
+-----------------2024------------------------------
+
+[holiday]
+20240101
+New Year
+
+[holiday]
+20240329
+Good Friday
+
+[holiday]
+20240401
+Easter Monday
+
+[holiday]
+20240501
+Labor Day
+
+[holiday]
+20240509
+Ascension Day
+
+[holiday]
+20240520
+Whit Monday
+
+[holiday]
+20240920
+World Children's Day
+
+[holiday]
+20241003
+German Unity Day
+
+[holiday]
+20241031
+Reformation Day
+
+[holiday]
+20241225
+1st Christmas Day
+
+[holiday]
+20241226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20240212
+20240216
+Winter vacations
+
+[holidays]
+20240325
+20240406
+Easter vacations
+
+[holidays]
+20240510
+20240510
+Whitsun vacations
+
+[holidays]
+20240620
+20240731
+Summer vacations
+
+[holidays]
+20240930
+20241012
+Autumn vacations
+
+[holidays]
+20241223
+20250103
+Christmas vacations
+
+-----------------2025------------------------------
+
+[holiday]
+20250101
+New Year
+
+[holiday]
+20250418
+Good Friday
+
+[holiday]
+20250421
+Easter Monday
+
+[holiday]
+20250501
+Labor Day
+
+[holiday]
+20250529
+Ascension Day
+
+[holiday]
+20250609
+Whit Monday
+
+[holiday]
+20250920
+World Children's Day
+
+[holiday]
+20251003
+German Unity Day
+
+[holiday]
+20251031
+Reformation Day
+
+[holiday]
+20251225
+1st Christmas Day
+
+[holiday]
+20251226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20250203
+20250208
+Winter vacations
+
+[holidays]
+20250407
+20250419
+Easter vacations
+
+[holidays]
+20250530
+20250530
+Whitsun vacations
+
+[holidays]
+20250628
+20250808
+Summer vacations
+
+[holidays]
+20251006
+20251018
+Autumn vacations
+
+[holidays]
+20251222
+20260103
+Christmas vacations
+
+-----------------2026------------------------------
+
+[holiday]
+20260101
+New Year
+
+[holiday]
+20260403
+Good Friday
+
+[holiday]
+20260406
+Easter Monday
+
+[holiday]
+20260501
+Labor Day
+
+[holiday]
+20260514
+Ascension Day
+
+[holiday]
+20260525
+Whit Monday
+
+[holiday]
+20260920
+World Children's Day
+
+[holiday]
+20261003
+German Unity Day
+
+[holiday]
+20261031
+Reformation Day
+
+[holiday]
+20261225
+1st Christmas Day
+
+[holiday]
+20261226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20260216
+20260221
+Winter vacations
+
+[holidays]
+20260407
+20260417
+Easter vacations
+
+[holidays]
+20260515
+20260515
+Whitsun vacations
+
+[holidays]
+20260704
+20260814
+Summer vacations
+
+[holidays]
+20261012
+20261024
+Autumn vacations
+
+[holidays]
+20261223
+20270102
+Christmas vacations
+
+-----------------2027------------------------------
+
+[holiday]
+20270101
+New Year
+
+[holiday]
+20270326
+Good Friday
+
+[holiday]
+20270329
+Easter Monday
+
+[holiday]
+20270501
+Labor Day
+
+[holiday]
+20270506
+Ascension Day
+
+[holiday]
+20270517
+Whit Monday
+
+[holiday]
+20270920
+World Children's Day
+
+[holiday]
+20271003
+German Unity Day
+
+[holiday]
+20271031
+Reformation Day
+
+[holiday]
+20271225
+1st Christmas Day
+
+[holiday]
+20271226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20270201
+20270206
+Winter vacations
+
+[holidays]
+20270322
+20270403
+Easter vacations
+
+[holidays]
+20270507
+20270507
+Whitsun vacations
+
+[holidays]
+20270710
+20270820
+Summer vacations
+
+[holidays]
+20271009
+20271023
+Autumn vacations
+
+[holidays]
+20271223
+20271231
+Christmas vacations
+
+-----------------2028------------------------------
+
+[holiday]
+20280101
+New Year
+
+[holiday]
+20280414
+Good Friday
+
+[holiday]
+20280417
+Easter Monday
+
+[holiday]
+20280501
+Labor Day
+
+[holiday]
+20280525
+Ascension Day
+
+[holiday]
+20280605
+Whit Monday
+
+[holiday]
+20280920
+World Children's Day
+
+[holiday]
+20281003
+German Unity Day
+
+[holiday]
+20281031
+Reformation Day
+
+[holiday]
+20281225
+1st Christmas Day
+
+[holiday]
+20281226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20280207
+20280212
+Winter vacations
+
+[holidays]
+20280403
+20280415
+Easter vacations
+
+[holidays]
+20280526
+20280526
+Whitsun vacations
+
+[holidays]
+20280722
+20280901
+Summer vacations
+
+[holidays]
+20281023
+20281103
+Autumn vacations
+
+[holidays]
+20281223
+20290105
+Christmas vacations
+
+-----------------2029------------------------------
+
+[holiday]
+20290101
+New Year
+
+[holiday]
+20290330
+Good Friday
+
+[holiday]
+20290402
+Easter Monday
+
+[holiday]
+20290501
+Labor Day
+
+[holiday]
+20290510
+Ascension Day
+
+[holiday]
+20290521
+Whit Monday
+
+[holiday]
+20290920
+World Children's Day
+
+[holiday]
+20291003
+German Unity Day
+
+[holiday]
+20291031
+Reformation Day
+
+[holiday]
+20291225
+1st Christmas Day
+
+[holiday]
+20291226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20290212
+20290217
+Winter vacations
+
+[holidays]
+20290326
+20290407
+Easter vacations
+
+[holidays]
+20290511
+20290511
+Whitsun vacations
+
+[holidays]
+20290721
+20290831
+Summer vacations
+
+[holidays]
+20291022
+20291103
+Autumn vacations
+
+[holidays]
+20291222
+20300104
+Christmas vacations
+
+-----------------2030------------------------------
+
+[holiday]
+20300101
+New Year
+
+[holiday]
+20300419
+Good Friday
+
+[holiday]
+20300422
+Easter Monday
+
+[holiday]
+20300501
+Labor Day
+
+[holiday]
+20300530
+Ascension Day
+
+[holiday]
+20300610
+Whit Monday
+
+[holiday]
+20300920
+World Children's Day
+
+[holiday]
+20301003
+German Unity Day
+
+[holiday]
+20301031
+Reformation Day
+
+[holiday]
+20301225
+1st Christmas Day
+
+[holiday]
+20301226
+2nd Christmas Day
+
+..............................
+
+[holidays]
+20300211
+20300216
+Winter vacations
+
+[holidays]
+20300408
+20300420
+Easter vacations
+
+[holidays]
+20300531
+20300531
+Whitsun vacations
+
+[holidays]
+20300713
+20300823
+Summer vacations
+
+[holidays]
+20301014
+20301026
+Autumn vacations
+
+[holidays]
+20301223
+20310104
+Christmas vacations

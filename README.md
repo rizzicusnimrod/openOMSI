@@ -15,6 +15,15 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/openOMSI-Project/openOMSI?style=for-the-badge"></a>
 </p>
 
+> [!NOTE]
+> **This is a custom fork** of [openOMSI](https://github.com/openOMSI-Project/openOMSI) with its
+> own changes: random cars' drivers that switch their lights on by the weather, use hazards and
+> the horn and brake hard in an emergency (tyres screeching), a new-look game menu and settings
+> with search, a modern minimap, a players list in multiplayer, and traffic that follows the day
+> of the week and the school holidays. **Download it from [Releases](../../releases/latest)**:
+> the Windows zip, plus an optional Thüringer Wald traffic add-on. Report bugs in this version
+> here, not to the openOMSI project.
+
 > [!WARNING]
 > **Early release. Expect bugs.** openOMSI is in an early stage of development: things may be
 > missing, broken or change between versions. Please report problems in

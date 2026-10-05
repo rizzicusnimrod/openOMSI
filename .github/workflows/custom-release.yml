@@ -1,0 +1,115 @@
+# The custom fork's own release: on every push to the `custom` branch, a Windows x64 build is
+# published as v<MAJOR.MINOR.COMMIT>-custom, with the Thüringer Wald traffic add-on (addons/)
+# beside it. The -custom suffix keeps the self-updater from swapping an official release in
+# (crates/omsi-app/src/updater.rs), so a friend's copy stays on this fork.
+name: Custom release
+
+on:
+  push:
+    branches: [custom]
+  workflow_dispatch:
+
+concurrency:
+  group: custom-release
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    # (the fork's workflow only: upstream has release.yml)
+    if: github.repository != 'openOMSI-Project/openOMSI'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        shell: bash
+        run: |
+          echo "version=$(sh scripts/version.sh)-custom" >> "$GITHUB_OUTPUT"
+          echo "### openOMSI $(sh scripts/version.sh)-custom" >> "$GITHUB_STEP_SUMMARY"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        shell: cmd
+        env:
+          OPENOMSI_VERSION: ${{ steps.v.outputs.version }}
+        run: scripts\build-windows.cmd
+      # (as release.yml: DirectX 12's shader compiler and the Visual C++ runtime beside the program)
+      - name: DirectX shader compiler
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download -R microsoft/DirectXShaderCompiler --pattern "dxc_*.zip" -D dxc
+          $zip = Get-ChildItem dxc/*.zip | Where-Object { $_.Name -notmatch "linux|pdb" } | Select-Object -First 1
+          Expand-Archive $zip.FullName -DestinationPath dxc/x
+          Copy-Item "dxc/x/bin/x64/dxcompiler.dll", "dxc/x/bin/x64/dxil.dll" dist/windows/
+      - name: Visual C++ runtime
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory -ErrorAction SilentlyContinue | Sort-Object FullName | Select-Object -Last 1
+          $dir = if ($crt) { $crt.FullName } else { "$env:SystemRoot\System32" }
+          foreach ($dll in "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll") {
+            Copy-Item (Join-Path $dir $dll) dist/windows/
+          }
+      - name: Package
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item README.md, LICENSE dist/windows/
+          Compress-Archive -Path dist/windows/* -DestinationPath "out/openOMSI-$env:VERSION-windows-x64.zip"
+          # unzipped into the OMSI 2 folder: maps\TH_Wald\...
+          Compress-Archive -Path addons/TH_Wald/* -DestinationPath "out/TH_Wald-traffic-addon.zip"
+          Get-ChildItem out
+      - name: Publish v${{ steps.v.outputs.version }}
+        shell: bash
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --no-tags -q https://github.com/openOMSI-Project/openOMSI.git main
+          upstream=$(git rev-parse FETCH_HEAD)
+          prev=$(git tag -l 'v*-custom' --sort=-creatordate | grep -vx "v$VERSION" | head -1 || true)
+          {
+            echo "**openOMSI $VERSION** - a custom fork of [openOMSI](https://github.com/openOMSI-Project/openOMSI)."
+            echo
+            echo "### Install"
+            echo
+            echo "You need **OMSI 2** (Steam) installed: openOMSI uses its maps, buses and sounds."
+            echo
+            echo "1. Download \`openOMSI-$VERSION-windows-x64.zip\`, unzip it into a folder of its own and start \`openomsi.exe\`."
+            echo "2. Optional: \`TH_Wald-traffic-addon.zip\` gives the Thüringer Wald map realistic traffic by the hour, weekday and school holidays (1995-2003). Unzip it into the OMSI 2 folder (\`...\\steamapps\\common\\OMSI 2\`); it replaces \`maps\\TH_Wald\\unsched_trafficdens.txt\` and \`Holidays*.txt\`, so back those up first if you want to go back."
+            echo
+            echo "This build does not update itself: check [the latest release]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/latest) for new versions. For multiplayer, everyone should run the same version."
+            echo
+            if [ -n "$prev" ]; then
+              echo "### New since $prev"
+              echo
+              git log --no-merges --format='- %s' "$prev..HEAD" "^$upstream"
+              echo
+            fi
+            echo "<details><summary>Everything this fork changes</summary>"
+            echo
+            git log --no-merges --format='- %s' "$upstream..HEAD"
+            echo
+            echo "</details>"
+          } > notes.md
+          cat notes.md
+          git tag -f "v$VERSION" "$GITHUB_SHA"
+          git push -f origin "v$VERSION"
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release upload "v$VERSION" out/*.zip --clobber
+            gh release edit "v$VERSION" --title "openOMSI $VERSION" --notes-file notes.md
+          else
+            gh release create "v$VERSION" out/*.zip --verify-tag --latest \
+              --title "openOMSI $VERSION" --notes-file notes.md
+          fi
