@@ -680,6 +680,9 @@ pub struct Traffic {
     debug_population: bool,
     /// `OMSI_DEBUG_DRIVERS`: what the drivers do, in the log.
     debug_drivers: bool,
+    /// `OMSI_DEBUG_RVL`: how fast the cars came into junctions by the rule of the right
+    /// (km/h), each car and path once, logged every minute.
+    rvl_entries: Option<(Vec<f32>, hashbrown::HashSet<(u64, usize)>)>,
     /// `OMSI_AI_HIGH_BEAM`: every car's high beams on (`ai_drivers`), for seeing them in a
     /// picture.
     force_high_beam: bool,
@@ -1673,6 +1676,10 @@ impl Traffic {
             light_prev,
             debug_population: omsi_cfg::env::var_os("OMSI_DEBUG_POPULATION").is_some(),
             debug_drivers: omsi_cfg::env::var_os("OMSI_DEBUG_DRIVERS").is_some(),
+            rvl_entries: {
+                omsi_sim::traffic::RIGHT_BEFORE_LEFT_CAUTION.store(omsi_cfg::env::var_os("OMSI_NO_RVL_CAUTION").is_none(), std::sync::atomic::Ordering::Relaxed);
+                omsi_cfg::env::var_os("OMSI_DEBUG_RVL").map(|_| Default::default())
+            },
             force_high_beam: omsi_cfg::env::var_os("OMSI_AI_HIGH_BEAM").is_some(),
             framed_spawns: Vec::new(),
             player: None,
@@ -6467,6 +6474,11 @@ impl Traffic {
             }
             if omsi_cfg::env::var("OMSI_DEBUG_CAR").ok().and_then(|v| v.parse::<u64>().ok()) == Some(car.id) {
                 let up: Vec<usize> = car.state.upcoming().take(4).collect();
+                if omsi_cfg::env::var_os("OMSI_DEBUG_RVL").is_some() {
+                    for &l in &up {
+                        log::info!("  rechts vor links? {}", self.net.right_before_left_why(l));
+                    }
+                }
                 log::info!("t={:.2} car {}: v {:.2} lane {} s {:.1}/{:.1} upcoming {:?} bend {:.2} desired {:.2} lead {:?} stop {:?} why {:?}", self.time, car.id, car.state.speed, car.state.lane, car.state.s, self.net.lanes[car.state.lane].length(), up, car.state.curve_speed(&self.net), car.state.desired_accel(&self.net, lead_now, stop_at), lead_now.map(|l| l.gap), stop_at.map(|x| x - car.state.front), car.why);
             }
             // the hardest braking: a car on a dry road brakes at up to 9.5 m/s² when it must;
@@ -6523,8 +6535,12 @@ impl Traffic {
             let seen = if car.driver.is_some() {
                 let lane = &self.net.lanes[car.state.lane];
                 let wanted = if ahead_seen.is_some() {
-                    ((lane.speed_limit_kmh * car.state.desire).min(car.state.max_speed_kmh).max(3.0) / 3.6)
-                        .min(car.state.curve_speed(&self.net))
+                    // (a junction by the rule of the right comes slowly, whoever is ahead)
+                    let kmh = std::iter::once(car.state.lane)
+                        .chain(car.state.planned_next)
+                        .filter_map(|l| self.net.right_before_left_kmh(l))
+                        .fold(lane.speed_limit_kmh, f32::min);
+                    ((kmh * car.state.desire).min(car.state.max_speed_kmh).max(3.0) / 3.6).min(car.state.curve_speed(&self.net))
                 } else {
                     0.0
                 };
@@ -6559,6 +6575,16 @@ impl Traffic {
                 };
                 log::info!("t={:.1}: car {} at ({:.0}, {:.0}) flashes its high beams ({why}) at {:.0} km/h{at}", self.time, car.id, car.vehicle.position.x, car.vehicle.position.y, car.state.speed * 3.6);
             }
+            if let Some((speeds, seen)) = self.rvl_entries.as_mut() {
+                let lane = car.state.lane;
+                if car.state.s < 3.0 && !car.is_bus() && self.net.right_before_left(lane) && seen.insert((car.id, lane)) {
+                    speeds.push(car.state.speed * 3.6);
+                    // (where: the street it came from, or the junction path's own name)
+                    let from = car.state.prev_lane.map(|p| self.net.lanes[p].name.clone()).filter(|n| !n.trim().is_empty());
+                    let p = car.vehicle.position;
+                    log::info!("rechts vor links: car {} came into the junction at ({:.0}, {:.0}) from {} at {:.0} km/h", car.id, p.x, p.y, from.as_deref().unwrap_or(&self.net.lanes[lane].name), car.state.speed * 3.6);
+                }
+            }
             if self.force_high_beam && car.vehicle.ty.ai_patch.high_beam {
                 use crate::ai_drivers::{VAR_HEAD_L, VAR_HEAD_R, VAR_HIGH_BEAM};
                 for n in [VAR_HEAD_L, VAR_HEAD_R, VAR_HIGH_BEAM] {
@@ -6576,6 +6602,22 @@ impl Traffic {
                 at_station_side: car.at_station_side(),
                 priority_warning,
             });
+        }
+        // OMSI_DEBUG_RVL: every minute how fast the cars came into junctions by the rule of
+        // the right
+        if let Some((speeds, _)) = self.rvl_entries.as_ref().filter(|_| (self.time / 60.0).floor() != ((self.time - dt) / 60.0).floor()) {
+            let mut v = speeds.clone();
+            v.sort_by(f32::total_cmp);
+            if let (Some(max), false) = (v.last(), v.is_empty()) {
+                log::info!(
+                    "t={:.0}: rechts vor links: {} cars came into such junctions, median {:.0} km/h, 90 % under {:.0}, fastest {max:.0} ({})",
+                    self.time,
+                    v.len(),
+                    v[v.len() / 2],
+                    v[(v.len() * 9 / 10).min(v.len() - 1)],
+                    if omsi_sim::traffic::RIGHT_BEFORE_LEFT_CAUTION.load(std::sync::atomic::Ordering::Relaxed) { "cautious" } else { "caution off" }
+                );
+            }
         }
         // OMSI_DEBUG_DRIVERS: every 10 s what the random cars' drivers do (`ai_drivers`)
         if omsi_cfg::env::var_os("OMSI_DEBUG_DRIVERS").is_some() && (self.time / 10.0).floor() != ((self.time - dt) / 10.0).floor() {

@@ -102,6 +102,18 @@ pub struct Lane {
 /// Priority of a path without a `[rule] priority`.
 pub const DEFAULT_PRIORITY: f32 = 128.0;
 
+/// How fast a driver comes into a junction where he has to give way to the right with no
+/// sign or light to tell him more ("rechts vor links", km/h, times his `desire`): slowly
+/// enough to stop for whoever comes from the right, whom the houses on the corner hide - in
+/// a 30 zone, and on a road of 50 km/h (where an unmarked junction may as well be a main
+/// road's the map left unmarked: cautious, not crawling).
+pub const RIGHT_BEFORE_LEFT_KMH: f32 = 25.0;
+pub const RIGHT_BEFORE_LEFT_FAST_KMH: f32 = 35.0;
+
+/// The drivers come into a junction by the rule of the right slowly (`right_before_left_kmh`);
+/// cleared (`OMSI_NO_RVL_CAUTION=1`) they drive into it as fast as the road lets them.
+pub static RIGHT_BEFORE_LEFT_CAUTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 /// How much of `unsched_vehgroups.txt` group `pool`'s traffic a path carries: its `[rule]
 /// trafficdensity` for the group (`rules`, see `Lane::group_density`: the last rule of a
 /// group counts), else the group's default there (`defaults`): 0 none, for the first group 1
@@ -639,6 +651,22 @@ impl Network {
         self.walks = vec![Vec::new(); self.lanes.len()];
         let (n, walks) = self.conflicts_from(0);
         log::info!("path network: {n} conflicting lane pairs at crossings, {walks} footpath crossings");
+        let rvl: Vec<usize> = (0..self.lanes.len()).filter(|&l| self.right_before_left(l)).collect();
+        if !rvl.is_empty() {
+            let junction = (0..self.lanes.len()).filter(|&l| !self.crossings[l].is_empty()).count();
+            log::info!("path network: {} of {junction} junction paths give way to the right with no sign or light (rechts vor links): come into them at {RIGHT_BEFORE_LEFT_KMH:.0} km/h, {RIGHT_BEFORE_LEFT_FAST_KMH:.0} on a road of 50", rvl.len());
+            // `OMSI_DEBUG_RVL`: which they are
+            if omsi_cfg::env::var_os("OMSI_DEBUG_RVL").is_some() {
+                // (by the speed limits of the path and of the fastest one from its right:
+                // two 50 km/h roads meeting without a sign is a map's gap, not a side street)
+                let mut by_limit: std::collections::BTreeMap<(i32, i32), usize> = Default::default();
+                for &l in &rvl {
+                    let theirs = self.crossings[l].iter().filter(|c| self.yields_to_the_right(l, c.other)).map(|c| self.lanes[c.other].speed_limit_kmh).fold(0.0f32, f32::max);
+                    *by_limit.entry((self.lanes[l].speed_limit_kmh.round() as i32, theirs.round() as i32)).or_default() += 1;
+                }
+                log::info!("rechts vor links paths: {rvl:?}; by (own, from the right) speed limit: {by_limit:?}");
+            }
+        }
     }
 
     /// `conflicts`, `crossings` and `walks` of the junction objects whose lanes start at
@@ -750,6 +778,67 @@ impl Network {
         }
         // side by side from the same direction: the one turning across the other waits
         la.turn != 0 && lb.turn == 0
+    }
+
+    /// Does a vehicle on junction path `a` give way to one on `b` because `b` comes from
+    /// its right, by the rule alone (equal priority; mirrored on a left-hand-traffic map)?
+    pub fn yields_to_the_right(&self, a: usize, b: usize) -> bool {
+        let (Some(la), Some(lb)) = (self.lanes.get(a), self.lanes.get(b)) else { return false };
+        if la.kind != LaneKind::Street || lb.kind != LaneKind::Street || lb.no_cars || (la.priority - lb.priority).abs() > 0.5 {
+            return false;
+        }
+        let rel = wrap_deg(lb.start_heading() - la.start_heading());
+        if rel.abs() > 135.0 {
+            return false;
+        }
+        (if self.left_hand { -rel } else { rel }) < -30.0
+    }
+
+    /// A junction path its drivers come into by the rule of the right: no light over it or
+    /// the path from the right, a path of equal priority crossing it from the right (not one
+    /// running into it), and a road of one lane each way coming to it (two lanes in one
+    /// direction are a main road, unmarked or not). They come slowly (`right_before_left_kmh`):
+    /// they cannot see round the corner, and whoever turns up from the right goes first.
+    pub fn right_before_left(&self, lane: usize) -> bool {
+        let Some(l) = self.lanes.get(lane) else { return false };
+        let wide = |i: usize| self.lanes.get(i).is_some_and(|x| x.left.is_some() || x.right.is_some());
+        l.kind == LaneKind::Street
+            && l.traffic_light.is_none()
+            && !wide(lane)
+            && !self.prev.get(lane).is_some_and(|p| p.iter().any(|&q| wide(q)))
+            && self.crossings.get(lane).is_some_and(|cs| {
+                cs.iter().any(|c| !c.merge && self.lanes[c.other].traffic_light.is_none() && self.yields_to_the_right(lane, c.other))
+            })
+    }
+
+    /// Why `right_before_left` says what it does about `lane` (`OMSI_DEBUG_CAR`).
+    pub fn right_before_left_why(&self, lane: usize) -> String {
+        let Some(l) = self.lanes.get(lane) else { return "no lane".into() };
+        let wide = |i: usize| self.lanes.get(i).is_some_and(|x| x.left.is_some() || x.right.is_some());
+        let right: Vec<usize> = self.crossings.get(lane).map(|cs| cs.iter().filter(|c| !c.merge && self.yields_to_the_right(lane, c.other)).map(|c| c.other).collect()).unwrap_or_default();
+        format!(
+            "{lane}: {:?} light {:?} wide {} prev {:?} wide {} prio {} crossings {} from the right {:?}",
+            self.right_before_left_kmh(lane),
+            l.traffic_light,
+            wide(lane),
+            self.prev.get(lane),
+            self.prev.get(lane).is_some_and(|p| p.iter().any(|&q| wide(q))),
+            l.priority,
+            self.crossings.get(lane).map(|c| c.len()).unwrap_or(0),
+            right
+        )
+    }
+
+    /// How fast a junction path by the rule of the right is come into (km/h, before the
+    /// driver's `desire`), None for any other.
+    pub fn right_before_left_kmh(&self, lane: usize) -> Option<f32> {
+        if !RIGHT_BEFORE_LEFT_CAUTION.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        self.right_before_left(lane).then(|| {
+            let limit = self.lanes[lane].speed_limit_kmh;
+            limit.min(if limit <= 30.5 { RIGHT_BEFORE_LEFT_KMH } else { RIGHT_BEFORE_LEFT_FAST_KMH })
+        })
     }
 
     /// The lane beside `lane` at `s` that carries the traffic the other way (the other half
@@ -2390,8 +2479,13 @@ impl AiState {
         let Some(lane) = net.lanes.get(self.lane) else { return 0.0 };
         let (a, b) = ((self.accel * self.accel_style).max(0.1), self.decel.max(0.5));
         let v = self.speed;
-        let limit = |l: &Lane| (l.speed_limit_kmh * self.desire).min(self.max_speed_kmh).max(3.0) / 3.6;
-        let mut v0 = limit(lane);
+        // (a junction by the rule of the right as slowly as a driver comes into it, see
+        // `Network::right_before_left`)
+        let limit_of = |i: usize, l: &Lane| {
+            let kmh = net.right_before_left_kmh(i).unwrap_or(l.speed_limit_kmh);
+            (kmh * self.desire).min(self.max_speed_kmh).max(3.0) / 3.6
+        };
+        let mut v0 = limit_of(self.lane, lane);
         // a lower limit on the lanes ahead (a junction's turning lanes, a 30 zone) is
         // reached at that speed, slowing gently (1.2 m/s²) from where it has to: taken only
         // on entering the lane, the new limit threw the model into a -3 m/s² stop at every
@@ -2404,7 +2498,7 @@ impl AiState {
                     break;
                 }
                 if let Some(nl) = net.lanes.get(l) {
-                    let vl = limit(nl);
+                    let vl = limit_of(l, nl);
                     if vl < v0 {
                         v0 = v0.min((vl * vl + 2.0 * 1.2 * d.max(0.0)).sqrt());
                     }
@@ -2915,6 +3009,41 @@ mod tests {
         net.lanes[1].priority = 64.0;
         assert!(!net.must_yield(0, 1));
         assert!(net.must_yield(1, 0));
+    }
+
+    #[test]
+    fn a_junction_by_the_rule_of_the_right_is_come_into_slowly() {
+        // the same crossing: a (from the south) has b coming from its right, b has a from its
+        // left - a comes into it slowly, b not
+        // (one junction object: its paths cross)
+        let mut a = LaneBuilder::arc(DVec3::new(0.0, -10.0, 0.0), 0.0, 20.0, 0.0, 0.0, LaneKind::Street, 3.0);
+        let mut b = LaneBuilder::arc(DVec3::new(10.0, 0.0, 0.0), 270.0, 20.0, 0.0, 0.0, LaneKind::Street, 3.0);
+        for (l, k) in [(&mut a, 0), (&mut b, 1)] {
+            l.source = 2;
+            l.key = Some(LaneKey { tile: (0, 0), id: 1, path: k });
+        }
+        let mut net = Network { lanes: vec![a, b], ..Default::default() };
+        net.link(1.5);
+        assert!(net.right_before_left(0));
+        assert!(!net.right_before_left(1));
+        // a main road (a [rule] priority) or a light: the signs say who goes, no need to creep
+        net.lanes[0].priority = 192.0;
+        net.lanes[1].priority = 64.0;
+        assert!(!net.right_before_left(0));
+        net.lanes[0].priority = DEFAULT_PRIORITY;
+        net.lanes[1].priority = DEFAULT_PRIORITY;
+        net.lanes[1].traffic_light = Some((0, 0));
+        assert!(!net.right_before_left(0));
+        net.lanes[1].traffic_light = None;
+        // as slow as a 30 zone asks, a little faster on a road of 50
+        net.lanes[0].speed_limit_kmh = 30.0;
+        assert_eq!(net.right_before_left_kmh(0), Some(RIGHT_BEFORE_LEFT_KMH));
+        net.lanes[0].speed_limit_kmh = 50.0;
+        assert_eq!(net.right_before_left_kmh(0), Some(RIGHT_BEFORE_LEFT_FAST_KMH));
+        assert_eq!(net.right_before_left_kmh(1), None);
+        // two lanes this way: a main road
+        net.lanes[0].left = Some(1);
+        assert!(!net.right_before_left(0));
     }
 
     #[test]
