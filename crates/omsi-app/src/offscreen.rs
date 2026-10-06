@@ -448,6 +448,25 @@ pub(crate) fn run_offscreen(
                     let now = (parse_time(&args.time) + srv_clock + srv_admin.shift).rem_euclid(86400.0);
                     srv_admin.shift += (want - now + 43_200.0).rem_euclid(86_400.0) - 43_200.0;
                 }
+                // an admin's traffic order: the density asked for, or every AI car off the road
+                match srv_admin.traffic.take() {
+                    Some(crate::admin::TrafficOrder::Density(n)) => {
+                        if let Some(t) = traffic.as_mut() {
+                            t.target = n;
+                            log::info!("server: traffic density now {n}");
+                        }
+                    }
+                    Some(crate::admin::TrafficOrder::Clear) => {
+                        if let Some(t) = traffic.as_mut() {
+                            let ids: Vec<u64> = t.cars.iter().filter(|c| !c.is_bus()).map(|c| c.id).collect();
+                            for id in &ids {
+                                t.remove_car(&world, &renderer, &mut scene, *id);
+                            }
+                            log::info!("server: {} AI vehicles taken off the road", ids.len());
+                        }
+                    }
+                    None => {}
+                }
                 if let Some(want) = srv_admin.set_weather.take() {
                     // only an installed weather (the name came over the network)
                     let found = omsi_cfg::read_dir_merged("Weather")
@@ -487,6 +506,11 @@ pub(crate) fn run_offscreen(
                 if let Some(l) = lan_off.as_mut() {
                     crate::server::enforce_vehicles(l);
                     crate::server::tick_status(l, parse_time(&args.time) + srv_clock + srv_admin.shift, srv_weather_name.as_str());
+                    // the shared world, counted for GET /status
+                    let (cars, buses, dormant, parked) = traffic.as_ref().map(|t| t.counts()).unwrap_or_default();
+                    let (walking, waiting, aboard) = humans_off.as_ref().map(|h| h.counts()).unwrap_or_default();
+                    let target = traffic.as_ref().map(|t| t.target).unwrap_or(0);
+                    crate::lan::update_server_world(omsi_net::ws::WorldCounts { cars, buses, dormant, parked, walking, waiting, aboard, traffic: target });
                 }
             }
             if lan_off.is_none() {
@@ -980,6 +1004,7 @@ pub(crate) fn run_offscreen(
             h.eye = Some(humans::Eye::of(&eye_cam, view_aspect).widened(triple_extent(&settings, &eye_cam, size.0, size.1)));
             h.set_remote_buses(remotes_off.remotes.iter().map(|(id, r)| (*id, r.vehicle())));
             h.set_duty(duty.as_ref());
+            h.set_player_next_stop(duty.as_ref().and_then(|d| d.trip().stops.get(d.next_stop)));
             let took = h.tick(
                 dt,
                 &world,
@@ -1156,7 +1181,13 @@ pub(crate) fn run_offscreen(
                     p.sync_driver(&renderer, &mut scene, 1.0 / 30.0, settings.driver, args.view == "driver");
                     if args.cam.is_none() && args.view != "free" && args.follow.is_none() {
                         // the head turned as --look says, like the final image
-                        cam = p.camera_look(&args.view, &camera, look_of(args), offscreen_orbit());
+                        let look = crate::player::driver_head_look(
+                            look_of(args),
+                            &args.view,
+                            settings.seat_pitch_deg,
+                            false,
+                        );
+                        cam = p.camera_look(&args.view, &camera, look, offscreen_orbit());
                         if args.view == "outside" {
                             cam = p.camera_clipped(cam, &world, offscreen_orbit(), 0.0);
                         }
@@ -1580,8 +1611,14 @@ pub(crate) fn run_offscreen(
                     })
                     .unwrap_or((1600, 900));
                 // the same camera the picture is taken with, head turn and all
+                let look = crate::player::driver_head_look(
+                    look_of(&args),
+                    &args.view,
+                    settings.seat_pitch_deg,
+                    false,
+                );
                 let cam =
-                    player.camera_look(&args.view, &camera, look_of(&args), offscreen_orbit());
+                    player.camera_look(&args.view, &camera, look, offscreen_orbit());
                 let (o, d) = cursor_ray(&cam, v[0], v[1], w as f32, h as f32);
                 match player.click(o, d, pixel_angle(&cam, h as f32) * 6.0) {
                     Some(i) => log::info!(
@@ -1847,7 +1884,13 @@ pub(crate) fn run_offscreen(
             }
         }
         if args.cam.is_none() && args.view != "free" && args.follow.is_none() {
-            camera = player.camera_look(&args.view, &camera, look_of(&args), offscreen_orbit());
+            let look = crate::player::driver_head_look(
+                look_of(args),
+                &args.view,
+                settings.seat_pitch_deg,
+                false,
+            );
+            camera = player.camera_look(&args.view, &camera, look, offscreen_orbit());
             if args.view == "outside" {
                 camera = player.camera_clipped(camera, &world, offscreen_orbit(), 0.0);
             }
@@ -2434,6 +2477,8 @@ pub(crate) fn run_offscreen(
     let daylight = omsi_sim::Daylight::compute(&clock, envir.as_ref());
     world.set_lamps(&renderer, &mut scene, daylight.lamps_on);
     world.update_night_modes(&renderer, &mut scene, &clock, daylight.brightness);
+    // (the physical model at the map's own place and the picture's moment)
+    let weather = crate::weather_model::refresh(&clock).unwrap_or(weather);
     // a run starts with the roads already in the state this weather would leave them
     let mut wetness = initial_wetness(&weather);
     if let Some(v) = omsi_cfg::env::var("OMSI_WETNESS")
@@ -2529,7 +2574,8 @@ pub(crate) fn run_offscreen(
             rn.tick(
                 1.0 / 30.0,
                 camera.position,
-                Vec3::ZERO,
+                // ([wind] direction (deg) and speed (m/s), as the window's frame takes it)
+                Vec3::new(weather.wind.0.to_radians().sin() * weather.wind.1, weather.wind.0.to_radians().cos() * weather.wind.1, 0.0),
                 &mut scene,
                 &player_ref.as_ref().or(player.as_ref()).map(|p| rain::vehicle_boxes(&p.vehicle)).unwrap_or_default(),
             );
@@ -2881,6 +2927,7 @@ pub(crate) fn run_offscreen(
         let mode = omsi_cfg::env::var("OMSI_MIRROR_HUD").ok().and_then(|v| v.parse::<u8>().ok()).unwrap_or(settings.mirror_hud);
         let mut panels = crate::mirror_hud::MirrorHud::default();
         panels.set_aspects(world.mirror_aspect.lock().clone());
+        panels.set_glass(world.mirror_glass.lock().clone());
         panels.sync(p, mode);
         if mode != 0 {
             panels.enabled = true;

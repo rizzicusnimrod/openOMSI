@@ -156,7 +156,14 @@ impl Library {
     /// Load the library and look its procedures up.
     pub fn load(path: &Path) -> Result<Library, String> {
         // SAFETY: loading a library runs its initialisers; that is what a plugin is for
-        let lib = unsafe { libloading::Library::new(path) }.map_err(|e| format!("LoadLibrary failed: {e}"))?;
+        let lib = unsafe { libloading::Library::new(path) }.map_err(|e| {
+            // (libloading 0.9 keeps the system's own reason - dlerror's text - in `source`)
+            use std::error::Error as _;
+            match e.source() {
+                Some(why) => format!("LoadLibrary failed: {e}: {why}"),
+                None => format!("LoadLibrary failed: {e}"),
+            }
+        })?;
         unsafe {
             let start = *lib.get::<StartFn>(b"PluginStart\0").map_err(|_| "procedure \"PluginStart\" not found".to_string())?;
             let finalize = *lib.get::<FinalizeFn>(b"PluginFinalize\0").map_err(|_| "procedure \"PluginFinalize\" not found".to_string())?;
@@ -632,6 +639,11 @@ pub trait PluginIo {
     fn vehicle_name(&self) -> Option<String> {
         None
     }
+    /// The player's vehicle's manufacturer and model apart, as its `[friendlyname]` has them
+    /// (Lua plugins; the name is the two joined).
+    fn vehicle_manufacturer_model(&self) -> Option<(String, String)> {
+        None
+    }
     /// The player's vehicle: x, y, z and heading in degrees (Lua plugins).
     fn position(&self) -> Option<[f64; 4]> {
         None
@@ -656,6 +668,46 @@ pub trait PluginIo {
     fn keys(&self) -> Vec<(String, bool)> {
         Vec::new()
     }
+    /// The other vehicles within `radius` m of the player's (Lua plugins' `omsi.others`):
+    /// the AI traffic and the other LAN players' buses.
+    fn others(&self, _radius: f64) -> Vec<Other> {
+        Vec::new()
+    }
+    /// A variable of one of [`PluginIo::others`] by its id.
+    fn other_var(&mut self, _id: u64, _name: &str) -> Option<f32> {
+        None
+    }
+    /// Writes a variable of one of [`PluginIo::others`] (an AI vehicle's; another player's
+    /// bus takes its values from the network again).
+    fn set_other_var(&mut self, _id: u64, _name: &str, _v: f32) -> bool {
+        false
+    }
+    /// What happened in the game since the last plugin frame, each sent to Lua plugins as an
+    /// event (`crash`, `pedestrian`, `stops_skipped`): things `omsi.info()` cannot show, as
+    /// they are over before a plugin could look. Every plugin of the frame gets them all.
+    fn events(&self) -> Vec<GameEvent> {
+        Vec::new()
+    }
+}
+
+/// One of [`PluginIo::events`]: a Lua event of that name, called with these values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GameEvent {
+    pub name: &'static str,
+    pub args: Vec<InfoValue>,
+}
+
+/// One of [`PluginIo::others`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Other {
+    /// Stable while the vehicle is there: AI cars by their id, LAN players by theirs.
+    pub id: u64,
+    /// "ai" or "player".
+    pub kind: &'static str,
+    /// Manufacturer and type, as `omsi.vehicle()` gives the player's.
+    pub name: String,
+    /// x, y, z and heading in degrees, as `omsi.position()`.
+    pub pos: [f64; 4],
 }
 
 /// A value of [`PluginIo::info`].

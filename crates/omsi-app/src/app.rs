@@ -106,6 +106,8 @@ pub(crate) struct App {
     pub(crate) mouse_look: bool,
     /// The left and right mouse buttons held.
     pub(crate) buttons_held: (bool, bool),
+    /// The middle button held (looks round; the right button zooms).
+    pub(crate) mmb_held: bool,
     /// The right button (or both) held: OMSI's mouse zoom (0x82c5f8) - moving the mouse up
     /// widens the view in the bus or takes the outside camera further away, by the value at
     /// the press over 500 pixels: (the cursor's height then, the zoom or distance then).
@@ -119,10 +121,15 @@ pub(crate) struct App {
     pub(crate) hover_part: Option<String>,
     /// A `[mouseevent]` mesh is under the cursor (named in `hover` or not): the hand cursor.
     pub(crate) hover_hand: bool,
+    /// The idle head sway waiting where it is while the cursor is on a control
+    /// (see `head_idle::Hold`).
+    pub(crate) head_idle_hold: crate::head_idle::Hold,
     /// `OMSI_INPUT` script: (seconds after start, command), in order.
     pub(crate) input_script: Vec<(f32, String)>,
-    /// `shot <file>` of the input script: the next frame is also rendered into this PNG.
-    pub(crate) shot: Option<PathBuf>,
+    /// A pending screenshot: its output path and whether touch controls are composited over it.
+    /// Scripted `shot <file>` captures keep the controls for visual tests; player screenshots
+    /// leave them out so the camera button produces a clean image.
+    pub(crate) shot: Option<(PathBuf, bool)>,
     /// The simulation stands still (OMSI's `sim_pause`, P, or the menu): nothing moves,
     /// the clock stops, the picture and the camera go on.
     pub(crate) paused: bool,
@@ -158,6 +165,9 @@ pub(crate) struct App {
     pub(crate) menu_kbd: bool,
     /// Keys pressed (true) and let go since the Lua plugins' last frame.
     pub(crate) plugin_keys: Vec<(String, bool)>,
+    /// What happened since the Lua plugins' last frame: crashes, people knocked down,
+    /// stops skipped (see `plugins::queue_event`).
+    pub(crate) plugin_events: Vec<omsi_plugin::GameEvent>,
     /// Seconds Ctrl+Shift+Page Up/Down has been held (the clock runs faster the longer).
     pub(crate) clock_hold: f32,
     /// A controller button held for looking left, right, up, down (`view_look_*`).
@@ -249,6 +259,9 @@ pub(crate) struct App {
     pub(crate) own_keys: std::collections::HashSet<i32>,
     /// The same for keys held with Shift (a Shift+number of the player's own is not a door key).
     pub(crate) own_shift: std::collections::HashSet<i32>,
+    /// A binding chosen in the pause menu that is waiting for the next physical key:
+    /// (true: [game], false: [vehicles], index in that section).
+    pub(crate) key_capture: Option<(bool, usize)>,
     /// Whether the game stood paused before the menu opened (closing it goes back to that).
     pub(crate) menu_prev_pause: bool,
     /// OMSI's information bar (`view_toggle_informationdisplay`, Ctrl+Y): time, speed, the
@@ -274,6 +287,11 @@ pub(crate) struct App {
     /// How far the player has turned the head (driver, passenger) or swung the outside
     /// camera around the bus, and how far that camera sits from it.
     pub(crate) look: (f32, f32),
+    /// Where the view is drawn between that angle and the one of the frame before: the way
+    /// the mouse (or the stick, or the keys) went is eased in, so the head glides to the
+    /// angle asked for rather than jumping to it (`look_smoothing_ms`; 0 keeps it equal to
+    /// `look`). Only the camera reads this - everything that turns the view writes `look`.
+    pub(crate) look_smooth: (f32, f32),
     /// Each view keeps its own `look` (as OMSI's cameras do): turning the outside camera
     /// (F3) leaves the driver's head (F1) where it was. `look_view` is the view `look`
     /// belongs to now; see `App::sync_view_look`.
@@ -284,6 +302,11 @@ pub(crate) struct App {
     /// The zoom of the views inside the bus (driver, passenger): their field of view is
     /// the camera's times this (the mouse wheel, + and -, a pinch), per view.
     pub(crate) view_zoom: std::collections::HashMap<String, f32>,
+    /// Eased Space return in flight (F1 only): ((look from), (zoom from), seconds in,
+    /// look key it started from). A hand on the view cancels it; other views reset
+    /// instantly. If the camera changes mid-glide, the originating camera is
+    /// finalized straight ahead instead of keeping a partial angle.
+    pub(crate) f1_reset: Option<((f32, f32), f32, f32, String)>,
     pub(crate) orbit: f32,
     pub(crate) frames: u32,
     pub(crate) fps_t: Instant,
@@ -291,6 +314,10 @@ pub(crate) struct App {
     pub(crate) service_msg: Option<(String, f32)>,
     /// The server's notifications on the screen (`notify`), oldest first.
     pub(crate) notices: Vec<crate::ui::Notice>,
+    /// The look for a newer release during the session (cards over the navigator).
+    pub(crate) update_watch: crate::update_watch::UpdateWatch,
+    /// "Playing now" on the website (None: not counted, setting `presence`).
+    pub(crate) presence: Option<crate::presence::Presence>,
     /// What the log has said (see applog.rs).
     pub(crate) log_state: crate::applog::LogState,
     /// The driver's personnel file and this session's statistics.
@@ -988,17 +1015,23 @@ impl App {
             Some(Instant::now() + std::time::Duration::from_millis(2)),
         );
         w.update_texture_budget(r, scene, &centers, false);
-        if centers.is_empty()
-            || !streamer.update(
+        if centers.is_empty() {
+            return;
+        }
+        let changed = streamer.update(
             r,
             scene,
             &centers,
             std::time::Duration::from_millis(6),
             self.audio.as_ref(),
-        )
-        {
+        );
+        // Uploads can temporarily exceed the texture budget before the next frame's
+        // housekeeping pass. Recheck immediately after streaming so far textures are
+        // reduced before the renderer allocates more frame resources.
+        if !changed {
             return;
         }
+        w.update_texture_budget(r, scene, &centers, true);
         if let Some(p) = self.player.as_mut() {
             // (OMSI's [no_collision]: no solid object stops the bus)
             p.vehicle.collision = self.settings.collision_objects.then(|| w.collision.lock().clone());
@@ -1083,7 +1116,7 @@ pub(crate) fn report_missing_content(w: &World, msg: &mut Option<(String, f32)>)
 
 /// How long the glide between two cockpit cameras takes (seconds). The eye, the turn of the
 /// view and the field of view all follow the same curve over this time. 0 = hard cut.
-pub(crate) const CAM_BLEND_SECS: f32 = 0.6;
+pub(crate) const CAM_BLEND_SECS: f32 = 0.54;
 /// The longest step of time one frame adds to the glide (seconds): a frame that hitches at
 /// the start of a switch does not skip ahead in it.
 pub(crate) const CAM_BLEND_MAX_DT: f32 = 1.0 / 30.0;
@@ -1211,10 +1244,28 @@ impl CamCarry {
 }
 
 impl CamBlend {
-    /// How far along the way from the old camera to the new one: smootherstep of the time
-    /// (no jolt in speed or acceleration at either end).
+    /// How far along the way from the old camera to the new one: ease-out
+    /// `s = 1-(1-t)^3` — fast off the mark, settling softly, so adjacent
+    /// seats snap round without lagging behind the key.
     pub fn progress(&self) -> f32 {
         let t = self.t.clamp(0.0, 1.0);
-        t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+        1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
+    }
+}
+
+#[cfg(test)]
+mod cam_blend_tests {
+    use super::CamBlend;
+
+    fn blend(t: f32) -> f32 {
+        CamBlend { key: None, from: None, shown: None, entering: false, t, carry: None }.progress()
+    }
+
+    #[test]
+    fn glide_starts_fast_and_settles_softly() {
+        assert_eq!(blend(0.0), 0.0);
+        assert_eq!(blend(1.0), 1.0);
+        assert!((blend(0.5) - 0.875).abs() < 1e-6);
+        assert!(blend(0.2) > 0.4, "fast off the mark");
     }
 }

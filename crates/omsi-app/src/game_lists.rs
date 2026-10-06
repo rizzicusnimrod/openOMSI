@@ -16,6 +16,19 @@ pub(crate) enum ListKind {
     Vehicle(usize),
     /// The clock, the weather and the traffic, on this page.
     World(usize),
+    /// Entry points for keyboard and game controller configuration.
+    Controls,
+    /// Vehicle bindings and game/camera bindings on separate pages.
+    Keyboard(usize),
+    ControllerDevices(usize),
+    Controller(String, usize),
+    ControllerAxis(String, usize),
+    ControllerButtons(String),
+    ControllerButtonSettings(String, usize),
+    ControllerButton(String, usize),
+    ControllerCapture(String),
+    /// OMSI's KY_ vehicle events that can be added to the keyboard.
+    Events,
     Lines,
     /// A line's tours; the stop chosen in the timetable beside them to start from: (the
     /// tour's number, the stop as `Schedule::tour_stops` lists them), none: the default.
@@ -312,6 +325,121 @@ pub(crate) fn search_items(app: &App, kind: &ListKind, query: &str) -> Vec<(Stri
     out
 }
 
+pub(crate) fn keyboard_actions(app: &App) -> Vec<String> {
+    let cfg = keyboard_cfg(app);
+    cfg.vehicles.into_iter().chain(cfg.game).map(|b| b.action).collect()
+}
+
+fn keyboard_cfg(app: &App) -> omsi_content::KeyboardCfg {
+    omsi_content::KeyboardCfg::load(&crate::startup::keyboard_cfg(&app.args.root))
+        .unwrap_or_default()
+        .with_game_defaults()
+        .with_vr_defaults()
+}
+
+fn write_keyboard_cfg(_app: &App, cfg: &omsi_content::KeyboardCfg) -> Result<(), String> {
+    let dir = crate::startup::content_dir().ok_or_else(|| "No writable openOMSI content folder was found".to_string())?.join("Inputs");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("keyboard.cfg");
+    let tmp = path.with_extension("cfg.tmp");
+    cfg.save(&tmp).map_err(|e| e.to_string())?;
+    omsi_content::KeyboardCfg::load(&tmp).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+impl App {
+    fn install_keyboard_cfg(&mut self, cfg: omsi_content::KeyboardCfg) {
+        let runtime = cfg.with_game_defaults().with_vr_defaults();
+        self.game_keys = runtime.game.clone();
+        if let Some(p) = self.player.as_mut() {
+            p.bindings = runtime.vehicles;
+        }
+        self.own_keys = crate::startup::own_keys(&self.args.root);
+        self.own_shift = crate::startup::own_bindings(&self.args.root, omsi_content::input::KEY_SHIFT);
+        // A key changed by the player must win over the ready-made W/A/S/D or arrow
+        // presets just as a key changed on the launcher's Controls page does.
+        self.args.drive_keys = "omsi".into();
+        self.settings.drive_keys = "omsi".into();
+        remember_setting("drive_keys", "omsi");
+    }
+
+    pub(crate) fn begin_key_capture(&mut self, game: bool, index: usize) {
+        self.key_capture = Some((game, index));
+        self.service_msg = Some(("Press a key for this action (Delete clears it, Esc cancels)".into(), 5.0));
+        self.refresh_list();
+    }
+
+    pub(crate) fn cancel_key_capture(&mut self) {
+        if self.key_capture.take().is_some() {
+            self.service_msg = Some(("Key change cancelled".into(), 2.0));
+            self.refresh_list();
+        }
+    }
+
+    pub(crate) fn apply_key_capture(&mut self, scan: Option<i32>, chord: i32) {
+        let Some((game, index)) = self.key_capture else { return };
+        let mut cfg = keyboard_cfg(self);
+        let list = if game { &mut cfg.game } else { &mut cfg.vehicles };
+        let Some(binding) = list.get_mut(index) else {
+            self.key_capture = None;
+            self.service_msg = Some(("That key entry no longer exists".into(), 3.0));
+            self.refresh_list();
+            return;
+        };
+        let hold = binding.modifier & omsi_content::input::KEY_HOLD;
+        binding.scan_code = scan.unwrap_or(0);
+        binding.modifier = if scan.is_some() { hold | chord } else { hold };
+        let action = binding.action.clone();
+        match write_keyboard_cfg(self, &cfg) {
+            Ok(()) => {
+                self.key_capture = None;
+                self.install_keyboard_cfg(cfg);
+                let key = scan.map(|s| crate::keys::key_name(s as i64, (hold | chord) as i64)).unwrap_or_else(|| "(unbound)".into());
+                self.service_msg = Some((format!("{}: {key}", crate::describe::names(&self.args.root, &self.settings.language).control(&action)), 3.0));
+                self.refresh_list();
+            }
+            Err(e) => self.service_msg = Some((format!("Key binding was not saved: {e}"), 5.0)),
+        }
+    }
+
+    pub(crate) fn add_key_event(&mut self, action: &str) {
+        let action = action.trim();
+        if action.is_empty() {
+            return;
+        }
+        let mut cfg = keyboard_cfg(self);
+        cfg.vehicles.push(omsi_content::KeyBinding { action: action.to_string(), scan_code: 0, modifier: 0 });
+        let index = cfg.vehicles.len() - 1;
+        match write_keyboard_cfg(self, &cfg) {
+            Ok(()) => {
+                self.install_keyboard_cfg(cfg);
+                self.key_capture = Some((false, index));
+                self.service_msg = Some((format!("KY_{action} added. Press its key now."), 5.0));
+            }
+            Err(e) => self.service_msg = Some((format!("Event was not added: {e}"), 5.0)),
+        }
+    }
+}
+
+fn keyboard_pages(app: &App) -> Vec<Page> {
+    let cfg = keyboard_cfg(app);
+    let names = crate::describe::names(&app.args.root, &app.settings.language);
+    let mut vehicle = vec![opens("Add a vehicle event…", "Choose a control supplied by the bus or its mods", "key_events")];
+    let mut game = Vec::new();
+    for (is_game, bindings, rows) in [(false, &cfg.vehicles, &mut vehicle), (true, &cfg.game, &mut game)] {
+        let mut bindings: Vec<_> = bindings.iter().enumerate().collect();
+        bindings.sort_by_key(|(_, b)| names.control(&b.action).to_lowercase());
+        for (i, b) in bindings {
+            let key = if app.key_capture == Some((is_game, i)) { "press a key…".into() }
+                else { crate::keys::key_name(b.scan_code as i64, b.modifier as i64) };
+            rows.push((row(&names.control(&b.action), 'a', &key, "Enter to change; Delete clears; Esc cancels", None),
+                format!("keybind {} {i}", if is_game { "g" } else { "v" })));
+        }
+    }
+    vec![("Driving and bus", vehicle), ("Game and camera", game)]
+}
+
 pub(crate) fn items(app: &App, kind: &ListKind) -> Vec<(String, String)> {
     let tr = |t: &str| omsi_ui::tr(t).into_owned();
     let mut out: Vec<(String, String)> = Vec::new();
@@ -326,6 +454,35 @@ pub(crate) fn items(app: &App, kind: &ListKind) -> Vec<(String, String)> {
                 return vec![(row("Nothing to set here", 'i', "", "", None), "noop".to_string())];
             }
             return hide_advanced(pages.swap_remove(tab).1, app.settings.advanced_settings);
+        }
+        ListKind::ControllerDevices(_) | ListKind::Controller(..) | ListKind::ControllerAxis(..) | ListKind::ControllerButtons(_) | ListKind::ControllerButtonSettings(..) | ListKind::ControllerButton(..) | ListKind::ControllerCapture(_) => return crate::game_controller_menu::items(app, kind),
+        ListKind::Controls => {
+            return vec![
+                opens("Keyboard", "Change driving, vehicle, game and camera key bindings", "keyboard"),
+                opens("Game controllers", "Configure wheels, pedals, gamepads and force feedback", "controllers"),
+            ];
+        }
+        ListKind::Keyboard(tab) => {
+            return keyboard_pages(app).swap_remove((*tab).min(1)).1;
+        }
+        ListKind::Events => {
+            let names = crate::describe::names(&app.args.root, &app.settings.language);
+            let mut events = names.events();
+            if let Some(p) = app.player.as_ref() {
+                for action in p.vehicle.ty.program.trigger_names() {
+                    if !events.iter().any(|(a, _)| a.eq_ignore_ascii_case(&action)) {
+                        events.push((action.clone(), names.control(&action)));
+                    }
+                }
+            }
+            events.sort_by(|a, b| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()).then_with(|| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase())));
+            for (action, label) in events {
+                out.push((format!("{label}  ·  KY_{action}"), format!("key_event {action}")));
+            }
+            if out.is_empty() {
+                out.push(("No vehicle events were found".into(), "back".into()));
+            }
+            return out;
         }
         ListKind::Lines => {
             if let Some(sch) = app.schedule.as_ref() {
@@ -363,7 +520,7 @@ pub(crate) fn items(app: &App, kind: &ListKind) -> Vec<(String, String)> {
                     .termini
                     .iter()
                     .enumerate()
-                    .map(|(i, t)| (t.strings.iter().find(|s| !s.trim().is_empty()).cloned().unwrap_or_else(|| t.code.to_string()), t.code, i))
+                    .map(|(i, t)| (t.menu_name(), t.code, i))
                     .collect();
                 // (alphabetical, by name; picked by its row: several may share a name or a code)
                 termini.sort_by_key(|(name, ..)| name.trim().to_lowercase());
@@ -525,6 +682,16 @@ pub(crate) fn menu_extras(
         ListKind::Options(_) => (MenuKind::Options, head("Options..."), None),
         ListKind::Vehicle(_) => (MenuKind::Options, head("Vehicle options..."), None),
         ListKind::World(_) => (MenuKind::Options, head("World options..."), None),
+        ListKind::Controls => (MenuKind::Options, head("Controls..."), None),
+        ListKind::Keyboard(_) => (MenuKind::Options, head("Keyboard"), None),
+        ListKind::ControllerDevices(_) => (MenuKind::Options, head("Game controllers"), None),
+        ListKind::Controller(name, _) => (MenuKind::Options, Some((name.clone(), String::new())), None),
+        ListKind::ControllerAxis(name, a) => (MenuKind::Options, Some((format!("{} · Axis {}", name, a + 1), String::new())), None),
+        ListKind::ControllerButtons(name) => (MenuKind::List, Some(("Choose a button".into(), name.clone())), None),
+        ListKind::ControllerButtonSettings(name, b) => (MenuKind::Options, Some((crate::game_controller_menu::button_label(*b), name.clone())), None),
+        ListKind::ControllerButton(_, b) => (MenuKind::List, Some((format!("{}: choose an action", crate::game_controller_menu::button_label(*b)), String::new())), None),
+        ListKind::ControllerCapture(_) => (MenuKind::List, head("Assign a physical button"), None),
+        ListKind::Events => (MenuKind::List, Some((tr("Add event"), String::new())), None),
         ListKind::Lines => {
             let preview = action.strip_prefix("line ").and_then(|name| {
                 let line = schedule?.data.lines.iter().find(|l| l.name == name)?;
@@ -605,15 +772,21 @@ pub(crate) fn run(app: &mut App, kind: &ListKind, action: &str) -> Option<ListKi
 /// Do a line of the list, a setting changed as `mv` says (Enter and a click on a line are
 /// `Move::Next`; the arrows and a click on a slider or a stepper the others).
 pub(crate) fn run_move(app: &mut App, kind: &ListKind, action: &str, mv: Move) -> Option<ListKind> {
+    if crate::game_controller_menu::is_controller_list(Some(kind)) {
+        return crate::game_controller_menu::run(app, kind, action, mv);
+    }
     if action == "back" {
         return match kind {
             ListKind::Tours(..) => Some(ListKind::Lines),
+            ListKind::Events => Some(ListKind::Keyboard(0)),
+            ListKind::Keyboard(_) => Some(ListKind::Controls),
             ListKind::PlaceType(_) | ListKind::PlaceLivery(_) | ListKind::PlaceHof(..) => Some(ListKind::PlaceMaker),
             _ => None,
         };
     }
     let (verb, arg) = action.split_once(' ').unwrap_or((action, ""));
     match kind {
+        ListKind::ControllerDevices(_) | ListKind::Controller(..) | ListKind::ControllerAxis(..) | ListKind::ControllerButtons(_) | ListKind::ControllerButtonSettings(..) | ListKind::ControllerButton(..) | ListKind::ControllerCapture(_) => unreachable!("controller lists handled above"),
         ListKind::Admin => {
             crate::admin::run(app, action);
             Some(ListKind::Admin)
@@ -652,9 +825,11 @@ pub(crate) fn run_move(app: &mut App, kind: &ListKind, action: &str, mv: Move) -
                 }
                 "seat_reset" if step => {
                     app.settings.seat = [0.0; 3];
+                    app.settings.seat_pitch_deg = 0.0;
                     for k in ["seat_x", "seat_y", "seat_z"] {
                         remember_setting(k, "0");
                     }
+                    remember_setting("seat_pitch_deg", "0");
                 }
                 "clock_ontime" if step => {
                     if app.lan.as_ref().is_some_and(|l| l.role == omsi_net::Role::Client) {
@@ -676,6 +851,9 @@ pub(crate) fn run_move(app: &mut App, kind: &ListKind, action: &str, mv: Move) -
                         app.shift_clock(by);
                     }
                 }
+                "traffic_clear" if step => {
+                    crate::admin::clear_ai_traffic(app);
+                }
                 other if step => {
                     app.page_action(other);
                     return None;
@@ -690,6 +868,37 @@ pub(crate) fn run_move(app: &mut App, kind: &ListKind, action: &str, mv: Move) -
                 return None;
             }
             Some(kind.clone())
+        }
+        ListKind::Controls => {
+            if !matches!(mv, Move::Next) { return Some(kind.clone()); }
+            match verb {
+                "keyboard" => Some(ListKind::Keyboard(0)),
+                "controllers" => Some(ListKind::ControllerDevices(0)),
+                _ => Some(kind.clone()),
+            }
+        }
+        ListKind::Keyboard(_) => {
+            if !matches!(mv, Move::Next) { return Some(kind.clone()); }
+            match verb {
+                "key_events" => Some(ListKind::Events),
+                "keybind" => {
+                    let mut p = arg.split_whitespace();
+                    let game = p.next() == Some("g");
+                    if let Some(index) = p.next().and_then(|n| n.parse::<usize>().ok()) {
+                        app.begin_key_capture(game, index);
+                    }
+                    Some(kind.clone())
+                }
+                _ => Some(kind.clone()),
+            }
+        }
+        ListKind::Events => {
+            if matches!(mv, Move::Next) && verb == "key_event" {
+                app.add_key_event(arg);
+                Some(ListKind::Keyboard(0))
+            } else {
+                Some(ListKind::Events)
+            }
         }
         ListKind::Lines => match verb {
             "line" => {
@@ -791,7 +1000,7 @@ pub(crate) fn run_move(app: &mut App, kind: &ListKind, action: &str, mv: Move) -
                 if let Some((hof, t)) = hof.as_ref().and_then(|h| h.termini.get(ti).map(|t| (h, t))) {
                     // (the line on the IBIS stays; only the destination changes)
                     let line = destination_line(&p.vehicle);
-                    let name = t.strings.iter().find(|s| !s.trim().is_empty()).cloned().unwrap_or_default();
+                    let name = t.menu_name();
                     p.set_destination_by_hand(hof, &line, ti);
                     log::info!("destination display set by hand: {} {} (terminus code now {:?})", t.code, name.trim(), p.vehicle.var("IBIS_TerminusCode"));
                     app.service_msg = Some((format!("Destination: {}", name.trim()), 3.0));
@@ -842,23 +1051,23 @@ pub(crate) fn row(name: &str, kind: char, value: &str, desc: &str, frac: Option<
 }
 
 /// A row that opens another list.
-fn opens(name: &str, desc: &str, id: &str) -> (String, String) {
+pub(crate) fn opens(name: &str, desc: &str, id: &str) -> (String, String) {
     (row(name, 'o', "", desc, None), id.to_string())
 }
 
 /// A row with a button that does something.
-fn button(name: &str, text: &str, desc: &str, id: &str) -> (String, String) {
+pub(crate) fn button(name: &str, text: &str, desc: &str, id: &str) -> (String, String) {
     (row(name, 'a', text, desc, None), id.to_string())
 }
 
 /// A switch row, if the setting `id` is one.
-fn switch_row(app: &App, id: &str, name: &str, desc: &str) -> Option<(String, String)> {
+pub(crate) fn switch_row(app: &App, id: &str, name: &str, desc: &str) -> Option<(String, String)> {
     let on = toggle_now(app, id)?;
     Some((row(name, 's', if on { "on" } else { "off" }, desc, None), id.to_string()))
 }
 
 /// A slider row for the setting `id` ("verb" or "verb arg"); `fmt` writes its value.
-fn slider_row(app: &App, id: &str, name: &str, desc: &str, fmt: &dyn Fn(f32) -> String) -> Option<(String, String)> {
+pub(crate) fn slider_row(app: &App, id: &str, name: &str, desc: &str, fmt: &dyn Fn(f32) -> String) -> Option<(String, String)> {
     let (verb, arg) = id.split_once(' ').unwrap_or((id, ""));
     let steps = steps_of(verb)?;
     let now = option_now(app, verb, arg)?;
@@ -890,6 +1099,7 @@ fn steps_of(verb: &str) -> Option<Vec<f32>> {
         "led_glow" => (0..16).map(|v| v as f32).collect(),
         "led_mips" => (0..=80).map(|v| v as f32 * 0.05).collect(),
         "ui_scale" => (10..=40).map(|v| v as f32 * 0.05).collect(),
+        "chat_size" => (5..=30).map(|v| v as f32 * 0.1).collect(),
         "ui_opacity" => (4..=20).map(|v| v as f32 * 0.05).collect(),
         "vol_ai" | "vol_scenery" | "exhaust" => (0..=20).map(|v| v as f32 * 0.05).collect(),
         "wheel_range" => (6..=60).map(|v| v as f32 * 30.0).collect(),
@@ -897,10 +1107,15 @@ fn steps_of(verb: &str) -> Option<Vec<f32>> {
         "fov" => std::iter::once(0.0).chain((20..=120).map(|v| v as f32)).collect(),
         "steer_look_angle" => (0..=60).map(|v| v as f32).collect(),
         "steer_look_response" => (1..=20).map(|v| v as f32 * 0.05).collect(),
+        "head_idle" => (0..=20).map(|v| v as f32 * 0.05).collect(),
+        "head_idle_pace" => (10..=40).map(|v| v as f32 * 0.05).collect(),
         "pedal_t" | "pedal_b" => PEDAL.to_vec(),
+        "ctrl_deadzone" => (0..=30).map(|v| v as f32 * 0.01).collect(),
         "mouse_sens" => (10..=300).map(|v| v as f32 / 100.0).collect(),
         "look_sens" => (2..=40).map(|v| v as f32 * 0.05).collect(),
+        "look_smoothing_ms" => (0..=20).map(|v| v as f32 * 10.0).collect(),
         "seat" => (-50..=50).map(|v| v as f32 / 100.0).collect(),
+        "seat_pitch" => (-45..=45).map(|v| v as f32).collect(),
         "hour" => (0..24).map(|v| v as f32).collect(),
         "minute" => (0..60).map(|v| v as f32).collect(),
         // the weather, made by hand
@@ -1020,11 +1235,14 @@ fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
         "volume" => s.volume,
         "led_glow" => s.led_glow as f32,
         "led_mips" => s.led_mips,
+        "ctrl_deadzone" => s.ctrl_deadzone,
         "pedal_t" => s.pedal_throttle,
         "pedal_b" => s.pedal_brake,
         "mouse_sens" => s.mouse_sens,
         "look_sens" => s.look_sens,
+        "look_smoothing_ms" => s.look_smoothing_ms,
         "ui_scale" => s.ui_scale,
+        "chat_size" => s.chat_size,
         "ui_opacity" => s.ui_opacity,
         "vol_ai" => s.vol_ai,
         "exhaust" => s.exhaust,
@@ -1046,7 +1264,10 @@ fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
         }
         "steer_look_angle" => s.steer_look_angle,
         "steer_look_response" => s.steer_look_response,
+        "head_idle" => s.head_idle,
+        "head_idle_pace" => s.head_idle_pace,
         "seat" => s.seat[arg.trim().parse::<usize>().unwrap_or(0).min(2)],
+        "seat_pitch" => s.seat_pitch_deg,
         "hour" => ((app.clock.time / 3600.0) as i64).rem_euclid(24) as f32,
         "minute" => (((app.clock.time / 60.0) as i64) % 60) as f32,
         "visibility" => app.weather.as_ref()?.fog.0,
@@ -1098,6 +1319,10 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
             app.settings.led_mips = v.clamp(0.0, 4.0);
             Some(("led_mips", app.settings.led_mips.to_string()))
         }
+        "ctrl_deadzone" => {
+            app.settings.ctrl_deadzone = v.clamp(0.0, 0.3);
+            Some(("ctrl_deadzone", app.settings.ctrl_deadzone.to_string()))
+        }
         "pedal_t" => {
             app.settings.pedal_throttle = v;
             Some(("pedal_throttle", v.to_string()))
@@ -1110,6 +1335,10 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
             app.settings.look_sens = (v * 100.0).round() / 100.0;
             Some(("look_sens", app.settings.look_sens.to_string()))
         }
+        "look_smoothing_ms" => {
+            app.settings.look_smoothing_ms = v.round();
+            Some(("look_smoothing_ms", app.settings.look_smoothing_ms.to_string()))
+        }
         "mouse_sens" => {
             app.settings.mouse_sens = (v * 100.0).round() / 100.0;
             Some(("mouse_sens", app.settings.mouse_sens.to_string()))
@@ -1117,6 +1346,10 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
         "ui_scale" => {
             app.settings.ui_scale = (v * 100.0).round() / 100.0;
             Some(("ui_scale", app.settings.ui_scale.to_string()))
+        }
+        "chat_size" => {
+            app.settings.chat_size = ((v * 10.0).round() / 10.0).clamp(0.5, 3.0);
+            Some(("chat_size", app.settings.chat_size.to_string()))
         }
         "ui_opacity" => {
             app.settings.ui_opacity = (v * 100.0).round() / 100.0;
@@ -1190,10 +1423,22 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
             app.settings.steer_look_response = (v * 100.0).round() / 100.0;
             Some(("steer_look_response", app.settings.steer_look_response.to_string()))
         }
+        "head_idle" => {
+            app.settings.head_idle = (v * 100.0).round() / 100.0;
+            Some(("head_idle", app.settings.head_idle.to_string()))
+        }
+        "head_idle_pace" => {
+            app.settings.head_idle_pace = (v * 100.0).round() / 100.0;
+            Some(("head_idle_pace", app.settings.head_idle_pace.to_string()))
+        }
         "seat" => {
             let k: usize = arg.trim().parse().unwrap_or(0).min(2);
             app.settings.seat[k] = (v * 100.0).round() / 100.0;
             Some((["seat_x", "seat_y", "seat_z"][k], app.settings.seat[k].to_string()))
+        }
+        "seat_pitch" => {
+            app.settings.seat_pitch_deg = v.clamp(-45.0, 45.0).round();
+            Some(("seat_pitch_deg", app.settings.seat_pitch_deg.to_string()))
         }
         // the clock set directly: the hour or the minute (the seconds stay)
         "hour" | "minute" => {
@@ -1289,6 +1534,7 @@ fn toggle_now(app: &App, id: &str) -> Option<bool> {
         "texture_compression" => s.texture_compression,
         "driver" => s.driver,
         "alt_view" => s.alt_view,
+        "precision_zoom" => s.precision_zoom,
         "triple_screen" => s.triple.enabled,
         "triple_hud_center" => s.triple_hud_center,
         "triple_span" => s.triple_span,
@@ -1505,6 +1751,10 @@ fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static str, String
             app.settings.alt_view = on;
             Some(("alt_view", bit))
         }
+        "precision_zoom" => {
+            app.settings.precision_zoom = on;
+            Some(("precision_zoom", bit))
+        }
         "triple_screen" => {
             app.settings.triple.enabled = on;
             Some(("triple_screen", bit))
@@ -1597,7 +1847,7 @@ fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static str, String
 pub(crate) static LIST_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Change the setting `verb` (a switch or a slider) as `mv` says; false when it is neither.
-fn option_do(app: &mut App, verb: &str, arg: &str, mv: Move) -> bool {
+pub(crate) fn option_do(app: &mut App, verb: &str, arg: &str, mv: Move) -> bool {
     if verb == ADVANCED_ON {
         set_advanced(app, true);
         return true;
@@ -1966,7 +2216,7 @@ fn same_value(a: &str, b: &str) -> bool {
 
 fn select_options(key: &str) -> Vec<(&'static str, &'static str)> {
     match key {
-        "graphics" => vec![("vanilla", "Vanilla (as OMSI 2)"), ("vanilla_plus", "Vanilla+"), ("enhanced", "Enhanced")],
+        "graphics" => vec![("vanilla", "Vanilla (as OMSI 2)"), ("vanilla_plus", "Vanilla+"), ("enhanced", "Enhanced"), ("enhanced_plus", "Enhanced+")],
         "msaa" => vec![("1", "Off"), ("2", "2x MSAA"), ("4", "4x MSAA"), ("8", "8x MSAA")],
         "render_scale" => vec![("auto", "Auto"), ("1", "100%"), ("0.85", "85%"), ("0.75", "75%"), ("0.67", "67%"), ("0.5", "50%")],
         "anisotropy" => vec![("1", "Off"), ("2", "2x"), ("4", "4x"), ("8", "8x"), ("16", "16x")],
@@ -2085,8 +2335,8 @@ fn options_pages(app: &App) -> Vec<Page> {
         switch_row(app, "coll_objects", "Collisions with objects", "Enables/disables collisions with objects such as buildings, streetlights, etc."),
         switch_row(app, "coll_vehicles", "Collisions with vehicles", "Enables/Disables Collisions with Other Vehicles"),
         switch_row(app, "collision_pedestrians", "Collisions with people", "Enables/disables knocking down people"),
-        switch_row(app, "timetable_win", "Timetable window", "Displays a list of all stops (only when a tour is active)"),
-        switch_row(app, "info_bar", "Information bar", "Displays information such as the time, speed, and other details at the top of the screen"),
+        switch_row(app, "timetable_win", "Timetable window (Insert)", "Displays a list of all stops (only when a tour is active)"),
+        switch_row(app, "info_bar", "Information bar (Shift+Y)", "Displays information such as the time, speed, and other details at the top of the screen"),
         switch_row(app, "exact_fare", "Passengers pay the exact fare", "No change is given at the cash desk"),
         pick("boarding", "Boarding", "How passengers get their tickets"),
         pick("maintenance", "Maintenance", later),
@@ -2103,14 +2353,15 @@ fn options_pages(app: &App) -> Vec<Page> {
         pick("msaa", "Anti-aliasing", later),
         pick("render_scale", "Render scale", later),
         pick("anisotropy", "Anisotropic", later),
-        switch_row(app, "shadows", "Sun shadows", "Enables/Disabled shadows"),
+        // (Enhanced+ traces its shadows, occlusion and reflections: always on there)
+        switch_row(app, "shadows", "Sun shadows", "Enables/Disabled shadows").filter(|_| !app.settings.ray_tracing()),
         pick("shadow_size", "Shadow map", later),
-        switch_row(app, "ssao", "Ambient occlusion", later),
+        switch_row(app, "ssao", "Ambient occlusion", later).filter(|_| !app.settings.ray_tracing()),
         pick("shadow_casters", "Shadows cast by", later),
         switch_row(app, "detail_textures", "Detail texturing up close", "The ground and large walls get fine grain when close"),
         slider_row(app, "led_glow", "LED glow", "How strongly the dots of LED destination displays glow", &|v| format!("{}/15", v as i64)),
         slider_row(app, "led_mips", "LED mask mipmaps", "Keep the mip chain of the LED masks (smoother from a distance).", &|v| format!("{v:.2}")),
-        switch_row(app, "reflections", "Reflection maps (paint, chrome, glass)", later),
+        switch_row(app, "reflections", "Reflection maps (paint, chrome, glass)", later).filter(|_| !app.settings.ray_tracing()),
         switch_row(app, "clouds", "Clouds", later),
     ]
         .into_iter()
@@ -2218,15 +2469,20 @@ fn options_pages(app: &App) -> Vec<Page> {
         switch_row(app, "steer_look", "View turns with steering", "Camera turns with the steering wheel (cockpit only)"),
         slider_row(app, "steer_look_angle", "Steering view angle", "How far the view turns at full steering lock", &|v| format!("{v:.0}°")),
         slider_row(app, "steer_look_response", "Steering view response", "How quickly the view follows the steering", &|v| format!("{:.0} ms", v * 1000.0)),
+        slider_row(app, "head_idle", "Head sway at a standstill", "How much the view sways on its own when nothing is done to it - a head at rest is never quite still, most of it seen while the bus waits at a stop", &|v| if v <= 0.0 { "Off".to_string() } else { format!("{:.0}%", v * 100.0) }),
+        slider_row(app, "head_idle_pace", "Sway pace", "How fast that sway moves (100% is the pace it is designed at)", &|v| format!("{:.0}%", v * 100.0)),
         switch_row(app, "hands_in_cab", "Driver's hands in the cab view", "Shows the driver's hand on the steering wheel (Cockpit only)"),
         switch_row(app, "driver", "Driver at the wheel (outside views)", "Shows the driver in the outside views and in the mirrors"),
         switch_row(app, "headtrack", "Head tracking", &format!("Head tracking with opentrack (UDP port {})", s.head_tracking_port)),
         slider_row(app, "look_sens", "Mouse look sensitivity", "How fast the view turns when looking round with the mouse (100% is OMSI's)", &pct),
+        slider_row(app, "look_smoothing_ms", "Smooth the mouse look", "How long the view takes to come round to where the mouse or the stick turned it (off: at once, as OMSI)", &|v| if v <= 0.0 { "Off".to_string() } else { format!("{v:.0} ms") }),
         switch_row(app, "alt_view", "Right mouse button turns the view", "Shift+right zooms; off: right zooms as in OMSI, the wheel button turns"),
+        switch_row(app, "precision_zoom", "Precision mouse zoom", "The mouse zoom follows the FOV curve instead of OMSI's linear way"),
         slider_row(app, "fov", "Field of view", "Vertical field of view; in triple screen Default uses physical measurements, an override moves the virtual eye", &|v| if v < 20.0 { "Default".to_string() } else { format!("{v:.0}°") }),
         slider_row(app, "seat 1", "Seat forward and back", "Adjust the driver's seat position forward or backward", &cm),
         slider_row(app, "seat 2", "Seat height", "Adjust the driver's seat height", &cm),
         slider_row(app, "seat 0", "Seat left and right", "Adjust the driver's seat position from side to side", &cm),
+        slider_row(app, "seat_pitch", "Head pitch", "Set the driver's neutral head tilt up or down, independent of the display setup", &|v| format!("{v:+.0}°")),
     ]
         .into_iter()
         .flatten()
@@ -2263,7 +2519,7 @@ fn options_pages(app: &App) -> Vec<Page> {
         switch_row(app, "blinker_cancel", "Indicators cancel themselves", "The bus's script turns the indicator off after a turn; off: it stays on until you turn it off"),
         switch_row(app, "brake_hold", "Keyboard brake stays on", "Keep the brake applied until the throttle is pressed"),
         switch_row(app, "auto_clutch", "Automatic clutch", "Automatically operate the clutch for you"),
-        switch_row(app, "momentary_gears", "Hold manual gear buttons (release returns to neutral)", later),
+        switch_row(app, "momentary_gears", "H-pattern shifter: return to neutral when the gear is released", "For a manual shifter without a neutral button; releasing a gear selects neutral immediately"),
         switch_row(app, "auto_shift", "Automated manual gearbox", "Shift a manual gearbox's gears for you by the engine speed"),
     ]
         .into_iter()
@@ -2279,6 +2535,7 @@ fn options_pages(app: &App) -> Vec<Page> {
         switch_row(app, "tooltips", "Name of the button under the mouse", "Shows the name of what the cursor points at"),
         switch_row(app, "notes", "Notes in the top-left corner", "Why the vehicle does not move, the change due, what a service did"),
         switch_row(app, "chat", "Chat in online games", "Shows the chat of a LAN session"),
+        slider_row(app, "chat_size", "Chat size", "The chat's texts on top of the interface size (also Ctrl + the mouse wheel over the chat)", &pct),
         switch_row(app, "name_tags", "Other players' names above their buses", "Shows the names of the other players"),
         Some(opens("Reset all settings...", "Everything but the language, the key bindings and the game folder goes back to how it came", "reset")),
     ]
@@ -2442,6 +2699,9 @@ fn world_pages(app: &App) -> Vec<Page> {
     }
     let mut people: Vec<(String, String)> = Vec::new();
     people.extend(slider_row(app, "traffic", "Traffic", "How many vehicles drive around the map.", &|v| format!("{} vehicles", v as i64)));
+    if !client && app.traffic.is_some() {
+        people.push(button("Clear AI traffic", "Clear", "Remove the current AI cars from the road; random traffic will return automatically.", "traffic_clear"));
+    }
     people.extend(slider_row(app, "pax", "Passengers", "How many passengers wait at the stops and ride.", &pct));
     crate::settings_layout::regroup(vec![("Time", time), ("Weather", weather), ("Temperature and wind", climate), ("Traffic and people", people), ("Tools", tools)], crate::settings_layout::WORLD)
 }
@@ -2452,6 +2712,9 @@ fn pages_of(app: &App, kind: &ListKind) -> Option<(Vec<Page>, usize)> {
         ListKind::Options(t) => (options_pages(app), *t),
         ListKind::Vehicle(t) => (vehicle_pages(app), *t),
         ListKind::World(t) => (world_pages(app), *t),
+        ListKind::Controls => (vec![("Controls", items(app, kind))], 0),
+        ListKind::Keyboard(tab) => (keyboard_pages(app), *tab),
+        ListKind::ControllerDevices(_) | ListKind::Controller(..) | ListKind::ControllerAxis(..) | ListKind::ControllerButtonSettings(..) => crate::game_controller_menu::pages(app, kind)?,
         _ => return None,
     };
     let pages: Vec<Page> = pages.into_iter().filter(|p| !p.1.is_empty()).collect();

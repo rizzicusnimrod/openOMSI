@@ -8,6 +8,12 @@
 //! presses. A device the file does not know is taken as a gamepad: the left stick steers,
 //! the right trigger is the throttle, the left one the brake. K switches the controller on
 //! and off (OMSI's `toggel_ctrler`).
+//!
+//! The force feedback is what a heavy vehicle needs (see `Micro` and `Controllers::feedback`):
+//! the parking resistance and centring of a bus that weighs twelve tonnes, and over the top
+//! of it what it drives over and runs on - the grain of the road, the engine's buzz, a kerb
+//! and whatever a script shakes the wheel with - every vibration that comes to an end eased
+//! away rather than cut off.
 
 use gilrs::{Axis, EventType, Gilrs};
 use std::path::Path;
@@ -86,8 +92,12 @@ pub(crate) fn cfg_path(root: &Path) -> std::path::PathBuf {
 
 /// `Inputs/gamectrler.cfg`: the configured devices.
 pub(crate) fn read_cfg(root: &Path) -> Vec<DeviceCfg> {
+    read_cfg_checked(root).unwrap_or_default()
+}
+
+pub(crate) fn read_cfg_checked(root: &Path) -> Result<Vec<DeviceCfg>, String> {
     let path = cfg_path(root);
-    let Ok(text) = std::fs::read(&path) else { return Vec::new() };
+    let text = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut devices = parse_cfg(&omsi_cfg::codepage::decode(&text));
     // An inherited OMSI file can contain 0/0 FFScale on a wheel. Keep its axis and
     // button bindings, but use openOMSI's 100/100 default until our own file is saved.
@@ -101,7 +111,7 @@ pub(crate) fn read_cfg(root: &Path) -> Vec<DeviceCfg> {
             }
         }
     }
-    devices
+    Ok(devices)
 }
 
 pub(crate) fn parse_cfg(text: &str) -> Vec<DeviceCfg> {
@@ -203,6 +213,48 @@ pub struct Analog {
     pub look: [f32; 2],
 }
 
+impl Analog {
+    /// Automatic gamepad camera input leaves explicitly assigned look axes and driving
+    /// controls alone, including when the automatic right-stick input is switched off.
+    fn apply_default_gamepad_look(&mut self, enabled: bool, x: f32, y: f32) {
+        if enabled && self.look == [0.0, 0.0] {
+            self.look = [look_axis(x), look_axis(-y)];
+        }
+    }
+}
+
+/// Below this a steering value counts as the wheel at its centre (see `stick_steers`).
+const CENTRE_SNAP: f32 = 0.03;
+
+/// How far the X axis of a device nobody set up must leave its centre before it steers.
+const FREE_AXIS_MOVED: f32 = 0.15;
+
+/// Whether the X axis (at `x`) of a device nobody set up steers: once it has left its
+/// centre, and from then on (`moved` keeps the devices that have).
+fn free_axis_steers(moved: &mut Vec<String>, name: &str, x: f32) -> bool {
+    if moved.iter().any(|n| n == name) {
+        return true;
+    }
+    if x.abs() < FREE_AXIS_MOVED {
+        return false;
+    }
+    log::info!("game controller {name}: its X axis moved, it steers now");
+    moved.push(name.to_string());
+    true
+}
+
+/// Whether a pad's left stick at `x` steers, given what steers already (`current`) and whether
+/// that is a device set up to steer. Only the first device used to: an idle joystick, wheel or
+/// virtual pad nobody set up (its X axis lends the steering) held the wheel at its centre and
+/// the stick did nothing (#1165). Now the stick steers unless a set-up device has the wheel,
+/// whenever it is pushed further than that device or the device lies at its centre.
+fn stick_steers(current: Option<f32>, set_up: bool, x: f32) -> bool {
+    match current {
+        None => true,
+        Some(s) => !set_up && (x.abs() > s.abs() || s.abs() < CENTRE_SNAP),
+    }
+}
+
 /// An axis that turns the head: nothing round its centre, then the rest of the way.
 pub(crate) fn look_axis(v: f32) -> f32 {
     const DEAD: f32 = 0.12;
@@ -219,6 +271,10 @@ pub fn gamepad_steering(x: f32, kmh: f32) -> f32 {
     let curve = x * x.abs();
     let reach = 1.0 / (1.0 + (kmh.abs() - 10.0).max(0.0) / 20.0);
     curve * reach
+}
+
+fn mapped_device_is_gamepad(mapped: bool, force_feedback_wheel: bool) -> bool {
+    mapped && !force_feedback_wheel
 }
 
 /// Bus steering follows its characteristic, dead zone and range; feedback follows the physical
@@ -258,6 +314,10 @@ pub(crate) struct Devices {
     gilrs: Option<Gilrs>,
     #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
     calibration_wheel: Option<crate::evdev_ff::Wheel>,
+    /// Whether a gilrs device is also a native evdev constant-force wheel.
+    /// `connected()` runs every frame, so cache the /sys lookup by device name.
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    ff_wheels: std::cell::RefCell<std::collections::HashMap<String, bool>>,
     /// Linux: devices with buttons only (a gear shifter), which gilrs does not list
     #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
     button_devices: crate::evdev_buttons::ButtonDevices,
@@ -297,6 +357,8 @@ impl Devices {
             #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
             calibration_wheel: None,
             #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+            ff_wheels: Default::default(),
+            #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
             button_devices: crate::evdev_buttons::ButtonDevices::new(),
             #[cfg(windows)]
             di,
@@ -314,6 +376,12 @@ impl Devices {
     #[cfg(target_os = "macos")]
     pub(crate) fn hid_wheel(&self, name: &str) -> bool {
         self.hid_axes.iter().any(|(n, axes)| names_match(n, name) && axes.iter().any(|(c, _)| matches!(*c, 0x10036 | 0x10037) || (*c >> 16) == 2))
+    }
+
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    fn linux_ff_wheel(&self, name: &str) -> bool {
+        let mut wheels = self.ff_wheels.borrow_mut();
+        *wheels.entry(name.to_string()).or_insert_with(|| crate::evdev_ff::wheel_named(name))
     }
 
     fn direct_input(&self) -> bool {
@@ -389,8 +457,12 @@ impl Devices {
         let is_di = |_pad: &gilrs::Gamepad<'_>| -> bool { false };
 
         if let Some(g) = self.gilrs.as_mut() {
-            while let Some(ev) = g.next_event() {
-                let pad = g.gamepad(ev.id);
+            while let Some(ev) = next_event_caught(|| g.next_event()) {
+                // A focus/device change can leave a queued gilrs event pointing at a
+                // device that has already been removed. `gamepad` panics in that case.
+                let Some(pad) = g.connected_gamepad(ev.id) else {
+                    continue;
+                };
                 match ev.event {
                     EventType::Connected => log::info!("game controller connected: {} (layout {:?}, DirectInput {})", pad.name(), pad.mapping_source(), di),
                     // DirectInput handles wheels on Windows; system-mapped gamepads
@@ -482,8 +554,13 @@ impl Devices {
         let _ = xinput_pads;
         if let Some(g) = self.gilrs.as_ref() {
             for (_, pad) in g.gamepads() {
+                let mapped = pad.mapping_source() != gilrs::MappingSource::None;
+                #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+                let force_feedback_wheel = mapped && self.linux_ff_wheel(pad.name());
+                #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+                let force_feedback_wheel = false;
                 #[allow(unused_mut)]
-                let mut gamepad = pad.mapping_source() != gilrs::MappingSource::None;
+                let mut gamepad = mapped_device_is_gamepad(mapped, force_feedback_wheel);
                 // (macOS: a device with sliders or the simulation page's axes is a wheel or
                 // pedals, whatever SDL's list calls it - the HORI Truck Control System was
                 // taken as a gamepad: its left stick steered, with a gamepad's dead zone)
@@ -513,7 +590,14 @@ impl Devices {
                 let buttons = declared_button_count(pad.name());
                 #[cfg(not(target_os = "linux"))]
                 let buttons = 0;
-                v.push(Connected { name: pad.name().to_string(), hardware_id: id, axes: di_slots(&axes), gamepad, ff: pad.is_ff_supported(), ff_capable: pad.is_ff_supported(), buttons });
+                v.push(Connected { name: pad.name().to_string(), hardware_id: id, axes: {
+                    let mut slots = di_slots(&axes);
+                    if cfg!(windows) && xinput_name(pad.name()) {
+                        let trigger = |b| pad.button_data(b).map(|d| d.value()).unwrap_or(0.0);
+                        gamepad_triggers(&mut slots, trigger(gilrs::Button::LeftTrigger2), trigger(gilrs::Button::RightTrigger2));
+                    }
+                    slots
+                }, gamepad, ff: pad.is_ff_supported(), ff_capable: pad.is_ff_supported(), buttons });
             }
         }
         // (and a wheel gilrs does not list at all: one whose only axes are the simulation
@@ -541,6 +625,25 @@ fn latch_release(action: &str) -> String {
         "blinker_left_set" | "blinker_right_set" => "blinker_off".to_string(),
         "parking_brake_set" => "parking_brake_release".to_string(),
         _ => action.to_string(),
+    }
+}
+
+/// The next event of gilrs (`next`), past any that panics inside it: gilrs 0.11 on Windows
+/// can hand on a button or axis of a controller before it reports the controller connected
+/// (one that appears while the game runs) and then indexes past its own list of them
+/// (gilrs#206) - it ended the game, through the window procedure, at `gamepad.rs:474`.
+/// Only that one event is lost: the controller works once its `Connected` comes.
+fn next_event_caught<T>(mut next: impl FnMut() -> Option<T>) -> Option<T> {
+    loop {
+        match omsi_render::catch(&mut next) {
+            Some(ev) => return ev,
+            None => {
+                static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    log::warn!("game controllers: gilrs stopped on an event of a controller it does not list yet; skipped");
+                }
+            }
+        }
     }
 }
 
@@ -595,7 +698,292 @@ pub struct FfInput {
     /// `FF_Vib_Amp` 0..1 and `FF_Vib_Period` (hundredths of a second) of the scripts.
     pub vib_amp: f32,
     pub vib_period: f32,
+    /// `StreetCond` of the road under the wheels: 0 dry, 1 wet, 2 covered in snow.
+    pub street_cond: f32,
+    /// The engine's speed (rpm; 0 while it is not running).
+    pub engine_rpm: f32,
+    /// How hard the engine is working (0..1).
+    pub engine_load: f32,
+    /// The trembling of the tarmac and the engine, worked out here from the four above
+    /// (see `Micro`); the caller leaves it at 0.
+    pub(crate) micro: f32,
     pub dt: f32,
+}
+
+/// How long (s) a jolt's or a script's vibration eases away once it stops, unless the
+/// settings say otherwise (`ff_fade`).
+const FF_FADE: f32 = 0.28;
+
+/// What is left of a vibration `t` seconds after its source stopped: all of it while it is
+/// still coming, then easing away over `fade` seconds. A force that falls to zero in a
+/// single step is a jolt of its own - the rim feels it and the wheel's motor clunks - so
+/// everything that shakes the wheel once eases out rather than letting go. `fade` 0 is the
+/// old behaviour of stopping where it stands.
+fn fade_gain(t: f32, fade: f32) -> f32 {
+    if fade <= 0.0 {
+        return 1.0;
+    }
+    if t >= fade {
+        return 0.0;
+    }
+    // a smoothstep, so the fade neither starts nor ends with a step of its own
+    let k = 1.0 - t / fade;
+    k * k * (3.0 - 2.0 * k)
+}
+
+/// A script's shaking (`FF_Vib_Amp` and `FF_Vib_Period`) and the little state its fade
+/// needs. The scripts write both afresh every frame, so once they stop there is nothing
+/// left to ease away unless the last of what they asked for is kept here.
+#[derive(Debug, Clone, Copy, Default)]
+struct ScriptVib {
+    /// The last amplitude the scripts reached the wheel with.
+    amp: f32,
+    /// The period that came with it: the scripts stop writing that too, and a rattle eased
+    /// away at the wrong period would not be the one that stopped.
+    period: f32,
+    /// How long ago (s) they last reached the wheel.
+    t: f32,
+}
+
+impl ScriptVib {
+    /// What the wheel is told this frame: the retained amplitude eased on the settings'
+    /// fade since the scripts went quiet, and the period to shake it at.
+    ///
+    /// The fade cannot be a gain applied to the incoming amplitude, because that amplitude
+    /// is already zero on the frame the scripts stop and any gain leaves zero at zero - the
+    /// wheel then drops the shake in a single step, which is the jolt the fade is here to
+    /// avoid. It shows on the DirectInput path, where a zero amplitude stops the periodic
+    /// effect outright, and on the fallback, whose shake is worked out of the same
+    /// amplitude. The fade at zero stops the shake where it stands, as it always did.
+    fn step(&mut self, on: bool, incoming: f32, period: f32, fade: f32, dt: f32) -> (f32, f32) {
+        let incoming = if on { incoming.clamp(0.0, 1.0) } else { 0.0 };
+        if incoming > 0.004 {
+            self.amp = incoming;
+            if period > 0.0 {
+                self.period = period;
+            }
+            self.t = 0.0;
+        } else if on && fade > 0.01 {
+            self.t += dt.max(0.0);
+        } else {
+            self.amp = 0.0;
+            self.t = 0.0;
+        }
+        (self.amp * fade_gain(self.t, fade), self.period)
+    }
+}
+
+/// The trembling that never stops while the bus runs: the grain of the tarmac under the
+/// wheels, and the engine's own buzz coming up through the frame.
+///
+/// Both are small - a tenth of the wheel's lock at most, and a wheel with a real motor
+/// spends most of its travel on parking resistance anyway - and both are fast enough to be
+/// felt, which is why a wheel feels them as a buzz and not as a push. A constant-force
+/// wheel can only be told one force at a time; a force that changes every few milliseconds
+/// comes out of the motor as a tremble rather than as a movement of the wheel, which is
+/// what the road is. A slow one is felt as nothing at all: the rim goes where it is told and
+/// the hands go with it, so the rate matters more here than the size. And a force that lines
+/// up with itself is felt as something solid being carried while one that does not is felt
+/// as a loose surface, so most of the road is sines and only a little of it is noise.
+///
+/// It keeps a little state of its own: the distance the bus has rolled (the grain is read
+/// along the road, so a bus standing still feels none of it and the same stretch of tarmac
+/// shakes the same way twice) and the engine's angle (so its buzz is at the engine's own
+/// rate whatever gear the bus is in, and a script's rpm that twitches does not reach the
+/// wheel as a rattle).
+#[derive(Debug, Clone, Copy, Default)]
+struct Micro {
+    /// The distance the bus has rolled (m).
+    roll: f32,
+    /// The engine's speed, with the twitches of the script that writes it taken out (rpm).
+    rpm: f32,
+    /// Where each part of the engine's buzz stands (rad). Each is kept on its own because a
+    /// phase reduced on its own rate is exact for that rate, and a phase shared between them
+    /// is not: wrap the crank angle into a single turn, then take half or a quarter of it,
+    /// and you land on a different half turn every time instead of carrying on.
+    crank: f32,
+    firing: f32,
+    mass: f32,
+}
+
+impl Micro {
+    /// How much the wheel trembles this frame, of its full lock (-1..1). `road` and
+    /// `engine` are the settings' strengths (0 = neither); the rest is what the bus is
+    /// doing - `kmh`, the road's `street_cond` (0 dry, 1 wet, 2 snow), the engine's rpm and
+    /// how hard it is working.
+    fn sample(&mut self, dt: f32, kmh: f32, street_cond: f32, rpm: f32, load: f32, road: f32, engine: f32) -> f32 {
+        let dt = dt.clamp(0.0, 0.1);
+        // The grain of the road: nothing at all at a standstill, all of it by 30 km/h, and
+        // a wet or snowy road hums under the tyres more than dry asphalt does.
+        let v = kmh.abs() / 3.6;
+        let drive = (v / 8.5).min(1.0);
+        let rough = 0.6 + 0.25 * street_cond.clamp(0.0, 2.0);
+        self.roll += v * dt;
+// The road, read along the distance: mostly its ride - the shapes the whole bus is
+        // being carried over - and only a seventh its grain. A wheel is told one force at a
+        // time, and the difference the driver feels between a bus that feels heavy and one
+        // whose wheel rattles is whether that force lines up with itself. Noise never does:
+        // read along the road it gives every part of the spectrum a share, and a signal with
+        // no shape to it is felt as a loose surface however fast it is felt. A ride made of
+        // sines whose lengths do not fit together lines up and never repeats over a stretch
+        // of road, and that is what reads as one solid weight being carried. The grain is
+        // left in under it, small, because it is what says the road is made of something and
+        // not polished. The three lengths are six metres, two and a quarter and nine
+        // tenths: the deep ones are the mass, the last is what the tyre feels, and none of
+        // them is so short that it comes back as a beat of its own before a wheel cannot be
+        // told about it (a hundred times a second, so the 0.1 m grain is let go above 40 Hz,
+        // where the 0.9 m one carries the surface on its own).
+        let fine = 1.0 - (v / 0.4 / 40.0).clamp(0.0, 1.0);
+        let shape = ride(self.roll / 6.0) * 0.34 + ride(self.roll / 2.2 + 5.3) * 0.26 + ride(self.roll / 0.9 + 11.9) * 0.4;
+        let surface = grain(self.roll / 0.25) * 0.55 + grain(self.roll / 0.1 + 31.7) * 0.45 * fine;
+        let tarmac = (shape * 0.85 + surface * 0.15) * drive * rough * 0.25 * road;
+        // The engine's buzz, each part on the rate it really runs at: the crankshaft
+        // turning, the firing pulses above it, and a low rumble under both standing for the
+        // mass the frame works against. A wheel is told its force once a frame, so nothing
+        // above about 28 Hz can be carried at all and each part is let go as it reaches for
+        // it; above the revs where that has happened the crank and the pulses are both gone
+        // and what is left is the low rumble.
+        let turn = std::f32::consts::TAU * dt;
+        self.rpm += (rpm.clamp(0.0, 4500.0) - self.rpm) * (dt / 0.08).min(1.0);
+        let spin = |p: &mut f32, per_turn: f32| *p = (*p + self.rpm / per_turn * turn).rem_euclid(std::f32::consts::TAU);
+        // a wheel is told its force once a frame, so nothing above about 28 Hz can be
+        // carried at all and each part is let go over the last stretch before that
+        let room = |f: f32| 1.0 - ((f - 28.0) / 7.0).clamp(0.0, 1.0);
+        spin(&mut self.crank, 60.0);
+        spin(&mut self.firing, 30.0);
+        spin(&mut self.mass, 240.0);
+        let running = ((self.rpm - 150.0) / 400.0).clamp(0.0, 1.0);
+        // an engine working against its mounts twists harder than one idling
+        let mount = 0.7 + 0.6 * load.clamp(0.0, 1.0);
+        let lump = 0.6 + 0.4 * (self.rpm / 2400.0).clamp(0.0, 1.0);
+        let hum = running * mount * lump
+            * (self.crank.sin() * room(self.rpm / 60.0) * 0.03
+                + self.firing.sin() * room(self.rpm / 30.0) * 0.02
+                + self.mass.sin() * (self.rpm / 2400.0).min(1.0) * 0.055)
+            * engine;
+        tarmac + hum
+    }
+}
+
+/// The ride of the road under the wheels: smooth, always moving, and never the same twice.
+///
+/// Where `grain` reads the surface, this reads the shape. It is sines whose lengths do not
+/// fit into one another, so it never repeats itself over a stretch of road and never jumps
+/// either. Its sum is 1 at the very most, so it can be mixed by eye.
+fn ride(x: f32) -> f32 {
+    let t = std::f32::consts::TAU * x;
+    t.sin() * 0.55 + (t * 1.7 + 1.3).sin() * 0.3 + (t * 2.9 + 4.2).sin() * 0.15
+}
+
+/// Value noise along one line, -1..1. The grain of a road surface is not a sine wave, and
+/// a wheel handed the same sine wave every few metres reads it as a whine from the gearbox
+/// rather than as tarmac.
+fn grain(x: f32) -> f32 {
+    let i = x.floor();
+    let f = x - i;
+    let s = f * f * (3.0 - 2.0 * f); // the lattice's points, eased into one another
+    let a = lattice(i as i32);
+    let b = lattice(i as i32 + 1);
+    (a + (b - a) * s) * 2.0 - 1.0
+}
+
+/// One point of the grain's lattice, hashed from its place in whole metres (so a long
+/// drive does not walk the pattern off).
+fn lattice(i: i32) -> f32 {
+    let mut h = (i as u32).wrapping_mul(0x27d4_eb2d) ^ 0x9e37_79b1;
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x85eb_ca6b);
+    h ^= h >> 13;
+    (h >> 8) as f32 / 16_777_216.0
+}
+
+
+/// Button-down actions remember their original mapping until release. Editing a binding
+/// must release that action, rather than sending an unrelated new action's key-up.
+#[derive(Default)]
+struct HeldButtons(Vec<(String, usize, String, bool)>);
+
+impl HeldButtons {
+    fn event(&mut self, cfg: &[DeviceCfg], name: &str, button: usize, down: bool, actions: &mut Vec<(String, bool)>) {
+        if down {
+            if self.0.iter().any(|(n, b, ..)| names_match(n, name) && *b == button) {
+                return;
+            }
+            let Some(d) = find_device_cfg(cfg, name) else { return };
+            let Some((action, _)) = d.buttons.get(button).filter(|a| !a.0.is_empty()) else { return };
+            self.0.push((name.to_string(), button, action.clone(), d.latching.contains(&button)));
+            actions.push((action.clone(), true));
+        } else if let Some(i) = self.0.iter().position(|(n, b, ..)| names_match(n, name) && *b == button) {
+            let (_, _, action, latching) = self.0.remove(i);
+            actions.push((action.clone(), false));
+            if latching {
+                let back = latch_release(&action);
+                actions.push((back.clone(), true));
+                actions.push((back, false));
+            }
+        }
+    }
+
+    fn release(&mut self, actions: &mut Vec<(String, bool)>) {
+        for (_, _, action, _) in self.0.drain(..) {
+            // Do not toggle a latching switch just because its configuration changed.
+            actions.push((action, false));
+        }
+    }
+}
+
+/// Save only to the writable openOMSI overlay. The original OMSI installation is read-only.
+pub(crate) fn save_cfg(devices: &[DeviceCfg]) -> Result<(), String> {
+    let dir = crate::startup::content_dir().ok_or("No writable openOMSI content folder was found")?.join("Inputs");
+    save_cfg_to(&dir.join("gamectrler.cfg"), devices)?;
+    omsi_cfg::content_changed();
+    Ok(())
+}
+
+fn save_cfg_to(path: &Path, devices: &[DeviceCfg]) -> Result<(), String> {
+    let text = cfg_text(devices);
+    if cfg_text(&parse_cfg(&text)) != text {
+        return Err("Controller configuration did not pass its round-trip check".into());
+    }
+    let dir = path.parent().ok_or("Controller configuration has no parent folder")?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("cfg.tmp");
+    let result = (|| {
+        std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&tmp); }
+    result
+}
+
+/// Scale only the configured gamepad, rather than borrowing a wheel's vibration setting.
+fn rumble_scale(cfg: &[DeviceCfg], name: &str) -> f32 {
+    find_device_cfg(cfg, name).and_then(|d| d.ff_scale).map(|s| s.1).unwrap_or(1.0).clamp(0.0, 2.0)
+}
+
+/// A button-only gamepad configuration keeps the automatic analog layout. Once axes
+/// are assigned, the explicit layout takes complete ownership of them.
+/// Keep the steering's device kind with the value that actually won arbitration.
+/// A centred gamepad beside a wheel must not give the wheel gamepad smoothing.
+fn set_steering(out: &mut Analog, value: f32, stick: bool) {
+    if out.steering.is_none_or(|old| value.abs() > old.abs()) {
+        out.steering = Some(value);
+        out.stick = stick;
+    }
+}
+
+fn custom_gamepad_axes(cfg: &[DeviceCfg], name: &str) -> bool {
+    find_device_cfg(cfg, name).is_some_and(|d| d.axes.iter().any(Option::is_some))
+}
+
+/// XInput exposes triggers as buttons in gilrs. Supply their full -1..1 travel in
+/// unused slider slots so they can also be assigned as independent pedals.
+fn gamepad_triggers(axes: &mut Vec<(usize, f32)>, left: f32, right: f32) {
+    for (slot, value) in [(6, left), (7, right)] {
+        if !axes.iter().any(|(k, _)| *k == slot) {
+            axes.push((slot, value.clamp(0.0, 1.0) * 2.0 - 1.0));
+        }
+    }
 }
 
 pub struct Controllers {
@@ -604,9 +992,14 @@ pub struct Controllers {
     devices: Devices,
     focused: bool,
     cfg: Vec<DeviceCfg>,
+    held: HeldButtons,
+    editing: bool,
+    pub(crate) raw_buttons: Vec<(String, usize, bool)>,
     pub enabled: bool,
     /// The settings' dead zone round the centre of a set-up device's axes (0..0.3).
     pub deadzone: f32,
+    /// Automatic right-stick camera movement (Settings: `right_stick_look`).
+    pub right_stick_look: bool,
     /// The pedals' response curves (Settings → pedal strength; 1 = as the pedal reads).
     pub pedal_throttle: f32,
     pub pedal_brake: f32,
@@ -616,6 +1009,15 @@ pub struct Controllers {
     pub ff_invert: bool,
     /// Force feedback and rumble switched on (Settings: `ff_enabled`).
     pub ff_enabled: bool,
+    /// How strongly the tarmac's grain is felt under the wheels (Settings: `ff_road_vib`,
+    /// 0 = none).
+    pub ff_road: f32,
+    /// How strongly the engine's buzz is felt through the frame (Settings: `ff_engine_vib`,
+    /// 0 = none).
+    pub ff_engine: f32,
+    /// How long (s) a vibration eases away once it stops (Settings: `ff_fade`; 0 = it
+    /// stops where it stands).
+    pub ff_fade: f32,
     /// The wheel's rotation over the rotation that is the bus's full lock (Settings:
     /// `wheel_range` / `wheel_lock`; 1 = the whole wheel is the full lock, as OMSI).
     pub steer_gain: f32,
@@ -623,6 +1025,9 @@ pub struct Controllers {
     pub actions: Vec<(String, bool)>,
     /// Devices told about in the log (and on the screen) as not set up.
     announced: Vec<String>,
+    /// Devices nobody set up whose X axis has left its centre: only from then on does it
+    /// steer (an idle joystick beside the keyboard took the arrow keys for looking, #1476).
+    moved: Vec<String>,
     /// A message for the screen: a wheel that is not set up.
     pub notice: Option<String>,
     /// The steering device: its name, physical position (-1..1, before dead zone
@@ -632,10 +1037,17 @@ pub struct Controllers {
     ff_lateral: f32,
     ff_bump: f32,
     ff_bump_age: f32,
+    /// The trembling of the tarmac and the engine, and the little state it keeps.
+    ff_micro: Micro,
+    /// The scripts' shaking and the state its fade keeps.
+    ff_vib: ScriptVib,
+    /// A rumble motor's share of the trembling, eased over half a second (see
+    /// `rumble_feedback`).
+    ff_rumble: f32,
     ff_source_logged: Option<String>,
     /// The rumble playing (`FF_Vib_Amp` and `FF_Vib_Period` of the bus), rebuilt when
     /// either changes.
-    rumble: Option<(gilrs::ff::Effect, f32, f32)>,
+    rumble: Vec<(gilrs::GamepadId, gilrs::ff::Effect, f32, f32, f32)>,
     #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
     wheel: Option<crate::evdev_ff::Wheel>,
     #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
@@ -643,6 +1055,23 @@ pub struct Controllers {
 }
 
 impl Controllers {
+    pub(crate) fn configuration(&self) -> Vec<DeviceCfg> { self.cfg.clone() }
+
+    pub(crate) fn connected(&self) -> Vec<Connected> { self.devices.connected() }
+
+    /// Replace the mappings on the same Devices object. DirectInput's worker, device
+    /// handles, effects and FFB filters remain alive.
+    pub(crate) fn install_cfg(&mut self, cfg: Vec<DeviceCfg>) {
+        self.held.release(&mut self.actions);
+        self.cfg = cfg;
+        self.notice = None;
+    }
+
+    pub(crate) fn set_editing(&mut self, editing: bool) {
+        if editing && !self.editing { self.held.release(&mut self.actions); }
+        self.editing = editing;
+    }
+
     pub(crate) fn refresh_devices(&self) {
         self.devices.refresh();
     }
@@ -655,7 +1084,8 @@ impl Controllers {
         self.devices.set_focus(focused);
         if !focused {
             self.steer = None;
-            self.actions.clear();
+            self.held.release(&mut self.actions);
+            self.raw_buttons.clear();
             self.ff_source_logged = None;
         }
     }
@@ -666,7 +1096,11 @@ impl Controllers {
         for c in devices.connected() {
             log::info!("game controller: {} ({})", c.name, if cfg.iter().any(|d| names_match(&d.name, &c.name)) { "set up in gamectrler.cfg" } else if c.gamepad { "as a gamepad" } else { "not set up: its X axis steers" });
         }
-        Controllers { settled: Vec::new(), devices, focused: true, cfg, deadzone: 0.0, pedal_throttle: 1.0, pedal_brake: 1.0, disabled: Vec::new(), ff_invert: false, ff_enabled: true, steer_gain: 1.0, enabled: true, actions: Vec::new(), announced: Vec::new(), notice: None, steer: None, ff_t: 0.0, ff_lateral: 0.0, ff_bump: 0.0, ff_bump_age: 0.0, ff_source_logged: None, rumble: None, #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel: None, #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel_tried: None }
+        Self::with_devices(devices, cfg)
+    }
+
+    fn with_devices(devices: Devices, cfg: Vec<DeviceCfg>) -> Controllers {
+        Controllers { settled: Vec::new(), devices, focused: true, cfg, held: HeldButtons::default(), editing: false, raw_buttons: Vec::new(), deadzone: 0.0, right_stick_look: true, pedal_throttle: 1.0, pedal_brake: 1.0, disabled: Vec::new(), ff_invert: false, ff_enabled: true, ff_road: 1.0, ff_engine: 1.0, ff_fade: FF_FADE, steer_gain: 1.0, enabled: true, actions: Vec::new(), announced: Vec::new(), moved: Vec::new(), notice: None, steer: None, ff_t: 0.0, ff_lateral: 0.0, ff_bump: 0.0, ff_bump_age: 0.0, ff_micro: Micro::default(), ff_vib: ScriptVib::default(), ff_rumble: 0.0, ff_source_logged: None, rumble: Vec::new(), #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel: None, #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel_tried: None }
     }
 
     /// A wheel or joystick steers the bus (then the arrow keys look around, as in OMSI:
@@ -678,22 +1112,12 @@ impl Controllers {
     /// Read the devices: the analog controls, and the button actions into `actions`.
     pub fn poll(&mut self) -> Analog {
         let mut out = Analog::default();
-        for (name, n, down) in self.devices.poll() {
-            if self.off(&name) {
+        self.raw_buttons = self.devices.poll();
+        for (name, n, down) in &self.raw_buttons {
+            if self.editing || !self.enabled || self.off(name) {
                 continue;
             }
-            let Some(d) = find_device_cfg(&self.cfg, &name) else { continue };
-            if let Some(action) = d.buttons.get(n).filter(|a| !a.0.is_empty()) {
-                self.actions.push((action.0.clone(), down));
-                // a latching switch coming out switches back: pressed in again it would
-                // only have toggled the hazard lights on the next press, and the lever's
-                // turn signal stayed on in the middle
-                if !down && d.latching.contains(&n) {
-                    let back = latch_release(&action.0);
-                    self.actions.push((back.clone(), true));
-                    self.actions.push((back, false));
-                }
-            }
+            self.held.event(&self.cfg, name, *n, *down, &mut self.actions);
         }
         if !self.enabled {
             return out;
@@ -705,6 +1129,8 @@ impl Controllers {
         let mut pads: Vec<(Option<&DeviceCfg>, Connected)> = self.devices.connected().into_iter().filter(|c| !off.iter().any(|d| names_match(d, &c.name))).map(|c| (find_device_cfg(&self.cfg, &c.name), c)).collect();
         pads.sort_by_key(|(cfg, _)| cfg.is_none());
         let mut steer: Option<(String, f32, bool)> = None;
+        // (a device set up to steer has the wheel; one nobody set up only lends its X axis)
+        let mut steering_set_up = false;
         let dz = self.deadzone.clamp(0.0, 0.3);
         for (cfg, c) in pads {
             if let Some((k, v)) = c.axes.iter().find(|(_, v)| v.abs() > 0.5) {
@@ -719,9 +1145,10 @@ impl Controllers {
                     for (k, v) in c.axes.iter().copied() {
                         let Some((f, inverted)) = d.axes[k] else { continue };
                         if matches!(f, Func::Steering) {
+                            steering_set_up = true;
                             let (steering, position) = wheel_steering(v, inverted, d.axis_flags[k], dz, self.steer_gain);
-                            set(&mut out.steering, steering);
-                            if steer.is_none() {
+                            set_steering(&mut out, steering, c.gamepad);
+                            if steer.is_none() && !c.gamepad {
                                 steer = Some((c.name.clone(), position, c.ff));
                             }
                             continue;
@@ -768,6 +1195,9 @@ impl Controllers {
                         self.notice = Some(format!("{} is not set up: it steers; set up its pedals and buttons in the launcher (Controls → Game controllers)", c.name));
                     }
                     if let Some((_, v)) = c.axes.iter().find(|(k, _)| *k == 0) {
+                        if !free_axis_steers(&mut self.moved, &c.name, *v) {
+                            continue;
+                        }
                         // (a joystick's centre is slack, so it gets a little dead zone; a
                         // force-feedback wheel's is not: 2 % of it held a 1080° wheel's
                         // picture 11° behind the rim, #866)
@@ -791,7 +1221,7 @@ impl Controllers {
                 // for the system's own layout: with the file naming it, nobody read it, and
                 // its triggers were no pedals, #171)
                 let xinput = cfg!(windows) && xinput_name(pad.name());
-                if pad.mapping_source() == gilrs::MappingSource::None || (!xinput && self.cfg.iter().any(|d| names_match(&d.name, pad.name()))) {
+                if pad.mapping_source() == gilrs::MappingSource::None || custom_gamepad_axes(&self.cfg, pad.name()) {
                     continue;
                 }
                 #[cfg(target_os = "macos")]
@@ -803,24 +1233,23 @@ impl Controllers {
                 }
                 let x = pad.value(Axis::LeftStickX);
                 let dead = |v: f32| if v.abs() < 0.08 { 0.0 } else { v };
+                let steers = stick_steers(out.steering, steering_set_up, dead(x));
                 // (said once per pad: the stick moved, and whether it steers - a report of
                 // "the sticks do nothing" then says which way the pad came in)
                 if x.abs() > 0.5 && !self.announced.iter().any(|n| n == &format!("stick:{}", pad.name())) {
                     self.announced.push(format!("stick:{}", pad.name()));
-                    log::info!("game controller {}: left stick {x:.2}, steers: {} (layout {:?})", pad.name(), out.steering.is_none(), pad.mapping_source());
+                    log::info!("game controller {}: left stick {x:.2}, steers: {steers} (layout {:?})", pad.name(), pad.mapping_source());
                 }
                 let rt = pad.button_data(gilrs::Button::RightTrigger2).map(|d| d.value()).unwrap_or(0.0);
                 let lt = pad.button_data(gilrs::Button::LeftTrigger2).map(|d| d.value()).unwrap_or(0.0);
-                if out.steering.is_none() {
+                if steers {
                     out.steering = Some(dead(x));
                     out.stick = true;
                 }
                 out.throttle.get_or_insert(crate::settings::pedal_curve(rt, self.pedal_throttle));
                 out.brake.get_or_insert(crate::settings::pedal_curve(lt, self.pedal_brake));
                 // the right stick looks round, as the truck games have it (#454)
-                if out.look == [0.0, 0.0] {
-                    out.look = [look_axis(pad.value(Axis::RightStickX)), look_axis(-pad.value(Axis::RightStickY))];
-                }
+                out.apply_default_gamepad_look(self.right_stick_look, pad.value(Axis::RightStickX), pad.value(Axis::RightStickY));
             }
         }
         let before = self.steer.as_ref().filter(|s| steer.as_ref().is_some_and(|n| n.0 == s.0)).map(|s| s.1);
@@ -829,8 +1258,9 @@ impl Controllers {
     }
 
     /// On a force-feedback wheel, combine parking resistance, centring, the bus's
-    /// lateral motion, front-wheel bumps and script-driven vibration. Other devices
-    /// get vibration as rumble.
+    /// lateral motion, front-wheel bumps, the trembling of the tarmac and the engine and
+    /// script-driven vibration - every vibration that comes to an end eased away rather
+    /// than cut. Other devices get the vibration as rumble.
     pub fn feedback(&mut self, f: FfInput) {
         let on = self.enabled && f.on && self.ff_enabled && self.focused;
         let mut f = f;
@@ -849,9 +1279,39 @@ impl Controllers {
         } else {
             self.ff_bump_age += f.dt.max(0.0);
         }
-        self.ff_bump = if on { (self.ff_bump - f.dt.max(0.0) * 6.0).max(incoming_bump) } else { 0.0 };
+        // A jolt is held and eased away over the settings' fade instead of being let go the
+        // frame the physics stops reporting it: a force that falls to zero in a single step
+        // is a jolt of its own, felt through the rim and heard in the wheel's motor. The
+        // envelope decays on its own rate rather than through `fade_gain`, because a gain
+        // only starts once the jolt it follows is already spent. With the fade at zero the
+        // jolt stops where it stands, which is how the wheel behaved before.
+        self.ff_bump = if !on {
+            0.0
+        } else if self.ff_fade > 0.01 {
+            let eased = self.ff_bump * (-f.dt.max(0.0) / (self.ff_fade * 0.3)).exp();
+            let held = incoming_bump.max(eased);
+            if held < 0.002 { 0.0 } else { held }
+        } else {
+            incoming_bump
+        };
+        // the trembling of the tarmac and of the engine, which never stops while the bus
+        // runs and needs no fade of its own
+        let micro = if on {
+            self.ff_micro.sample(f.dt, f.kmh, f.street_cond, f.engine_rpm, f.engine_load, self.ff_road, self.ff_engine)
+        } else {
+            0.0
+        };
+        // A script's shaking is not an envelope that can be held in place - the scripts write
+        // it afresh every frame - so `ScriptVib` keeps the last amplitude and period they
+        // asked for and eases those, which is what reaches the wheel. The road and the
+        // engine are not something that begins and ends: they go quiet with the bus and
+        // the engine, smoothly, where they stand.
+        let (vib_amp, vib_period) = self.ff_vib.step(on, f.vib_amp, f.vib_period, self.ff_fade, f.dt);
         f.wheel_bump = self.ff_bump;
         f.wheel_bump_age = self.ff_bump_age;
+        f.vib_amp = vib_amp;
+        f.vib_period = vib_period;
+        f.micro = micro;
         if self.ff_source_logged.as_deref() != self.steer.as_ref().map(|s| s.0.as_str()) {
             self.ff_source_logged = self.steer.as_ref().map(|s| s.0.clone());
             if let Some((name, _, _, effect)) = self.steer.as_ref() {
@@ -904,7 +1364,14 @@ impl Controllers {
             }
         }
         let _ = (&self.steer, &self.ff_t, wheel_force);
-        self.rumble_feedback(if on { f.vib_amp.max(f.wheel_bump * 0.75) } else { 0.0 }, f.vib_period);
+        // A rumble motor cannot show a texture: it can only buzz harder or softer, and
+        // every change of strength is another effect built on the device, which drops the
+        // one it had where it stood. Its share of the trembling is therefore eased over
+        // half a second and moved in steps, so the rumble swells and fades with the road
+        // instead of building an effect on every frame.
+        self.ff_rumble += (micro.abs().min(1.0) - self.ff_rumble) * (f.dt / 0.5).clamp(0.0, 1.0);
+        let tarmac = (self.ff_rumble * 16.0).round() / 16.0;
+        self.rumble_feedback(if on { f.vib_amp.max(f.wheel_bump * 0.75) + tarmac } else { 0.0 }, f.vib_period);
     }
 
     /// The shaking as a rumble (`FF_Vib_Amp`, `FF_Vib_Period`: OMSI hands DirectInput
@@ -914,37 +1381,36 @@ impl Controllers {
         let amp = amp.clamp(0.0, 1.0);
         let period = if period.is_finite() { period.clamp(0.0, 100.0) } else { 0.0 };
         let Some(g) = self.devices.gilrs.as_mut() else { return };
-        if let Some((_, was, was_period)) = &self.rumble {
-            if (was - amp).abs() < 0.02 && (was_period - period).abs() < 0.05 {
-                return;
+        let pads: Vec<(gilrs::GamepadId, f32, f32)> = g.gamepads()
+            .filter(|(_, p)| p.is_ff_supported() && !self.disabled.iter().any(|n| names_match(n, p.name())))
+            .map(|(id, p)| {
+                let scale = rumble_scale(&self.cfg, p.name());
+                (id, (amp * scale).min(1.0), scale)
+            }).collect();
+        // Keep unchanged gamepad effects. A saved vibration-strength change must take
+        // effect even when the bus's vibration amplitude and period have not changed.
+        self.rumble.retain(|(id, _, was, was_period, was_scale)| pads.iter().any(|(pad, value, scale)|
+            pad == id && *value >= 0.01 && (was - value).abs() < 0.02
+                && (was_period - period).abs() < 0.05 && (was_scale - scale).abs() < 1e-6));
+        for (id, value, scale) in pads {
+            if value < 0.01 || self.rumble.iter().any(|(pad, ..)| *pad == id) { continue; }
+            let m = (value * u16::MAX as f32) as u16;
+            let ms = (period * 10.0).round() as u32;
+            let scheduling = if ms >= 20 {
+                gilrs::ff::Replay { after: gilrs::ff::Ticks::from_ms(0), play_for: gilrs::ff::Ticks::from_ms(ms / 2), with_delay: gilrs::ff::Ticks::from_ms(ms - ms / 2) }
+            } else {
+                Default::default()
+            };
+            let effect = gilrs::ff::EffectBuilder::new()
+                .add_effect(gilrs::ff::BaseEffect { kind: gilrs::ff::BaseEffectType::Strong { magnitude: m }, scheduling, ..Default::default() })
+                .add_effect(gilrs::ff::BaseEffect { kind: gilrs::ff::BaseEffectType::Weak { magnitude: m / 2 }, scheduling, ..Default::default() })
+                .repeat(gilrs::ff::Repeat::Infinitely)
+                .gamepads(&[id])
+                .finish(g);
+            if let Ok(e) = effect {
+                let _ = e.play();
+                self.rumble.push((id, e, value, period, scale));
             }
-        }
-        self.rumble = None;
-        if amp < 0.01 {
-            return;
-        }
-        let pads: Vec<gilrs::GamepadId> = g.gamepads().filter(|(_, p)| p.is_ff_supported()).map(|(id, _)| id).collect();
-        if pads.is_empty() {
-            return;
-        }
-        // (the file's [FFScale] of a set-up device scales it)
-        let scale = self.cfg.iter().find_map(|d| d.ff_scale).map(|s| s.1).unwrap_or(1.0).clamp(0.0, 2.0);
-        let m = ((amp * scale).min(1.0) * u16::MAX as f32) as u16;
-        let ms = (period * 10.0).round() as u32;
-        let scheduling = if ms >= 20 {
-            gilrs::ff::Replay { after: gilrs::ff::Ticks::from_ms(0), play_for: gilrs::ff::Ticks::from_ms(ms / 2), with_delay: gilrs::ff::Ticks::from_ms(ms - ms / 2) }
-        } else {
-            Default::default()
-        };
-        let effect = gilrs::ff::EffectBuilder::new()
-            .add_effect(gilrs::ff::BaseEffect { kind: gilrs::ff::BaseEffectType::Strong { magnitude: m }, scheduling, ..Default::default() })
-            .add_effect(gilrs::ff::BaseEffect { kind: gilrs::ff::BaseEffectType::Weak { magnitude: m / 2 }, scheduling, ..Default::default() })
-            .repeat(gilrs::ff::Repeat::Infinitely)
-            .gamepads(&pads)
-            .finish(g);
-        if let Ok(e) = effect {
-            let _ = e.play();
-            self.rumble = Some((e, amp, period));
         }
     }
 
@@ -1001,8 +1467,8 @@ const VIB_SHARE: f32 = 0.25;
 /// The force on a wheel standing at `x` (-1 full left .. 1), `x0` the frame before: -1..1.
 /// Tyre scrub resists turning the wheel at a standstill and falls away once the bus rolls.
 /// Self-aligning torque then returns the wheel to centre, with a softer response near full
-/// lock and feedback from the bus's lateral acceleration. Front-wheel jolts and the
-/// scripts' shaking come on top.
+/// lock and feedback from the bus's lateral acceleration. On top of that come front-wheel
+/// jolts, the scripts' shaking and the tremble of the tarmac and the engine.
 fn wheel_force(f: &FfInput, x: f32, x0: f32, t: &mut f32, k_springs: f32, k_effects: f32) -> f32 {
     let dt = f.dt.max(1e-3);
     let v = f.kmh.abs();
@@ -1047,8 +1513,9 @@ fn wheel_force(f: &FfInput, x: f32, x0: f32, t: &mut f32, k_springs: f32, k_effe
     // Preserve small road details while softening kerb-sized peaks. One short
     // kick and rebound feels less like a continuously shaking wheel mount.
     let bump = f.wheel_bump.clamp(0.0, 1.0).sqrt() * 0.46 * (std::f32::consts::TAU * f.wheel_bump_age * 6.5).cos();
-    let steering = ((spring + road_align) * lock_assist * assist + drag) * moving_steering_gain + damping;
-    (steering * k_springs.clamp(0.0, 2.0) + (shake + bump) * k_effects.clamp(0.0, 2.0)).clamp(-1.0, 1.0)
+let steering = ((spring + road_align) * lock_assist * assist + drag) * moving_steering_gain + damping;
+    let micro = f.micro.clamp(-1.0, 1.0);
+    (steering * k_springs.clamp(0.0, 2.0) + (shake + bump + micro) * k_effects.clamp(0.0, 2.0)).clamp(-1.0, 1.0)
 }
 
 /// A control several set-up devices give: the first one set wins, unless a later one is
@@ -1304,6 +1771,17 @@ mod axis_shape_tests {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_gilrs_event_that_panics_is_skipped() {
+        let mut queue = vec![Some(2), None, Some(1)];
+        let mut next = || match queue.pop().unwrap() {
+            None => panic!("index out of bounds: the len is 0 but the index is 0"),
+            ev => ev,
+        };
+        assert_eq!(super::next_event_caught(&mut next), Some(1));
+        assert_eq!(super::next_event_caught(&mut next), Some(2));
+    }
 
     #[test]
     fn latching_switches_switch_back_and_stay_in_the_file() {
@@ -1838,5 +2316,534 @@ mod button_tests {
         let normal = super::wheel_force(&f, 0.4, 0.4, &mut t, 1.0, 0.0);
         assert_eq!(zero, 0.0);
         assert!(normal.abs() > 0.05, "{normal}");
+    }
+
+    /// The largest the trembling of the tarmac and the engine may become (of the wheel's
+    /// full lock) - a wheel's centring spring is several times this, and the scripts' own
+    /// shaking is 0.25, so the tremble stays felt as a buzz and not as a push.
+    const MICRO_MAX: f32 = 0.25;
+
+    /// Ten seconds of the road at `kmh`, as sampled by the game.
+    fn road(kmh: f32) -> Vec<f32> {
+        let mut m = super::Micro::default();
+        (0..600).map(|_| m.sample(1.0 / 60.0, kmh, 0.0, 0.0, 0.0, 1.0, 0.0)).collect()
+    }
+
+    /// The most the signal ever lines up with itself, at any lag up to two seconds. Sines
+    /// line themselves up; noise cannot, so this is what tells a road carrying a weight
+    /// from a road rattling.
+    fn self_similarity(v: &[f32]) -> f32 {
+        let rms = (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt();
+        let mut best = 0.0f32;
+        for lag in 4..120.min(v.len()) {
+            let mut num = 0.0f32;
+            for i in lag..v.len() {
+                num += v[i] * v[i - lag];
+            }
+            best = best.max((num / ((v.len() - lag) as f32) / rms / rms).abs());
+        }
+        best
+    }
+
+    #[test]
+    fn the_road_carries_a_weight_rather_than_a_rattle() {
+        // A wheel is told one force at a time, and a force that repeats itself tells the
+        // driver there is something solid underneath the bus, while one that never does
+        // tells them the surface is broken up into loose pieces - which is what the
+        // complaint was: a road made of nothing but noise reads as random however fast it
+        // is felt. Noise scores about 0.2 here at any speed and the ride about 0.8, so
+        // the grain left under it cannot pull this down where it matters.
+        for kmh in [15.0, 30.0, 50.0, 80.0] {
+            let alike = self_similarity(&road(kmh));
+            assert!(alike > 0.5, "the road at {kmh} km/h carries nothing solid: {alike:.2}");
+        }
+    }
+    #[test]
+    fn the_road_is_under_the_tyres_and_not_merely_slow() {
+        // How often the road changes is what the tyre feels, and it has to outrun the
+        // hands: the rim goes wherever it is told and the hands go with it, so a change a
+        // few times a second is a push to be dragged along by rather than a texture. The
+        // short layer is what keeps this true as the bus speeds up.
+        let rate = |v: &[f32]| {
+            let mut crossings = 0;
+            for i in 1..v.len() {
+                if (v[i] > 0.0) != (v[i - 1] > 0.0) {
+                    crossings += 1;
+                }
+            }
+            crossings as f32 / (v.len() as f32 / 60.0) / 2.0
+        };
+        assert!(rate(&road(30.0)) > 6.0, "the road in town is too slow to feel: {}", rate(&road(30.0)));
+        assert!(rate(&road(50.0)) > 10.0, "the road at 50 is too slow to feel: {}", rate(&road(50.0)));
+        assert!(rate(&road(80.0)) > 13.0, "the road does not quicken with the speed: {}", rate(&road(80.0)));
+    }
+
+
+    #[test]
+    fn the_tremble_stays_silent_at_a_standstill_and_appears_with_the_speed() {
+        // how much is felt is the average of the tremble, not its loudest frame: the
+        // grain is noise, and its peaks fall where the pattern happens to be
+        let felt = |m: &mut super::Micro, kmh: f32| {
+            (0..240).map(|_| m.sample(1.0 / 60.0, kmh, 0.0, 0.0, 0.0, 1.0, 0.0).abs()).sum::<f32>() / 240.0
+        };
+        let mut m = super::Micro::default();
+        assert_eq!(felt(&mut m, 0.0), 0.0, "a bus standing still feels no grain at all");
+        let crawling = felt(&mut m, 5.0);
+        let town = felt(&mut m, 30.0);
+        let road = felt(&mut m, 50.0);
+        let fast = felt(&mut m, 80.0);
+        assert!(crawling > 0.0 && town > crawling * 2.0, "{crawling} {town}");
+        // the finer layer is let go above 40 Hz and the coarser one carries the road
+        // there, so the strength holds from town speed up rather than falling away
+        assert!(road > town * 0.9, "the grain should be at its strongest by 30 km/h: {town} {road}");
+        assert!(fast > road * 0.9, "the grain thins out at speed: {fast} against {road}");
+        assert!(fast < MICRO_MAX, "the grain grows too strong: {fast}");
+    }
+
+    #[test]
+    fn the_tremble_is_read_along_the_road_not_along_the_clock() {
+        let mut m = super::Micro::default();
+        // two seconds at 50 km/h over one stretch of tarmac, then the same stretch again
+        let over = |m: &mut super::Micro| (0..120).map(|_| m.sample(1.0 / 60.0, 50.0, 0.0, 0.0, 0.0, 1.0, 0.0)).collect::<Vec<_>>();
+        let first = over(&mut m);
+        assert!(first.iter().any(|v| v.abs() > 0.001));
+        let start = m.roll;
+        assert!(start > 20.0, "the distance the bus rolled was not kept: {start}");
+        m.roll = 0.0;
+        assert_eq!(over(&mut m), first, "the same stretch of road shook differently");
+        // a long drive does not walk the pattern off into a constant
+        m.roll = 2_000_000.0;
+        assert!(over(&mut m).iter().any(|v| v.abs() > 0.001), "the grain died out after a long drive");
+    }
+
+    #[test]
+    fn a_wet_or_snowy_road_hums_more_than_dry_asphalt() {
+        let felt = |cond: f32| {
+            let mut m = super::Micro::default();
+            (0..120).map(|_| m.sample(1.0 / 60.0, 50.0, cond, 0.0, 0.0, 1.0, 0.0).abs()).sum::<f32>() / 120.0
+        };
+        let (dry, wet, snow) = (felt(0.0), felt(1.0), felt(2.0));
+        assert!(wet > dry && snow > wet, "{dry} {wet} {snow}");
+    }
+
+    #[test]
+    fn the_engine_is_felt_idling_and_grows_with_what_it_is_doing() {
+        let mut m = super::Micro::default();
+        let off = (0..60).map(|_| m.sample(1.0 / 60.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)).fold(0.0f32, f32::max);
+        assert_eq!(off, 0.0, "an engine that is not running is felt through nothing");
+        let peak = |rpm: f32, load: f32| {
+            let mut m = super::Micro::default();
+            // two seconds, so the engine's speed is settled and its angle has turned
+            (0..120).map(|_| m.sample(1.0 / 60.0, 0.0, 0.0, rpm, load, 0.0, 1.0)).fold(0.0f32, f32::max)
+        };
+        let idling = peak(700.0, 0.0);
+        let working = peak(700.0, 1.0);
+        let pulling = peak(2200.0, 1.0);
+        assert!(idling > 0.001, "a running engine at idle is not felt at all: {idling}");
+        assert!(working > idling, "a loaded engine is not felt harder than an idling one: {idling} {working}");
+        assert!(pulling > working, "a fast engine is not felt harder than a slow one: {working} {pulling}");
+        assert!(pulling < MICRO_MAX, "the engine shakes the wheel too hard: {pulling}");
+    }
+
+    #[test]
+    fn the_engine_leads_on_the_crankshaft_and_stays_under_the_aliasing_limit() {
+        // six seconds of an engine at 700 rpm, which is where the buzz is at its most
+        // characteristic; the whole of it is a sum of sines, so projecting the signal on
+        // each frequency that is in it says how the sound is shared out between them
+        let dt = 1.0f32 / 60.0;
+        let mut m = super::Micro::default();
+        let sig: Vec<f32> = (0..360).map(|_| m.sample(dt, 0.0, 0.0, 700.0, 0.5, 0.0, 1.0)).collect();
+        let partial = |f: f32| {
+            let (mut re, mut im) = (0.0f32, 0.0f32);
+            for (i, &x) in sig.iter().enumerate() {
+                let w = std::f32::consts::TAU * f * dt * i as f32;
+                re += x * w.cos();
+                im += x * w.sin();
+            }
+            (re * re + im * im).sqrt() / sig.len() as f32 * 2.0
+        };
+        // at 700 rpm the crankshaft turns at 11.7 Hz and a four-stroke four fires at
+        // 23.3 Hz; the rumble under them is at 2.9 Hz. What leads is the crankshaft.
+        let rumble = partial(700.0 / 240.0);
+        let crank = partial(700.0 / 60.0);
+        let firing = partial(700.0 / 30.0);
+        assert!(crank > rumble, "the buzz leads on the low rumble instead of the engine: {rumble} {crank}");
+        assert!(crank > firing, "the firing pulses lead instead of the engine turning: {crank} {firing}");
+        // a wheel is told its force once a frame, so nothing the engine does may ask for
+        // a frequency the frame cannot carry
+        for f in [700.0 / 240.0, 700.0 / 60.0, 700.0 / 30.0] {
+            assert!(f < 28.0, "the engine asks for {f} Hz, past what a wheel can be told");
+        }
+        // and at the top of the rev range, where the crank and the pulses have both been
+        // let go, what is left is the rumble and not silence
+        let mut m = super::Micro::default();
+        let top: Vec<f32> = (0..360).map(|_| m.sample(dt, 0.0, 0.0, 4500.0, 1.0, 0.0, 1.0)).collect();
+        let mut im = 0.0f32;
+        for (i, &x) in top.iter().enumerate() {
+            im += x * (std::f32::consts::TAU * (4500.0 / 240.0) * dt * i as f32).sin();
+        }
+        let mass = (im / top.len() as f32).abs();
+        assert!(mass > 0.01, "a flat-out engine is felt as nothing: {mass}");
+    }
+
+    #[test]
+    fn the_tremble_is_turned_off_by_its_settings() {
+        let run = |road: f32, engine: f32| {
+            let mut m = super::Micro::default();
+            (0..120).map(|_| m.sample(1.0 / 60.0, 60.0, 0.0, 900.0, 0.5, road, engine)).fold(0.0f32, f32::max)
+        };
+        assert_eq!(run(0.0, 0.0), 0.0);
+        assert!(run(1.0, 0.0) > 0.0 && run(0.0, 1.0) > 0.0);
+        assert!(run(2.0, 2.0) > run(1.0, 1.0), "the settings do not make it stronger");
+        // a bigger engine buzz is not a road that got rougher
+        let mut road_only = super::Micro::default();
+        let mut both = super::Micro::default();
+        for _ in 0..60 {
+            road_only.sample(1.0 / 60.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0);
+            both.sample(1.0 / 60.0, 0.0, 0.0, 900.0, 0.0, 1.0, 1.0);
+        }
+        assert_eq!(road_only.roll, both.roll, "the engine changed how the road is read");
+    }
+
+    #[test]
+    fn the_tremble_comes_out_of_the_wheel_through_the_vibration_strength() {
+        let mut t = 0.0;
+        let f = super::FfInput { on: true, kmh: 50.0, micro: 0.08, dt: 0.016, ..Default::default() };
+        assert_eq!(super::wheel_force(&f, 0.0, 0.0, &mut t, 1.0, 0.0), 0.0, "it shook the wheel with the vibrations switched off");
+        let felt = super::wheel_force(&f, 0.0, 0.0, &mut t, 1.0, 1.0);
+        assert!((felt - 0.08).abs() < 0.0001, "{felt}");
+        assert_eq!(super::wheel_force(&super::FfInput { micro: 0.5, ..f }, 0.0, 0.0, &mut t, 1.0, 1.0), 0.5);
+    }
+
+    #[test]
+    fn a_vibration_eases_away_once_it_stops() {
+        assert_eq!(super::fade_gain(0.0, super::FF_FADE), 1.0);
+        assert_eq!(super::fade_gain(super::FF_FADE * 0.5, super::FF_FADE), 0.5);
+        assert_eq!(super::fade_gain(super::FF_FADE, super::FF_FADE), 0.0);
+        assert_eq!(super::fade_gain(super::FF_FADE * 3.0, super::FF_FADE), 0.0);
+        // it never jumps: no frame hands the wheel a step of its own
+        let mut last = 1.0;
+        for i in 0..40 {
+            let g = super::fade_gain(i as f32 / 40.0 * super::FF_FADE * 1.2, super::FF_FADE);
+            assert!(g <= last && last - g < 0.15, "{g} after {last}");
+            last = g;
+        }
+        // a fade of nothing is the old way: it stops where it stands
+        assert_eq!(super::fade_gain(0.5, 0.0), 1.0);
+    }
+
+    #[test]
+    fn the_settings_fade_is_how_long_a_jolt_takes_to_go() {
+        // The jolt the physics hands over is not faded by a gain applied afterwards: by the
+        // time such a gain would start, the jolt it was following is already spent. So the
+        // jolt is held and eased on the settings' own time, and this is what says whether
+        // the setting reaches the jolt at all.
+        let dt = 1.0f32 / 60.0;
+        let tail = |fade: f32| {
+            let mut held = 0.6f32;
+            let mut frames = 0;
+            for _ in 0..600 {
+                held = held * (-dt / (fade * 0.3)).exp();
+                frames += 1;
+                if held < 0.002 {
+                    break;
+                }
+            }
+            frames
+        };
+        let fast = tail(0.05);
+        let slow = tail(0.6);
+        assert!(fast < slow * 3, "the setting barely changes the jolt: {fast} {slow}");
+        assert!(fast >= 2, "the jolt was cut off in a single frame: {fast}");
+        assert!(slow <= 120, "a long fade never ends: {slow}");
+    }
+
+    #[test]
+    fn a_scripts_shaking_eases_away_instead_of_stopping_dead() {
+        // The scripts write the amplitude afresh every frame, so on the frame they stop it
+        // is already zero and fading that fades nothing: the wheel drops the shake in a
+        // single step, which is the jolt the fade is here to avoid. What the fade needs is
+        // the last amplitude the scripts reached the wheel with, so this is what says
+        // whether it is still there once they have gone quiet.
+        let dt = 1.0f32 / 60.0;
+        let mut vib = super::ScriptVib::default();
+        let (amp, period) = vib.step(true, 0.8, 12.0, super::FF_FADE, dt);
+        assert_eq!(amp, 0.8, "the shake the scripts asked for never reached the wheel");
+        assert_eq!(period, 12.0, "the period the scripts asked for was not passed on");
+        // the frame the scripts stop: kept, not cut off
+        let (mut amp, period) = vib.step(true, 0.0, 0.0, super::FF_FADE, dt);
+        assert!(amp > 0.5, "the shake stopped dead the frame the scripts did: {amp}");
+        assert_eq!(period, 12.0, "the period went with the amplitude instead of being kept");
+        // and it eases away to nothing rather than to a stop
+        let mut frames = 0;
+        while amp > 0.0 && frames < 600 {
+            amp = vib.step(true, 0.0, 0.0, super::FF_FADE, dt).0;
+            frames += 1;
+        }
+        assert_eq!(amp, 0.0, "the shake never finished fading: {amp}");
+        // the setting is what decides how long that takes
+        let mut fast = super::ScriptVib::default();
+        fast.step(true, 0.8, 12.0, 0.05, dt);
+        let mut quick = 0;
+        while fast.step(true, 0.0, 0.0, 0.05, dt).0 > 0.0 && quick < 600 {
+            quick += 1;
+        }
+        assert!(quick < frames, "the setting barely changes the shake: {quick} {frames}");
+        // with the fade at zero it stops where it stands, as it always did
+        let mut none = super::ScriptVib::default();
+        none.step(true, 0.8, 12.0, 0.0, dt);
+        assert_eq!(none.step(true, 0.0, 0.0, 0.0, dt).0, 0.0, "the fade at zero still hangs on");
+        // and a bus whose force feedback is off is not shaking at all
+        let mut off = super::ScriptVib::default();
+        off.step(true, 0.8, 12.0, super::FF_FADE, dt);
+        assert_eq!(off.step(false, 0.0, 0.0, super::FF_FADE, dt).0, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod device_kind_tests {
+    #[test]
+    fn a_mapped_constant_force_wheel_is_not_a_gamepad() {
+        assert!(super::mapped_device_is_gamepad(true, false));
+        assert!(!super::mapped_device_is_gamepad(true, true));
+        assert!(!super::mapped_device_is_gamepad(false, true));
+    }
+}
+
+#[cfg(test)]
+mod stick_steering_tests {
+    #[test]
+    fn an_idle_device_nobody_set_up_does_not_hold_the_sticks_steering() {
+        assert!(super::stick_steers(None, false, 0.0));
+        assert!(super::stick_steers(Some(0.0), false, -0.6));
+        assert!(super::stick_steers(Some(0.0), false, 0.0));
+        assert!(super::stick_steers(Some(0.02), false, 0.0));
+        assert!(!super::stick_steers(Some(0.8), false, 0.3));
+        assert!(!super::stick_steers(Some(0.0), true, 1.0));
+    }
+}
+
+#[cfg(test)]
+mod right_stick_look_tests {
+    #[test]
+    fn disabling_automatic_look_keeps_driving_controls_and_assigned_look() {
+        for assigned in [[0.0, 0.0], [0.5, -0.25]] {
+            let mut analog = super::Analog { steering: Some(0.3), stick: true, throttle: Some(0.8), brake: Some(0.2), clutch: Some(0.4), look: assigned };
+            analog.apply_default_gamepad_look(false, 1.0, -1.0);
+            assert_eq!(analog.look, assigned);
+            assert_eq!(analog.steering, Some(0.3));
+            assert!(analog.stick);
+            assert_eq!(analog.throttle, Some(0.8));
+            assert_eq!(analog.brake, Some(0.2));
+            assert_eq!(analog.clutch, Some(0.4));
+        }
+    }
+
+    #[test]
+    fn enabled_automatic_look_keeps_dead_zone_direction_and_assigned_axes() {
+        let mut analog = super::Analog::default();
+        analog.apply_default_gamepad_look(true, 0.1, -0.1);
+        assert_eq!(analog.look, [0.0, 0.0]);
+        analog.apply_default_gamepad_look(true, 1.0, -1.0);
+        assert_eq!(analog.look, [1.0, 1.0]);
+        analog.look = [0.25, -0.5];
+        analog.apply_default_gamepad_look(true, -1.0, 1.0);
+        assert_eq!(analog.look, [0.25, -0.5]);
+    }
+}
+
+#[cfg(test)]
+mod hot_reload_tests {
+    use super::*;
+
+    fn wheel() -> DeviceCfg {
+        let mut d = DeviceCfg { name: "Test wheel".into(), second: "0".into(), ff_scale: Some((0.65, 1.25)), ff_invert: Some(true), ..Default::default() };
+        d.axes[0] = Some((Func::Steering, true));
+        d.axes[1] = Some((Func::Throttle, true));
+        d.axes[5] = Some((Func::Brake, false));
+        d.axis_flags[0] = 2 | 8 | 0x10;
+        d.buttons = vec![("horn".into(), "7".into()), ("kw_s_1_fest".into(), "0".into()), ("blinker_warn_toggle".into(), "0".into())];
+        d.latching = vec![2];
+        d
+    }
+
+    fn no_hardware() -> Devices {
+        Devices {
+            gilrs: None,
+            #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+            calibration_wheel: None,
+            #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+            ff_wheels: Default::default(),
+            #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+            button_devices: crate::evdev_buttons::ButtonDevices::new(),
+            #[cfg(windows)]
+            di: None,
+            #[cfg(target_os = "macos")]
+            hid: None,
+            #[cfg(target_os = "macos")]
+            hid_axes: Vec::new(),
+            #[cfg(target_os = "linux")]
+            hats: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn hot_reload_keeps_device_owner_and_ffb_runtime_state() {
+        let mut c = Controllers::with_devices(no_hardware(), vec![wheel()]);
+        c.ff_t = 12.0;
+        c.ff_lateral = 0.25;
+        c.ff_bump = 0.75;
+        c.ff_bump_age = 0.125;
+        c.ff_micro = Micro { roll: 10.0, rpm: 850.0, crank: 0.1, firing: 0.2, mass: 0.3 };
+        c.ff_vib = ScriptVib { amp: 0.4, period: 2.0, t: 0.12 };
+        c.ff_rumble = 0.6;
+        c.steer = Some(("Test wheel".into(), 0.2, 0.1, true));
+        c.settled = vec![0.3, 0.4];
+        let devices = std::ptr::addr_of!(c.devices);
+        c.held.event(&c.cfg, "Test wheel", 1, true, &mut c.actions);
+        let mut cfg = c.configuration();
+        cfg[0].ff_invert = Some(false);
+        c.install_cfg(cfg);
+        assert_eq!(std::ptr::addr_of!(c.devices), devices);
+        assert_eq!((c.ff_t, c.ff_lateral, c.ff_bump, c.ff_bump_age), (12.0, 0.25, 0.75, 0.125));
+        assert_eq!(c.steer, Some(("Test wheel".into(), 0.2, 0.1, true)));
+        assert_eq!(c.settled, vec![0.3, 0.4]);
+        assert_eq!((c.ff_micro.roll, c.ff_micro.rpm, c.ff_micro.crank, c.ff_micro.firing, c.ff_micro.mass), (10.0, 850.0, 0.1, 0.2, 0.3));
+        assert_eq!((c.ff_vib.amp, c.ff_vib.period, c.ff_vib.t, c.ff_rumble), (0.4, 2.0, 0.12, 0.6));
+        assert_eq!(c.actions.last(), Some(&("kw_s_1_fest".into(), false)));
+        assert_eq!(c.configuration()[0].ff_invert, Some(false));
+    }
+
+    #[test]
+    fn a_device_nobody_set_up_steers_only_once_its_axis_moved() {
+        let mut moved = Vec::new();
+        // idle at its centre (or a little off it): it does not steer, so the arrow keys
+        // switch the interior camera as with no device at all
+        assert!(!free_axis_steers(&mut moved, "4 axes, 25 buttons, joystick", 0.0));
+        assert!(!free_axis_steers(&mut moved, "4 axes, 25 buttons, joystick", -0.1));
+        // turned: it steers, also when back at the centre
+        assert!(free_axis_steers(&mut moved, "4 axes, 25 buttons, joystick", 0.4));
+        assert!(free_axis_steers(&mut moved, "4 axes, 25 buttons, joystick", 0.0));
+        assert!(!free_axis_steers(&mut moved, "another joystick", 0.0));
+    }
+
+    #[test]
+    fn hot_reload_editing_suppresses_input_and_releases_once() {
+        let mut c = Controllers::with_devices(no_hardware(), vec![wheel()]);
+        c.held.event(&c.cfg, "Test wheel", 0, true, &mut c.actions);
+        c.set_editing(true);
+        c.set_editing(true);
+        c.poll();
+        assert!(c.editing);
+        assert_eq!(c.actions, vec![("horn".into(), true), ("horn".into(), false)]);
+        c.set_editing(false);
+        assert!(!c.editing);
+    }
+
+    #[test]
+    fn hot_reload_releases_original_held_gear_and_does_not_press_new_binding() {
+        let mut held = HeldButtons::default();
+        let mut cfg = vec![wheel()];
+        let mut actions = Vec::new();
+        held.event(&cfg, "Test wheel", 1, true, &mut actions);
+        cfg[0].buttons[1].0 = "horn".into();
+        held.release(&mut actions);
+        held.event(&cfg, "Test wheel", 1, false, &mut actions);
+        assert_eq!(actions, vec![("kw_s_1_fest".into(), true), ("kw_s_1_fest".into(), false)]);
+        held.event(&cfg, "Test wheel", 1, true, &mut actions);
+        assert_eq!(actions.last(), Some(&("horn".into(), true)));
+    }
+
+    #[test]
+    fn hot_reload_does_not_toggle_latching_switch_on_menu_entry() {
+        let mut held = HeldButtons::default();
+        let cfg = vec![wheel()];
+        let mut actions = Vec::new();
+        held.event(&cfg, "Test wheel", 2, true, &mut actions);
+        held.event(&cfg, "Test wheel", 2, true, &mut actions); // duplicate down
+        held.release(&mut actions);
+        held.event(&cfg, "Test wheel", 2, false, &mut actions);
+        assert_eq!(actions, vec![("blinker_warn_toggle".into(), true), ("blinker_warn_toggle".into(), false)]);
+        // A physical release during driving still performs the existing latching behaviour.
+        held.event(&cfg, "Test wheel", 2, true, &mut actions);
+        held.event(&cfg, "Test wheel", 2, false, &mut actions);
+        assert_eq!(actions.len(), 6);
+    }
+
+    #[test]
+    fn hot_reload_release_uses_mapping_at_press_even_after_external_change() {
+        let mut held = HeldButtons::default();
+        let mut cfg = vec![wheel()];
+        let mut actions = Vec::new();
+        held.event(&cfg, "Test wheel", 0, true, &mut actions);
+        cfg[0].buttons[0].0 = "door".into();
+        held.event(&cfg, "Test wheel", 0, false, &mut actions);
+        assert_eq!(actions, vec![("horn".into(), true), ("horn".into(), false)]);
+    }
+
+    #[test]
+    fn hot_reload_preserves_axis_flags_button_metadata_and_per_device_ffb() {
+        let cfg = vec![wheel(), DeviceCfg { name: "Separate pedals".into(), second: "12".into(), ff_scale: Some((1.0, 1.0)), ..Default::default() }];
+        assert_eq!(parse_cfg(&cfg_text(&cfg)), cfg);
+        assert_eq!(cfg[0].axis_flags[0], 26);
+        let (steer, physical) = wheel_steering(0.6, true, 0, 0.1, 1.0);
+        assert!((physical + 0.6).abs() < 1e-6);
+        assert!((steer + 0.5 / 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hot_reload_mixed_devices_keep_the_selected_steering_kind() {
+        let mut out = Analog::default();
+        set_steering(&mut out, 0.75, false);
+        set_steering(&mut out, 0.0, true);
+        assert_eq!(out.steering, Some(0.75));
+        assert!(!out.stick);
+        set_steering(&mut out, -0.9, true);
+        assert_eq!(out.steering, Some(-0.9));
+        assert!(out.stick);
+        set_steering(&mut out, -0.9, false);
+        assert!(out.stick); // identical readings keep the original source
+    }
+
+    #[test]
+    fn hot_reload_gamepad_vibration_uses_its_own_device_scale() {
+        let mut cfg = vec![wheel(), DeviceCfg { name: "Xbox Controller".into(), ff_scale: Some((1.0, 0.5)), ..Default::default() }];
+        assert_eq!(rumble_scale(&cfg, "Xbox Controller"), 0.5);
+        cfg[1].ff_scale = Some((1.0, 1.5));
+        assert_eq!(rumble_scale(&cfg, "Xbox Controller"), 1.5);
+        assert_eq!(rumble_scale(&cfg, "Test wheel"), 1.25);
+        assert_eq!(rumble_scale(&cfg, "Unconfigured gamepad"), 1.0);
+    }
+
+    #[test]
+    fn hot_reload_custom_gamepad_layout_owns_analog_controls() {
+        let mut cfg = vec![DeviceCfg { name: "Xbox Controller".into(), second: "0".into(), ..Default::default() }];
+        cfg[0].buttons.push(("horn".into(), "0".into()));
+        assert!(!custom_gamepad_axes(&cfg, "Xbox Controller"));
+        cfg[0].axes[0] = Some((Func::Steering, false));
+        assert!(custom_gamepad_axes(&cfg, "Xbox Controller"));
+        let mut axes = vec![(0, 0.2), (1, -0.1)];
+        gamepad_triggers(&mut axes, 0.0, 1.0);
+        assert_eq!(axes[2..], [(6, -1.0), (7, 1.0)]);
+        gamepad_triggers(&mut axes, 1.0, 0.0);
+        assert_eq!(axes.len(), 4);
+    }
+
+    #[test]
+    fn hot_reload_save_replaces_existing_file_and_rejects_invalid_input() {
+        let dir = std::env::temp_dir().join(format!("openomsi-controllers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gamectrler.cfg");
+        let mut cfg = vec![wheel()];
+        save_cfg_to(&path, &cfg).unwrap();
+        cfg[0].ff_invert = Some(false);
+        save_cfg_to(&path, &cfg).unwrap();
+        assert_eq!(parse_cfg(&std::fs::read_to_string(&path).unwrap()), cfg);
+        let original = std::fs::read(&path).unwrap();
+        cfg[0].buttons[0].0 = "horn\n[ctrl]".into();
+        assert!(save_cfg_to(&path, &cfg).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(save_cfg_to(&path.join("not-a-directory.cfg"), &[]).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

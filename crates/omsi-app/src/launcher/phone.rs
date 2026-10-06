@@ -987,7 +987,7 @@ fn time_sheet(l: &mut Launcher, r: Rect) -> bool {
     let home = super::drive::nearest_airport(&l.state.config.root, &l.state.choice.map);
     let custom = crate::weather_setup::CustomWeather::default().encode();
     let items: Vec<(String, String, String)> = [
-        (String::new(), "The map's weather".to_string(), "As the map sets it".to_string()),
+        (String::new(), "Natural weather".to_string(), "Develops by itself through the day and the season".to_string()),
         (custom, "Custom weather".to_string(), "Visibility, wind, temperature, rain, snow and road state".to_string()),
         (format!("metar:{home}"), "Current weather".to_string(), format!("Real weather from {home} (ICAO can be changed)")),
         ("cycle".to_string(), "Weather cycle".to_string(), "Changes every 25-60 minutes, as the month allows".to_string()),
@@ -1141,7 +1141,7 @@ fn online(l: &mut Launcher, body: Rect) {
 
 fn join(l: &mut Launcher, address: &str) {
     l.state.ask_server(address, 5.0);
-    l.state.join_server(address);
+    l.state.join_server(address, super::state::JoinProto::Auto);
     if l.state.joined_server.as_deref() == Some(address) {
         l.phone.tab = Tab::Play;
         l.go(Page::Drive);
