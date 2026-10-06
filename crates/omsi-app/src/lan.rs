@@ -630,6 +630,10 @@ pub struct LanGame {
     /// Our vehicle's variable table (by its program), for `omsi_net::vars`.
     my_vars: Option<(usize, Arc<VarTable>)>,
     vars_log: f32,
+    /// The variables of a player whose bus is not drawn here yet (still loading), as they
+    /// came: (their table, floats, strings), taken over once it is - the joining player's
+    /// displays stood blank until the key frame came round again.
+    pending_vars: hashbrown::HashMap<u32, (u32, hashbrown::HashMap<u16, f32>, hashbrown::HashMap<u16, String>)>,
 }
 
 /// What the frame knows that LAN play needs.
@@ -3007,16 +3011,38 @@ fn sync_vars(lan: &mut LanSession, game: &mut LanGame, player: Option<&Player>, 
             game.vars_log += dt;
             if game.vars_log > 2.0 {
                 game.vars_log = 0.0;
-                log::info!("LAN vars: ours {name} = {:?}", p.vehicle.var(&name));
+                // (a string variable as well: a display's text)
+                let text = |v: &omsi_sim::VehicleInstance| v.ty.program.str_var(&name).and_then(|i| v.state.str_vars.get(i as usize)).cloned();
+                log::info!("LAN vars: ours {name} = {:?} {:?}", p.vehicle.var(&name), text(&p.vehicle));
                 for (id, rv) in &game.remotes {
                     let theirs = rv.vehicle.ty.program.var(&name).and_then(|k| rv.synced.get(&(k as u16)).copied());
-                    log::info!("LAN vars: player {id}'s {name} = {theirs:?} ({} variables, {} strings taken)", rv.synced.len(), rv.synced_strings.len());
+                    log::info!("LAN vars: player {id}'s {name} = {theirs:?} {:?} ({} variables, {} strings taken)", text(&rv.vehicle), rv.synced.len(), rv.synced_strings.len());
                 }
             }
         }
     }
-    for v in lan.take_vars() {
-        let Some(rv) = game.remotes.get_mut(&v.id) else { continue };
+    let mut incoming = lan.take_vars();
+    // what came before their bus was here, first (oldest first, as if it had come now)
+    let ready: Vec<u32> = game.pending_vars.keys().copied().filter(|id| game.remotes.contains_key(id)).collect();
+    for id in ready.into_iter().rev() {
+        if let Some((table, floats, strings)) = game.pending_vars.remove(&id) {
+            incoming.insert(0, omsi_net::vars::VarsIn { id, table, floats: floats.into_iter().collect(), strings: strings.into_iter().collect() });
+        }
+    }
+    // (kept for the players of the session only, and not without end)
+    game.pending_vars.retain(|id, _| lan.peers().any(|p| p.pose.id == *id));
+    for v in incoming {
+        let Some(rv) = game.remotes.get_mut(&v.id) else {
+            if game.pending_vars.len() < 64 {
+                let p = game.pending_vars.entry(v.id).or_insert_with(|| (v.table, Default::default(), Default::default()));
+                if p.0 != v.table {
+                    *p = (v.table, Default::default(), Default::default());
+                }
+                p.1.extend(v.floats);
+                p.2.extend(v.strings);
+            }
+            continue;
+        };
         if rv.stand_in {
             continue;
         }
@@ -3042,6 +3068,9 @@ fn sync_vars(lan: &mut LanSession, game: &mut LanGame, player: Option<&Player>, 
             }
         }
         // their whole state comes: the full scripts draw their displays from it
+        if !rv.vehicle.run_all_scripts {
+            log::info!("LAN: player {}'s variables: {} and {} strings taken; their bus runs its full scripts here", v.id, rv.synced.len(), rv.synced_strings.len());
+        }
         rv.vehicle.run_all_scripts = true;
     }
 }

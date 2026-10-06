@@ -148,6 +148,10 @@ const MAX_FIELD: usize = 64;
 /// A host takes at most this many states and this many other messages a second from one
 /// player (with bursts of as many); chat lines one a second (bursts of three).
 const STATE_RATE: (f32, f32) = (40.0, 40.0);
+/// ... and this many `VARS` datagrams (`vars.rs`), apart from the states: counted with them,
+/// a bus on the move (20 states and up to 25 VARS a second) had the host drop some of either,
+/// and a display's change that was dropped waited seconds for the key frame.
+const VARS_RATE: (f32, f32) = (80.0, 120.0);
 const MESSAGE_RATE: (f32, f32) = (10.0, 20.0);
 const CHAT_RATE: (f32, f32) = (1.0, 3.0);
 // ---------------------------------------------------------------------------------------
@@ -1271,6 +1275,7 @@ pub struct Peer {
     state_at: Instant,
     states: Bucket,
     messages: Bucket,
+    vars: Bucket,
     chat: Bucket,
     /// Datagrams of this player the host threw away (too many at once).
     pub dropped: u32,
@@ -1294,6 +1299,7 @@ impl Peer {
             state_at: now,
             states: Bucket::new(STATE_RATE.1),
             messages: Bucket::new(MESSAGE_RATE.1),
+            vars: Bucket::new(VARS_RATE.1),
             chat: Bucket::new(CHAT_RATE.1),
             dropped: 0,
             history: std::collections::VecDeque::new(),
@@ -1405,6 +1411,8 @@ pub struct LanSession {
     /// Every script variable of our vehicle going out (`vars.rs`), and the others' coming in.
     var_sender: vars::VarSender,
     vars_in: Vec<vars::VarsIn>,
+    /// The players our variables went to last (a new one gets a burst).
+    vars_peers: Vec<u32>,
     descs: Vec<world::Desc>,
     wants: Vec<(u32, Vec<world::EntityRef>)>,
     claims: Vec<(u32, Vec<u32>)>,
@@ -1508,6 +1516,7 @@ impl LanSession {
             world_in: Vec::new(),
             var_sender: vars::VarSender::default(),
             vars_in: Vec::new(),
+            vars_peers: Vec::new(),
             descs: Vec::new(),
             wants: Vec::new(),
             claims: Vec::new(),
@@ -2740,6 +2749,14 @@ impl LanSession {
     /// every frame; it sends what is due.
     #[allow(clippy::too_many_arguments)]
     pub fn send_vars(&mut self, table: u32, float_ids: &[u16], floats: &[f32], string_ids: &[u16], strings: &[String], dt: f32) {
+        // a player new to the session gets everything at once (a key frame in a burst), not a
+        // slice a tick over the next seconds: their displays blank meanwhile
+        let mut ids: Vec<u32> = self.peers.keys().copied().collect();
+        ids.sort_unstable();
+        if ids.iter().any(|id| !self.vars_peers.contains(id)) {
+            self.var_sender.burst();
+        }
+        self.vars_peers = ids;
         let msgs = self.var_sender.tick(PROTOCOL as u8, self.my_id, table, float_ids, floats, string_ids, strings, dt);
         for m in msgs {
             match self.role {
@@ -2764,11 +2781,20 @@ impl LanSession {
             return;
         }
         match self.role {
-            // (as a state: only a player we welcomed, from its address, within its rate)
+            // (only a player we welcomed, from its address, within its own rate for these)
             Role::Host => {
-                if self.checked_peer(v.id, from, STATE_RATE, true).is_none() {
+                let Some(peer) = self.peers.get_mut(&v.id) else { return };
+                if peer.addr != Some(from) {
                     return;
                 }
+                if !peer.vars.take(VARS_RATE) {
+                    peer.dropped += 1;
+                    if peer.dropped.is_power_of_two() {
+                        log::warn!("LAN: player {} sends too many variables; {} datagram(s) dropped so far", v.id, peer.dropped);
+                    }
+                    return;
+                }
+                peer.last_seen = Instant::now();
                 self.broadcast(data, Some(v.id));
             }
             Role::Client => {
@@ -2778,7 +2804,7 @@ impl LanSession {
             }
         }
         // (a game that stopped reading does not pile them up without end)
-        if self.vars_in.len() < 1024 {
+        if self.vars_in.len() < 4096 {
             self.vars_in.push(v);
         }
     }
