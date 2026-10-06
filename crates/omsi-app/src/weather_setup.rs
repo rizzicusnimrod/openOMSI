@@ -198,6 +198,25 @@ pub(crate) fn setup_sky(
     // the weather's cloud type (Weather/clouds.cfg: Cumulus 1..3, Overcast 1) with its own
     // texture, whose alpha is the clouds' shape; `Texture\clouds.tga` when there is none
     let kind = weather.map(|w| w.clouds.0.trim().to_string()).unwrap_or_default();
+    // The plain sky draws that picture itself, as OMSI 2 does - a sky pack's photographed
+    // clouds look as they were made, not as clouds worked out from their outline
+    // (`OMSI_COMPUTED_CLOUDS=1`: as before). The enhanced sky keeps its own clouds.
+    let enhanced = crate::startup::ENHANCED.load(std::sync::atomic::Ordering::Relaxed);
+    if let (false, None, Some(w)) = (enhanced, omsi_cfg::env::var_os("OMSI_COMPUTED_CLOUDS"), weather) {
+        if let Some((img, ty)) = cloud_type(&args.root, &kind).and_then(|ty| {
+            let p = omsi_cfg::resolve_path(&omsi_cfg::resolve_path(&args.root, "Texture"), &ty.file);
+            omsi_texture::decode_file(&p).map_err(|e| log::warn!("clouds {}: {e}", p.display())).ok().map(|img| (img, ty))
+        }) {
+            let tex = renderer.add_texture(scene, &img, true);
+            let (dir, speed) = (w.wind.0.to_radians(), w.wind.1);
+            // ([clouds]' number is the layer's height; none: 1500 m as the cloud field)
+            let height_m = if w.clouds.1 > 50.0 { w.clouds.1.clamp(300.0, 6000.0) } else { 1500.0 };
+            let pic = omsi_render::CloudPicture { tile_m: ty.size_m, overcast: ty.overcast, height_m, wind: [dir.sin() * speed, dir.cos() * speed] };
+            log::info!("clouds: {kind} drawn from its picture {} ({} m, {}, {height_m:.0} m up)", ty.file, ty.size_m, if ty.overcast { "overcast" } else { "scattered" });
+            renderer.set_sky_textures_clouds_picture(scene, [ids[0], ids[1], ids[2]], Some(tex), Some(pic));
+            return;
+        }
+    }
     let typed = cloud_texture(&args.root, &kind);
     let cover = typed.or_else(|| omsi_texture::decode_file(&omsi_cfg::resolve_path(&args.root, "Texture\\clouds.tga")).ok());
     let t = std::time::Instant::now();
@@ -330,21 +349,35 @@ pub(crate) fn cloud_field(cover: Option<&omsi_texture::Image>) -> omsi_texture::
 /// size in metres, sct/ovc), as the sky shaders read it: the cover in the colour channels.
 /// A scattered type's texture is white with the clouds in its alpha; an overcast one is a
 /// picture of the cloud deck, its brightness is the cover.
-fn cloud_texture(root: &Path, kind: &str) -> Option<omsi_texture::Image> {
+/// A cloud type of `Weather/clouds.cfg`: `[cloudtype]` name, texture (in `Texture`), how
+/// many metres of the sky one picture covers, `sct` (its alpha is the clouds) or `ovc` (a
+/// deck).
+#[derive(Debug, Clone, PartialEq)]
+struct CloudType {
+    file: String,
+    size_m: f32,
+    overcast: bool,
+}
+
+fn cloud_type(root: &Path, kind: &str) -> Option<CloudType> {
     if kind.is_empty() || kind.starts_with("-1") {
         return None;
     }
     let cfg = omsi_cfg::vfs::read(&root.join("Weather").join("clouds.cfg")).ok()?;
-    let text = omsi_cfg::codepage::decode(&cfg);
+    parse_cloud_type(&omsi_cfg::codepage::decode(&cfg), kind)
+}
+
+fn parse_cloud_type(text: &str, kind: &str) -> Option<CloudType> {
     let lines: Vec<&str> = text.lines().map(|l| l.trim()).collect();
-    let mut file = None;
-    for i in 0..lines.len() {
-        if lines[i].eq_ignore_ascii_case("[cloudtype]") && lines.get(i + 1).map(|n| n.eq_ignore_ascii_case(kind)).unwrap_or(false) {
-            file = lines.get(i + 2).map(|s| s.to_string());
-            break;
-        }
-    }
-    let file = file?;
+    let i = (0..lines.len()).find(|&i| lines[i].eq_ignore_ascii_case("[cloudtype]") && lines.get(i + 1).is_some_and(|n| n.eq_ignore_ascii_case(kind)))?;
+    let file = lines.get(i + 2).filter(|f| !f.is_empty())?.to_string();
+    let size_m = lines.get(i + 3).and_then(|s| s.replace(',', ".").parse::<f32>().ok()).filter(|s| *s > 0.0).unwrap_or(5000.0);
+    let overcast = lines.get(i + 4).is_some_and(|s| s.eq_ignore_ascii_case("ovc"));
+    Some(CloudType { file, size_m, overcast })
+}
+
+fn cloud_texture(root: &Path, kind: &str) -> Option<omsi_texture::Image> {
+    let file = cloud_type(root, kind)?.file;
     let mut img = omsi_texture::decode_file(&omsi_cfg::resolve_path(&omsi_cfg::resolve_path(&root, "Texture"), &file)).ok()?;
     if img.has_alpha {
         for px in img.rgba.chunks_mut(4) {
@@ -605,4 +638,16 @@ pub(crate) fn from_report(s: &str) -> Option<omsi_content::weather::Weather> {
     let mut w = omsi_content::weather::from_metar(icao, raw);
     w.path = std::path::PathBuf::from(format!("metar:{icao}"));
     Some(w)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cloud_type_with_its_picture_size_and_kind() {
+        let cfg = "Hier werden alle Wolkentypen definiert:\n[cloudtype]\nCumulus 1\nCumulus_1.tga\n8750\nsct\n[cloudtype]\nOvercast 1\nOVC_1.bmp\n5500\novc\n[cloudtype]\nAddOn - Cumulus 8\nCloudNew_Cumulus8.tga\n7000\nsct\n";
+        assert_eq!(parse_cloud_type(cfg, "addon - cumulus 8"), Some(CloudType { file: "CloudNew_Cumulus8.tga".into(), size_m: 7000.0, overcast: false }));
+        assert_eq!(parse_cloud_type(cfg, "Overcast 1"), Some(CloudType { file: "OVC_1.bmp".into(), size_m: 5500.0, overcast: true }));
+        assert_eq!(parse_cloud_type(cfg, "Cirrus 9"), None);
+    }
 }

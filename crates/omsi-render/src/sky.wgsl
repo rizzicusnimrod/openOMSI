@@ -61,6 +61,14 @@ fn cloud_fbm(p: vec2<f32>) -> f32 {
 @group(1) @binding(3) var s_sky: sampler;
 @group(1) @binding(4) var t_clouds: texture_2d<f32>;
 @group(1) @binding(5) var s_repeat: sampler;
+// The weather's cloud picture in `t_clouds` (lib.rs `CloudPicture`): a.x one picture's
+// size on the sky (m), a.y 0 none (the cloud field), 1 scattered, 2 overcast, a.z the
+// layer's height (m); w.xy the wind (m/s).
+struct CloudPicture {
+    a: vec4<f32>,
+    w: vec4<f32>,
+};
+@group(1) @binding(9) var<uniform> cloud_picture: CloudPicture;
 
 /// How far the cloud field reaches before it repeats (m): a cumulus is then half a
 /// kilometre to two across.
@@ -125,7 +133,26 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let uv = vec2<f32>(u, v);
     let c = textureSample(t_day, s_sky, uv).rgb * camera.sky.y + textureSample(t_twilight, s_sky, uv).rgb * camera.sky.z * 0.8 + textureSample(t_night, s_sky, uv).rgb * camera.sky.w * 0.6;
     var col = c;
-    if (camera.clouds.x > 0.001 && d.z > 0.01) {
+    if (cloud_picture.a.y > 0.5 && camera.clouds.x > 0.001 && d.z > 0.01) {
+        // the weather's own picture, as OMSI 2 draws its clouds: tiled over a flat layer at
+        // the weather's height, each picture as big as clouds.cfg says, drifting with the
+        // wind; a scattered type's alpha is its clouds, an overcast one is the whole deck
+        let t = max(cloud_picture.a.z, 300.0) / d.z;
+        let size = max(cloud_picture.a.x, 100.0);
+        let p = cloud_ground(d, t) + cloud_picture.w.xy * camera.post.y;
+        let texels = f32(textureDimensions(t_clouds).x);
+        let lod = log2(max(t * length(fwidth(d)) / max(d.z, 0.05) / size * texels, 1.0));
+        let pic = textureSampleLevel(t_clouds, s_repeat, p / size, lod);
+        let fade = clamp((d.z - 0.01) * 7.0, 0.0, 1.0);
+        // lit as the scene is (see the cloud field's below)
+        let sun_up = clamp(camera.sun_dir.z * 4.0 + 0.3, 0.0, 1.0);
+        let lit = min(camera.sun_color.rgb * 1.1 * sun_up + camera.ambient.rgb * mix(0.5, 1.5, sun_up) + camera.sky_color.rgb * 0.3, vec3<f32>(0.97));
+        if (cloud_picture.a.y > 1.5) {
+            col = mix(col, lit * pic.rgb, fade);
+        } else {
+            col = mix(col, max(lit * pic.rgb, col * 1.05), pic.a * fade);
+        }
+    } else if (camera.clouds.x > 0.001 && d.z > 0.01) {
         // a flat layer 1500 m up drawn from the cloud field (weather_setup::cloud_field)
         let t = 1500.0 / d.z;
         let p = cloud_ground(d, t);

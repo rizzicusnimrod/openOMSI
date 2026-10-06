@@ -166,6 +166,18 @@ struct Probe {
     cube_recapture: bool,
 }
 
+/// How the plain sky draws the weather's own cloud picture
+/// (`Renderer::set_sky_textures_clouds_picture`): one picture covers `tile_m` metres of the
+/// sky (`Weather/clouds.cfg`), a scattered type's alpha is its clouds, an overcast one is a
+/// deck; the layer is `height_m` up and drifts with the `wind` (m/s, east and north).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CloudPicture {
+    pub tile_m: f32,
+    pub overcast: bool,
+    pub height_m: f32,
+    pub wind: [f32; 2],
+}
+
 /// Face size of the enhanced sky cube (see `Probe::cube_view`): about as many texels per
 /// degree as a 1600-pixel-wide picture has pixels at half its size (at 512 the clouds'
 /// edges stood in blocks of three or four pixels).
@@ -3059,6 +3071,17 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // the weather's cloud picture, when the clouds are drawn from it (`CloudPicture`)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let (cloud_shape_view, cloud_detail_view, cloud_sampler) = cloud_noise_textures(&device, &queue);
@@ -5695,6 +5718,24 @@ impl Renderer {
         textures: [TextureId; 3],
         clouds: Option<TextureId>,
     ) {
+        self.set_sky_textures_clouds_picture(scene, textures, clouds, None)
+    }
+
+    /// `set_sky_textures_clouds`, with `clouds` the weather's own cloud picture drawn as
+    /// `picture` says (the plain sky: a layer of it tiled over the sky, as OMSI 2 draws its
+    /// clouds), not the cloud field the clouds are worked out from.
+    pub fn set_sky_textures_clouds_picture(
+        &self,
+        scene: &mut Scene,
+        textures: [TextureId; 3],
+        clouds: Option<TextureId>,
+        picture: Option<CloudPicture>,
+    ) {
+        let pic: [f32; 8] = match picture {
+            Some(p) => [p.tile_m, if p.overcast { 2.0 } else { 1.0 }, p.height_m, 0.0, p.wind[0], p.wind[1], 0.0, 0.0],
+            None => [0.0; 8],
+        };
+        let pic_buf = buffer_init(&self.device, &self.queue, Some("cloud picture"), bytemuck::cast_slice(&pic), wgpu::BufferUsages::UNIFORM);
         let views: Vec<&wgpu::TextureView> =
             textures.iter().map(|t| &scene.textures[*t].view).collect();
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -5739,6 +5780,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 8,
                     resource: wgpu::BindingResource::Sampler(&self.cloud_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: pic_buf.as_entire_binding(),
                 },
             ],
         });
