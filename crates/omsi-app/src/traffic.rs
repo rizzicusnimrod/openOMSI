@@ -249,6 +249,9 @@ pub struct AiCar {
     pub demo: bool,
     /// What its driver shows this frame, for the LAN clients' copies (`lan_world`).
     pub shown: Shown,
+    /// Time it has not been driven on for yet (s): a car nobody sees, far off, is driven
+    /// `UNSEEN_STEP` at a time (see `Traffic::tick`).
+    pub owed: f32,
 }
 
 /// A free parking space beside a lane that a car means to park in: the space of parked car
@@ -436,6 +439,16 @@ const NEAR_HIDE: f64 = 350.0;
 /// Within this distance of the camera an AI vehicle is animated and drawn even out of the
 /// view (m): the mirrors look behind, and a car beside the view throws its shadow into it.
 const UNSEEN_NEAR: f64 = 80.0;
+
+/// A random car out of the view and farther than this from the camera and from every
+/// player's vehicle (m) is driven in steps of `UNSEEN_STEP` instead of every frame: nobody
+/// sees it move (it is not drawn, see `UNSEEN_NEAR`), and the cars round it are as far off.
+/// Its way, its body and its script cost as much as a car in plain view's, and at a
+/// terminus or in a town most of the cars awake are such (20 of 42 at TH_Wald's).
+const UNSEEN_FAR: f64 = 150.0;
+/// (s) Ten times a second: at 50 km/h a step of 1.4 m, which its driving model takes as
+/// smoothly as a frame's; the cars about it see it where it was at most that long ago.
+const UNSEEN_STEP: f32 = 0.1;
 
 /// How near an articulated AI bus has to be for its bellows to be reshaped as its joint
 /// turns (m): the fold of the bend is a few centimetres, which is a screen pixel or more
@@ -3173,6 +3186,7 @@ impl Traffic {
             pull_out: 0.0,
             rail_trail: Default::default(),
             ai_secs: 0.0,
+            owed: 0.0,
             consist_reversed: false,
             driver: None,
             two_stroke: None,
@@ -5260,6 +5274,34 @@ impl Traffic {
             .collect();
         let mut d = st.front + 0.2;
         let mut p3 = st.way_point(&self.net, d);
+        // The walk starts where the nearest body could first be met: a point of the way
+        // `x` metres on lies no more than 1.25 x from where it starts (a lane change adds
+        // its sideways glide to the way's length), and a body is met only within its box
+        // grown by this car's half width and what it creeps on. Walked from the bumper every
+        // frame, a car that only had oncoming traffic 50 m off went 60 steps for nothing.
+        {
+            let start = p3.truncate();
+            let first = near
+                .iter()
+                .zip(&reach_on)
+                .map(|(f, &stops_in)| {
+                    let r = f.half_len + f.half_w + 2.0 * hw + stops_in + 2.0;
+                    (((f.center - start).length() - r) / 1.25).max(0.0)
+                })
+                .fold(f64::MAX, f64::min) as f32;
+            if first > 0.75 && st.front + 0.2 + first <= reach {
+                // (on the same grid of steps as the walk from the bumper: 0.75 m for the
+                // first 20 m, 1.5 m beyond)
+                let fine_end = st.front + 0.2 + 0.75 * ((19.8f32 / 0.75).ceil());
+                let target = st.front + 0.2 + first;
+                d = if target < fine_end {
+                    st.front + 0.2 + 0.75 * ((target - st.front - 0.2) / 0.75).floor()
+                } else {
+                    fine_end + 1.5 * ((target - fine_end) / 1.5).floor()
+                };
+                p3 = st.way_point(&self.net, d);
+            }
+        }
         while d <= reach {
             // (finer close by, where the gap matters)
             let step = if d < st.front + 20.0 { 0.75 } else { 1.5 };
@@ -5396,6 +5438,12 @@ impl Traffic {
         let inside = |p: DVec3| in_player_box(p, centre, fwd, right, wide, ahead + margin, behind + margin);
         let look = (st.speed * st.speed / (2.0 * st.decel) + st.speed * 2.0 + 15.0)
             .clamp(15.0, look_ahead(st.speed));
+        // (the box beyond where the walk can reach: every point of it lies further off the
+        // way's start than 1.25 times the walk, see `body_in_way`)
+        let box_r = (ahead.max(behind) + margin).hypot(wide + margin);
+        if (centre - st.way_point(&self.net, 0.0)).truncate().length() > (st.front + look + 3.0) as f64 * 1.25 + box_r + 2.0 {
+            return None;
+        }
         let mut d = 0.0f32;
         let mut step = 1.5f32;
         while d <= st.front + look {
@@ -5788,7 +5836,39 @@ impl Traffic {
         let mut frames: Vec<Option<AiFrame>> = vec![None; self.cars.len()];
         let feet = self.footprints();
         self.break_lead_pairs();
+        // the random cars nobody sees, far off (`UNSEEN_FAR`): driven in steps
+        // (`OMSI_EVERY_FRAME=1`: every car every frame, as before)
+        let stepped: Vec<bool> = self
+            .cars
+            .iter()
+            .map(|c| {
+                let p = c.vehicle.position;
+                let r = (c.state.front + c.state.rear).abs().max(4.0) as f64 + 2.0;
+                let far = |o: DVec3| (p - o).length() > UNSEEN_FAR;
+                !every_frame()
+                    && !c.is_bus()
+                    && !c.demo
+                    && self.viewer.is_some_and(|v| far(v.pos) && !v.frames(p, r))
+                    && self.player.is_none_or(|b| far(b.0))
+                    && self.lan_centers.iter().all(|&o| far(o))
+            })
+            .collect();
+        // the time each car is driven on this frame (one not driven: none)
+        let mut step_dt = vec![0.0f32; self.cars.len()];
         for i in 0..self.cars.len() {
+            // a car driven in steps: on when a step is due, with all the time it is owed
+            // (one that comes into view or near is driven on at once, with what it is owed)
+            let dt = {
+                let c = &mut self.cars[i];
+                let owed = c.owed + dt;
+                if stepped[i] && owed < UNSEEN_STEP {
+                    c.owed = owed;
+                    continue;
+                }
+                c.owed = 0.0;
+                owed
+            };
+            step_dt[i] = dt;
             self.plan_lane_change(i, &by_lane);
             let ahead = self.obstacle_ahead(i, look_ahead(self.cars[i].state.speed), &by_lane);
             // remember whom it lets in at a merge (a car on another lane)
@@ -6619,7 +6699,8 @@ impl Traffic {
                         .chain(car.state.planned_next)
                         .filter_map(|l| self.net.right_before_left_kmh(l))
                         .fold(lane.speed_limit_kmh, f32::min);
-                    ((kmh * car.state.desire).min(car.state.max_speed_kmh).max(3.0) / 3.6).min(car.state.curve_speed(&self.net))
+                    // (the bends ahead as the car's driving took them this frame)
+                    ((kmh * car.state.desire).min(car.state.max_speed_kmh).max(3.0) / 3.6).min(car.state.last_bend)
                 } else {
                     0.0
                 };
@@ -6740,14 +6821,16 @@ impl Traffic {
         {
             use rayon::prelude::*;
             let net = &self.net;
-            type Work<'a> = (&'a AiState, &'a mut AiBody, &'a mut VehicleInstance, &'a mut AiFrame, &'a mut std::collections::VecDeque<(f64, DVec3)>, &'a mut f32);
+            // (with the time each car is driven on: a car driven in steps, its step's)
+            type Work<'a> = (&'a AiState, &'a mut AiBody, &'a mut VehicleInstance, &'a mut AiFrame, &'a mut std::collections::VecDeque<(f64, DVec3)>, &'a mut f32, f32);
             let mut work: Vec<Work> = self
                 .cars
                 .iter_mut()
                 .zip(frames.iter_mut())
-                .filter_map(|(c, f)| {
+                .zip(step_dt.iter())
+                .filter_map(|((c, f), &dt)| {
                     let f = f.as_mut()?;
-                    Some((&c.state, &mut c.body, &mut c.vehicle, f, &mut c.rail_trail, &mut c.ai_secs))
+                    Some((&c.state, &mut c.body, &mut c.vehicle, f, &mut c.rail_trail, &mut c.ai_secs, dt))
                 })
                 .collect();
             work.sort_by(|a, b| b.5.total_cmp(a.5));
@@ -6762,7 +6845,7 @@ impl Traffic {
             // (a few cars per job: every job handed out wakes a worker, and the waking cost
             // the main thread more than a car's work)
             jobs.into_par_iter().flatten_iter()
-                .for_each(|(state, body, vehicle, frame, trail, secs)| {
+                .for_each(|(state, body, vehicle, frame, trail, secs, dt)| {
                     let t0 = std::time::Instant::now();
                     let ground = vehicle.ground.clone();
                     let contact = vehicle.contact.clone();
@@ -8107,6 +8190,7 @@ impl Traffic {
             pull_out: 0.0,
             rail_trail: Default::default(),
             ai_secs: 0.0,
+            owed: 0.0,
             consist_reversed: false,
             driver: None,
             two_stroke: None,
@@ -8733,4 +8817,11 @@ mod way_user_tests {
         // a bus whose way does not go on into the lane the car takes: nothing to do with it
         assert!(merging_lead(&net, &me, &[user(vec![(0, -30.0)], 12.0, 0.0)]).is_none());
     }
+}
+
+/// `OMSI_EVERY_FRAME=1`: every car is driven every frame, the unseen far-off ones as well
+/// (see `UNSEEN_FAR`) - for comparing.
+fn every_frame() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| omsi_cfg::env::var_os("OMSI_EVERY_FRAME").is_some())
 }

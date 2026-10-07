@@ -1939,6 +1939,28 @@ pub struct AiState {
     /// At most this much acceleration for now (m/s²): edging out round something standing
     /// close ahead.
     pub accel_cap: Option<f32>,
+    /// The bend speeds of the places ahead `curve_speed` samples, kept while the way stays
+    /// the same (see `curve_speed_cached`).
+    pub bend: BendCache,
+    /// `curve_speed` as `drive` last took it (m/s): what the driver sees of the bends ahead
+    /// (`ai_drivers`), without sampling the way a second time.
+    pub last_bend: f32,
+}
+
+/// `AiState::curve_speed`'s samples, kept: they lie at fixed places of the road (every
+/// 2.5 m of the odometer), so while the car keeps to the same lanes the bend speed of each
+/// is what it was the frame before. Sampled afresh every frame, the 5 to 36 places ahead -
+/// each two points of the way and a curvature - were the largest part of a car's driving
+/// (twice a frame, a fifth of the traffic's time).
+#[derive(Debug, Clone, Default)]
+pub struct BendCache {
+    /// The way the samples were taken on: its lanes, the current one, and where the lane
+    /// sequence's place stands against the odometer (`s - odometer`), with the car's
+    /// sideways grip.
+    key: Option<([usize; PLAN_LANES + 2], usize, usize, f32)>,
+    offset: f32,
+    /// (odometer place as a multiple of 2.5 m, its bend speed if it is a bend)
+    samples: std::collections::VecDeque<(i64, Option<f32>)>,
 }
 
 /// What a car keeps its distance to: the gap from its front bumper to the thing (m), how
@@ -2094,7 +2116,7 @@ impl LaneSeq {
 
 impl AiState {
     pub fn new(lane: usize, s: f32, seed: u64) -> AiState {
-        AiState { traffic_pool: None, veh_type: 0, lane, s, speed: 0.0, max_speed_kmh: 50.0, accel: 1.2, decel: 3.0, length: 5.0, rng: seed | 1, blinker: 0, braking: false, odometer: 0.0, planned_next: None, ahead: Vec::new(), change_plan: Vec::new(), prev_lane: None, yield_time: 0.0, route: Vec::new(), route_index: 0, change: None, change_cooldown: 5.0, lateral: 0.0, lateral_target: 0.0, lateral_ramp: (0.0, 0.0, 0.0, 1.0), turn_wish: 0, signal: 0, signal_time: 0.0, lat_accel: 2.8, bend_decel: 2.0, accel_style: 1.0, max_brake: MAX_BRAKE, desire: 1.0, headway: 1.4, min_gap: 2.0, accept_gap: 4.0, reaction: 0.7, front: 2.5, rear: 2.5, held: false, start_timer: 0.0, acc: 0.0, accel_cap: None }
+        AiState { traffic_pool: None, veh_type: 0, lane, s, speed: 0.0, max_speed_kmh: 50.0, accel: 1.2, decel: 3.0, length: 5.0, rng: seed | 1, blinker: 0, braking: false, odometer: 0.0, planned_next: None, ahead: Vec::new(), change_plan: Vec::new(), prev_lane: None, yield_time: 0.0, route: Vec::new(), route_index: 0, change: None, change_cooldown: 5.0, lateral: 0.0, lateral_target: 0.0, lateral_ramp: (0.0, 0.0, 0.0, 1.0), turn_wish: 0, signal: 0, signal_time: 0.0, lat_accel: 2.8, bend_decel: 2.0, accel_style: 1.0, max_brake: MAX_BRAKE, desire: 1.0, headway: 1.4, min_gap: 2.0, accept_gap: 4.0, reaction: 0.7, front: 2.5, rear: 2.5, held: false, start_timer: 0.0, acc: 0.0, accel_cap: None, bend: BendCache::default(), last_bend: f32::MAX }
     }
 
     fn rand(&mut self) -> u64 {
@@ -2387,6 +2409,65 @@ impl AiState {
         best
     }
 
+    /// `curve_speed`, with the samples that lie at the same places as the frame before
+    /// taken from `bend` (the same values: a sample's bend speed depends on nothing but its
+    /// place on the way). While the car changes lanes the way is two, sampled afresh.
+    pub fn curve_speed_cached(&mut self, net: &Network) -> f32 {
+        if self.change.is_some() {
+            return self.curve_speed(net);
+        }
+        let q = self.seq();
+        let key = (q.lanes, q.n, q.cur, self.lat_accel);
+        let offset = self.s - self.odometer;
+        let mut cache = std::mem::take(&mut self.bend);
+        if cache.key != Some(key) || (cache.offset - offset).abs() > 1e-3 {
+            cache.key = Some(key);
+            cache.offset = offset;
+            cache.samples.clear();
+        }
+        let reach = (self.speed * self.speed / 4.0 + 12.0).min(90.0);
+        let s = self.s;
+        let sample = |d: f32| -> Option<f32> {
+            let (i, u) = q.locate(net, s, d);
+            let turn = wrap_deg(q.point(net, s, d + 3.0).1 - q.point(net, s, d - 3.0).1).abs().to_radians() / 6.0;
+            let k = net.lanes[q.lanes[i]].curvature_at(u).abs().max(turn);
+            (k > 1e-4).then(|| (self.lat_accel / k).sqrt().max(2.5))
+        };
+        let from_v = |v: f32, d: f32| (v * v + 2.0 * self.bend_decel * (d - 2.5).max(0.0)).sqrt();
+        // the place under the car, then every 2.5 m of the odometer from the next one on
+        // (as `curve_speed_on` takes them)
+        let mut best = sample(0.0).map(|v| from_v(v, 0.0)).unwrap_or(f32::MAX);
+        let first = 2.5 - self.odometer.rem_euclid(2.5);
+        let m0 = ((self.odometer + first) / 2.5).round() as i64;
+        while cache.samples.front().is_some_and(|x| x.0 < m0) {
+            cache.samples.pop_front();
+        }
+        if cache.samples.front().is_some_and(|x| x.0 != m0) {
+            cache.samples.clear();
+        }
+        let mut k = 0usize;
+        loop {
+            let d = first + 2.5 * k as f32;
+            if d > reach {
+                break;
+            }
+            let v = match cache.samples.get(k) {
+                Some(&(_, v)) => v,
+                None => {
+                    let v = sample(d);
+                    cache.samples.push_back((m0 + k as i64, v));
+                    v
+                }
+            };
+            if let Some(v) = v {
+                best = best.min(from_v(v, d));
+            }
+            k += 1;
+        }
+        self.bend = cache;
+        best
+    }
+
     fn curve_speed_on(&self, net: &Network, q: &LaneSeq, s: f32) -> f32 {
         let reach = (self.speed * self.speed / 4.0 + 12.0).min(90.0);
         let mut best = f32::MAX;
@@ -2477,6 +2558,11 @@ impl AiState {
     /// `lead` is the vehicle ahead, `stop` the distance from the car's origin to where it
     /// has to stop (a light, a junction it gives way at, a bus stop).
     pub fn desired_accel(&self, net: &Network, lead: Option<Lead>, stop: Option<f32>) -> f32 {
+        self.desired_accel_bend(net, lead, stop, self.curve_speed(net))
+    }
+
+    /// `desired_accel` with the bend speed ahead (`curve_speed`) already known.
+    fn desired_accel_bend(&self, net: &Network, lead: Option<Lead>, stop: Option<f32>, bend: f32) -> f32 {
         let Some(lane) = net.lanes.get(self.lane) else { return 0.0 };
         let (a, b) = ((self.accel * self.accel_style).max(0.1), self.decel.max(0.5));
         let v = self.speed;
@@ -2510,7 +2596,6 @@ impl AiState {
         let mut acc = a * (1.0 - (v / v0).powi(4)).max(-1.5 * b / a);
         // bends: follow the speed profile `curve_speed` lays out (it assumes 2 m/s² of
         // braking), blending in over the last metre per second above it
-        let bend = self.curve_speed(net);
         if bend < v0 && v > bend - 1.0 {
             let track = -self.bend_decel + (bend - v) / 0.6;
             let k = ((v - (bend - 1.0)) / 1.0).clamp(0.0, 1.0);
@@ -2564,7 +2649,9 @@ impl AiState {
         if net.lanes.get(self.lane).is_none() {
             return false;
         }
-        let mut acc = self.desired_accel(net, lead, stop);
+        let bend = self.curve_speed_cached(net);
+        self.last_bend = bend;
+        let mut acc = self.desired_accel_bend(net, lead, stop, bend);
         if let Some(cap) = self.accel_cap {
             acc = acc.min(cap);
         }
@@ -2729,6 +2816,30 @@ mod tests {
         assert!(!l.allows(0) && !l.allows(1));
         l.rule_bus = true;
         assert!(!l.allows(0) && l.allows(1) && l.allows(2) && !l.allows(3));
+    }
+
+    /// The bend speed with the samples kept from frame to frame is the one sampled afresh,
+    /// all the way into the bend and out, across the lane joints, at any frame rate.
+    #[test]
+    fn kept_bend_samples_give_the_same_bend_speed() {
+        let net = junction();
+        for dt in [1.0 / 30.0, 1.0 / 144.0, 0.11] {
+            let mut car = AiState::new(0, 3.3, 7);
+            car.speed = 13.9;
+            car.plan_next(&net);
+            let mut steps = 0;
+            while car.lane < 2 || car.s < 40.0 {
+                let fresh = car.curve_speed(&net);
+                let kept = car.curve_speed_cached(&net);
+                assert!((fresh - kept).abs() <= 1e-3 * fresh.max(1.0), "dt {dt} lane {} s {:.2}: fresh {fresh} kept {kept}", car.lane, car.s);
+                if !car.advance(&net, dt, None, None) {
+                    break;
+                }
+                steps += 1;
+                assert!(steps < 20_000);
+            }
+            assert!(steps > 10);
+        }
     }
 
     #[test]

@@ -144,12 +144,19 @@ pub fn vehicle_lights(
     let first_corona = coronas.len();
     // (bulbs: their light goes with the vehicle's voltage)
     let volts = if halogen() { bulb_voltage(v) } else { 1.0 };
-    coronas.extend(crate::scene::model_lights_faded(&ty.model, &mesh_xf, v.position, &value_of, &v.light_fade));
+    // (an AI vehicle that is not drawn - out of the view and farther than the mirrors and
+    // the shadows reach, `VehicleInstance::ai_visuals` - shows no lamps either: they lie
+    // in its body, out of the picture with it. Its headlights' beams below still light
+    // what they fall on.)
+    let drawn = v.ai_visuals;
+    if drawn {
+        coronas.extend(crate::scene::model_lights_faded(&ty.model, &mesh_xf, v.position, &value_of, &v.light_fade));
+    }
     // An articulated vehicle is one visual bus, but its rear section has its own
     // `[light_enh_2]`/corona declarations and animated meshes.  The old collector only
     // visited the leading section, which made rear lamps, destination lights and section-
     // local headlights appear dead even though the coupled part was rendered correctly.
-    for t in &v.trailers {
+    for t in v.trailers.iter().filter(|_| drawn) {
         let part_mesh_xf = |def_index: usize| -> glam::Mat4 {
             match t.ty.meshes.iter().position(|m| m.def_index == def_index) {
                 Some(i) => t.mesh_local_transform(i),
