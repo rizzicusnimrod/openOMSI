@@ -529,7 +529,8 @@ struct MaterialUniform {
     /// rgb: the D3D material's ambient colour, which takes the ambient light (C); w: 1 for
     /// a texture that is a season's snow picture (no snow laid over it), 2 the map's water
     ambient: [f32; 4],
-    /// x: 1 retroreflective sheeting (`MaterialExtra::retroreflective`)
+    /// x: 1 retroreflective sheeting (`MaterialExtra::retroreflective`); y: 1 painted
+    /// magenta for `OMSI_DEBUG_RETRO` (see `debug_retro`)
     retro: [f32; 4],
 }
 
@@ -1044,8 +1045,19 @@ pub struct MaterialExtra {
     pub metal_ok: bool,
     /// Retroreflective sheeting - a traffic sign's face, a delineator post's reflector:
     /// under a headlamp it shines back towards the lamp as no paint does, and a driver
-    /// behind the lamps sees it blaze out of the dark (the enhanced picture).
+    /// behind the lamps sees it blaze out of the dark (the enhanced picture). Only the white
+    /// and coloured texels are (shader.wgsl `retro_sheeting`): the grey of a sign's back or
+    /// pole in the same texture stays paint; where it has a night map, the texels that map
+    /// lights. That night map is not drawn there - it is the stand-in for the reflection the
+    /// vanilla picture has not got (one a variable switches is, a lamp's).
     pub retroreflective: bool,
+}
+
+/// `OMSI_DEBUG_RETRO=1`: retroreflective sheeting is drawn magenta, as far as it shines
+/// back, whatever lights it (both pictures).
+fn debug_retro() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| omsi_cfg::env::var_os("OMSI_DEBUG_RETRO").is_some_and(|v| v != "0"))
 }
 
 /// The textures a material's bind group samples.
@@ -5926,7 +5938,12 @@ impl Renderer {
                 let a = extra.ambient.unwrap_or([color[0], color[1], color[2]]);
                 [a[0], a[1], a[2], if extra.water { 2.0 } else { snow_texture_flag(scene, texture) }]
             },
-            retro: [if extra.retroreflective { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            retro: [
+                if extra.retroreflective { 1.0 } else { 0.0 },
+                if extra.retroreflective && debug_retro() { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+            ],
         };
         let slot = |t: Option<TextureId>| {
             t.and_then(|t| scene.textures.get(t).map(|g| (t, g.gen)))

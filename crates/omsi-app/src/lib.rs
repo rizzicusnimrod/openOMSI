@@ -47,6 +47,7 @@ mod keys;
 mod lan;
 mod lan_world;
 mod lights;
+mod retro;
 mod launcher;
 mod menu;
 mod mirror_hud;

@@ -89,7 +89,7 @@ jobs:
             echo "You need **OMSI 2** (Steam) installed: openOMSI uses its maps, buses and sounds."
             echo
             echo "1. Download \`openOMSI-$VERSION-windows-x64.zip\`, unzip it into a folder of its own and start \`openomsi.exe\`."
-            echo "2. Optional: \`TH_Wald-traffic-addon.zip\` gives the Thüringer Wald map realistic traffic by the hour, weekday and school holidays (1995-2003). Unzip it into the OMSI 2 folder (\`...\\steamapps\\common\\OMSI 2\`); it replaces \`maps\\TH_Wald\\unsched_trafficdens.txt\` and \`Holidays*.txt\`, so back those up first if you want to go back."
+            echo "2. Optional: \`TH_Wald-traffic-addon.zip\` gives the Thüringer Wald map realistic traffic by the hour, weekday and school holidays (1995-2003). Unzip it into the OMSI 2 folder (\`...\\steamapps\\common\\OMSI 2\`); it replaces \`maps\\TH_Wald\\unsched_trafficdens.txt\` and \`Holidays*.txt\`, so back those up first if you want to go back. It also adds \`maps\\TH_Wald\\retroreflective.cfg\` (which signs shine back in the headlights)."
             echo "3. Optional: \`Budapest181-traffic-addon.zip\` gives the Budapest 181 map traffic by the hour, weekday and school holidays (the map itself keeps it the same day and night). Unzip it into the OMSI 2 folder; it adds \`maps\\Budapest 181\\unsched_trafficdens.txt\`."
             echo
             echo "This build does not update itself: check [the latest release]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/latest) for new versions. For multiplayer, everyone should run the same version."

@@ -13,6 +13,9 @@ OMSI 2 folder; it replaces these files in `maps\TH_Wald` (back them up first to 
   school-holiday curves use `[set_day_of_week]` 8, 16 and 24, which only this fork reads.
 - `Holidays.txt`, `Holidays_DEU.txt`, `Holidays_ENG.txt` - the map's holidays plus the public
   holidays of 1995-2003 and Thuringia's school holidays (from the KMK lists).
+- `retroreflective.cfg` (added, nothing replaced) - the map's own reflective-sign rules for
+  this fork's Enhanced graphics, after the global ones in `~/.openomsi/retroreflective.cfg`: the
+  company signs and the wooden direction posts are paint, not sheeting.
 
 ## Budapest 181
 

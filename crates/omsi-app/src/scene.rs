@@ -2827,6 +2827,7 @@ impl World {
         omsi_map::configure_grid(&global);
         crate::humans::LEFT_HAND.store(global.left_hand_traffic, std::sync::atomic::Ordering::Relaxed);
         crate::lights::set_halogen_map(&map_dir);
+        crate::retro::set_map(&map_dir);
         log::info!(
             "tile size {:.1} m ({})",
             omsi_map::tile_size(),
@@ -6272,7 +6273,7 @@ impl World {
                 let mut extra = material_extra(&slot_ov, env_mask, bump, specular);
                 extra.ambient = Some(ambient);
                 extra.no_map_lights = ot.sco.no_map_lighting;
-                extra.retroreflective = retroreflective_texture(&m.texture, &ot.sco.path);
+                extra.retroreflective = retroreflective_texture(&m.texture, &ot.sco);
                 if tex.is_some() {
                     let dirs_ref: Vec<&Path> = dirs.iter().map(|p| p.as_path()).collect();
                     let c = self.textures.cfg(&m.texture, &dirs_ref);
@@ -6300,6 +6301,9 @@ impl World {
                     Some((name, _)) => tex_of(gpu, scene, &name, &mut t),
                     None => None,
                 };
+                if extra.retroreflective {
+                    crate::retro::note(&ot.sco.path, &m.texture, night.is_some(), emissive);
+                }
                 let base = renderer.add_material_extra(
                     scene, tex, alpha, color, false, transmap, night, light, envmap, emissive, extra,
                 );
@@ -7344,8 +7348,8 @@ impl World {
                                 let mut extra = material_extra(&slot_ov, base.env_mask, base.bump, [0.0; 4]);
                                 extra.ambient = o3d_mats.get(slot).map(|m| d3d_material(m, slot_ov.iter().find_map(|o| o.allcolor), true).3);
                                 // (a direction sign's own text, on the sign's sheeting)
-                                extra.retroreflective = retroreflective_texture(name, &ot.sco.path)
-                                    || o3d_mats.get(slot).is_some_and(|m| retroreflective_texture(&m.texture, &ot.sco.path));
+                                extra.retroreflective = retroreflective_texture(name, &ot.sco)
+                                    || o3d_mats.get(slot).is_some_and(|m| retroreflective_texture(&m.texture, &ot.sco));
                                 renderer.address_next.set(tex_addressing(slot_ov.iter().copied()));
                                 let mat = renderer.add_material_extra(scene, Some(tex), alpha, color, unlit, transmap, night, light, env, emissive, extra);
                                 let mat = gpu.material(renderer, scene, mat);
@@ -10369,48 +10373,16 @@ fn d3d_material(
 
 /// Whether an object's texture is retroreflective sheeting - a traffic sign's face, a town
 /// or direction sign, a delineator post with its reflector, a chevron board (see
-/// `MaterialExtra::retroreflective`). Nothing in OMSI's files says so; their names do, in
-/// the stock and the common maps alike (`Zeichen_*`, `Schilder`, `Ortsschilder`,
-/// `Richtungsschilder`, `Leitpfosten`, `Reflektor`, `sign_*`, and every texture of a
-/// `Verkehrszeichen` folder but its traffic lights and poles) - while a shop's sign, a
-/// notice board, a price tag or paint on the road are left as paint.
-pub(crate) fn retroreflective_texture(texture: &str, object: &Path) -> bool {
-    const SHEETING: [&str; 20] = [
-        "zeichen", "schilder", "ortsschild", "ortstafel", "ortseingang", "ortsausgang", "richtungs", "wegweis",
-        "kilometertafel", "leitpf", "reflektor", "reflector", "bake", "pfeil", "andreaskreuz", "sign_",
-        "roadsign", "trafficsign", "hst-schild", "haltestellenschild",
-    ];
-    const PAINT: [&str; 11] = ["werbung", "reklame", "preis", "infotafel", "anschlag", "markier", "design", "firm", "plakat", "ampel", "mast"];
-    let name = texture.replace('\\', "/");
-    let stem = Path::new(&name).file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    if stem.is_empty() || PAINT.iter().any(|p| stem.contains(p)) {
-        return false;
-    }
-    let sign_folder = object.components().any(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase().contains("verkehrszeichen"));
-    sign_folder || SHEETING.iter().any(|p| stem.contains(p))
-}
-
-#[cfg(test)]
-mod retroreflective_tests {
-    use super::retroreflective_texture as retro;
-    use std::path::Path;
-
-    /// TH_Wald's and the stock objects' signs and posts shine back, their shop signs, notice
-    /// boards, road paint and the traffic lights in the signs' folder do not.
-    #[test]
-    fn signs_and_delineators_are_sheeting_shop_signs_are_paint() {
-        let th = Path::new("Sceneryobjects/TH_Wald_Objekte/Tristan98/Leitpfosten.sco");
-        for t in ["Ortsschilder.dds", "Richtungsschilder.dds", "Schilder.dds", "Kilometertafel.dds", "Leitpfosten.dds", "Leitpf_#low.dds", "Reflektor.dds", "texture\\Pfeil_RL.dds"] {
-            assert!(retro(t, th), "{t}");
-        }
-        for t in ["Edeka_SEH_Schild.dds", "Konsum_Schild.dds", "Infotafel01.dds", "Marktstand_Preisschilder.dds", "Markierungspfeile.dds", "Anschlagtafel_Kirche.dds", "Asphalt.dds", ""] {
-            assert!(!retro(t, th), "{t}");
-        }
-        let vz = Path::new("Sceneryobjects/Verkehrszeichen_MC/Zeichen_206.sco");
-        assert!(retro("Zeichen_01.bmp", vz) && retro("bue_1.bmp", vz) && retro("sign_lanearrows_1.bmp", vz));
-        assert!(!retro("Ampel1.bmp", vz) && !retro("Mast_1.bmp", vz));
-        assert!(!retro("bue_1.bmp", th));
-    }
+/// `MaterialExtra::retroreflective`), by the rules of `retroreflective.cfg` (`crate::retro`).
+/// Never a route arrow (`[helparrow]`): it is the game's guide, lit by itself to be seen at
+/// night (TH_Wald's `Hilfspfeile`, named `Pfeil_*` as the chevron boards are); nor what is
+/// laid on the ground (`[rendertype] surface` / `on_surface`): paint on the road, such as
+/// the "BUS" and "30" in TH_Wald's signs' folder - the road's own reflection takes it.
+pub(crate) fn retroreflective_texture(texture: &str, object: &omsi_scenery::sco::SceneryObject) -> bool {
+    use omsi_scenery::sco::RenderType;
+    !object.is_help_arrow
+        && !matches!(object.render_type, RenderType::Surface | RenderType::OnSurface)
+        && crate::retro::sheeting(texture, &object.path)
 }
 
 /// The material manager's depth and reflection settings of a slot's `[matl]` commands

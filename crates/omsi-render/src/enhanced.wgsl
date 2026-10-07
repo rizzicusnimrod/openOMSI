@@ -211,9 +211,23 @@ fn lamp_shadow_at(li: u32, p: vec3<f32>, n: vec3<f32>, thin: bool) -> f32 {
 // (see `lamp_light`; a white face's diffuse light facing the lamp is 1/PI of it).
 const SIGN_RETRO: f32 = 14.0;
 
+// A delineator's reflector (the parts its night map lights, see `retro_sheeting`) against
+// a sign's sheeting: its prisms send back several times as much (a reflex reflector's
+// some 300 cd/lx/m2 against the glass beads' 70) - and they keep a broad skirt of it,
+// a few degrees off the way back to the lamp (`REFLECTOR_SKIRT`, the width as 1 - cos):
+// a bus driver sits a metre and a half over the headlamps and beside them, 2.5 to 3.5
+// degrees off the lamps from a post 35 m ahead, where the narrow lobe has gone (5 % and
+// less). With that lobe alone the posts beside the road stayed dull from the cab;
+// with the skirt their reflectors shine there as well, as they do from a lorry's.
+const REFLECTOR_RETRO: f32 = 4.0;
+const REFLECTOR_SKIRT: f32 = 3.0;
+const REFLECTOR_SKIRT_W: f32 = 0.0025;
+
 // The point and spot lights of the pixel's grid cell: diffuse and specular.
 // `thin`: foliage, lit from whichever side the lamp is on (see the sun below).
-fn lamp_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, sf: Surface, thin: bool, shadows: bool) -> vec3<f32> {
+// `sheeting`: how far the texel is retroreflective sheeting (`retro_sheeting`, 0 for
+// paint); `reflector`: how far it is a delineator's reflector instead (`REFLECTOR_RETRO`).
+fn lamp_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, sf: Surface, thin: bool, shadows: bool, sheeting: f32, reflector: f32) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     // the lamps' light on the ground round the point (a horizontal surface's, unshadowed:
     // the ground the point looks down at is wider than its own shadow)
@@ -306,10 +320,14 @@ fn lamp_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, sf: Surface, thin: bool,
         // degree or two wide. A car's driver, close above the lamps, sees a sign blaze from
         // far off; a bus driver, higher over them, a little less and only further away; and
         // anyone off to the side sees the paint. Turned away from the lamp it gives less.
-        if (material.retro.x > 0.5 && l.extra.z != 0.0 && nl > 0.0) {
-            let ks = exp(-(1.0 - dot(ld, v)) / 0.00034);
-            if (ks > 0.002) {
-                sum = sum + irr * sf.albedo * SIGN_RETRO * ks * sqrt(nl);
+        // (Only the sheeting: the grey back of a sign and its pole are paint, and lit from
+        // behind they stay as dull as they are by day.)
+        if ((sheeting > 0.0 || reflector > 0.0) && l.extra.z != 0.0 && nl > 0.0) {
+            let c = 1.0 - dot(ld, v);
+            let ks = exp(-c / 0.00034);
+            let k = sheeting * ks + reflector * (REFLECTOR_RETRO * ks + REFLECTOR_SKIRT * exp(-c / REFLECTOR_SKIRT_W));
+            if (k > 0.002) {
+                sum = sum + irr * sf.albedo * SIGN_RETRO * k * sqrt(nl);
             }
         }
         if (thin) {
@@ -1000,7 +1018,18 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
     // the tile light map on top)
     // (no shadows inside the player's own vehicle, whose cab the depth hardly shows, nor in
     // the probe's capture)
-    let lamps = lamp_light(in.world, n, v, sf, thin, !capture) * select(1.0, 0.0, material.params.y > 0.2 && material.params.y < 0.3);
+    // (retroreflective sheeting: as far as the texel is the sheeting, see `retro_sheeting`)
+    let retro = material.retro.x > 0.5;
+    var sheeting = 0.0;
+    // (where a night map marks it, the sheeting is a reflector's: see `REFLECTOR_RETRO`)
+    var reflector = 0.0;
+    if (retro) {
+        sheeting = retro_sheeting(tex.rgb * material.color.rgb, buv);
+        if (material.extra.w > 0.5 && material.extra.w < 1.5) {
+            reflector = sheeting;
+        }
+    }
+    let lamps = lamp_light(in.world, n, v, sf, thin, !capture, sheeting - reflector, reflector) * select(1.0, 0.0, material.params.y > 0.2 && material.params.y < 0.3);
     // [interiorlight]: OMSI adds its lamps' light to the lit meshes whatever the daylight,
     // so a switched-on saloon is brighter by day as well and only stands out more at night.
     // Taken as a lamp against the daylight exposure it vanished by day altogether.
@@ -1016,7 +1045,12 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
     // path's: here the map's lamps light them, tinted from that map, as they light every
     // other surface - added on top it lit the roads twice, with a hard edge where a road
     // met a square that is an object)
-    if (material.extra.w > 0.5) {
+    // (Not on retroreflective sheeting, a night map that comes on with the dark: it is the
+    // vanilla picture's stand-in for the reflection - TH_Wald's delineators' and clip
+    // reflectors' `night` copies - and on top of the real one it lit them in the dark with
+    // no lamp on them. One a variable switches is a lamp's: the warning beacon's flashing
+    // lens, on its striped board's texture.)
+    if (material.extra.w > 0.5 && !(retro && material.extra.w < 1.5)) {
         let nuv = select(buv, vec2<f32>(in.uv.x, 1.0 - in.uv.y), terrain);
         let switched = material.extra.w > 1.5;
         let night = select(camera.sun_color.w, 1.0, switched);
@@ -1073,6 +1107,12 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
         emit = emit + tex.rgb * 0.35 * max(enh.exposure.z * 2.0, 0.8);
     }
     rgb = rgb + emit;
+    if (material.retro.y > 0.5) {
+        // OMSI_DEBUG_RETRO: the sheeting magenta, as far as it shines back, at a display's
+        // brightness whatever lights it (and through no fog)
+        let shown = rgb * aer.a + aer.rgb * pre;
+        return vec4<f32>(mix(shown, display_level(vec3<f32>(1.0, 0.0, 1.0)) * enh.exposure.y, sheeting), alpha);
+    }
     if (enh.debug.x > 0.5) {
         // OMSI_DEBUG_ENHANCED: one term alone, as it lands on the screen
         let dm = i32(enh.debug.x);

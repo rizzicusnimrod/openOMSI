@@ -344,7 +344,8 @@ struct MaterialParams {
     flags: vec4<f32>,
     // rgb: the D3D material's ambient colour, which takes the ambient light (C)
     ambient: vec4<f32>,
-    // x: retroreflective sheeting (a traffic sign's face, a delineator's reflector)
+    // x: retroreflective sheeting (a traffic sign's face, a delineator's reflector), as
+    // far as `retro_sheeting` takes a texel for it; y: drawn magenta (OMSI_DEBUG_RETRO)
     retro: vec4<f32>,
 };
 @group(1) @binding(2) var<uniform> material: MaterialParams;
@@ -373,6 +374,34 @@ fn sample_nightmap(uv: vec2<f32>) -> vec4<f32> {
         return textureSample(t_night, s_tile, uv);
     }
     return textureSample(t_night, s_diffuse, uv);
+}
+
+// How far a texel of a retroreflective material (`material.retro.x`) is the sheeting
+// itself. A sign's texture holds its grey back and its galvanised pole as well, a
+// delineator's its concrete foot: paint, which a car's lamps coming from behind must not
+// light up. Sheeting is white - a sign's ground: 0.7 to 0.9 in the picture's sRGB at its
+// least channel, a reflector 0.58 - or coloured (red, blue, yellow, green, a tourist
+// sign's brown: their chroma some 0.8 of the brightest channel, a wooden post's 0.4); the
+// backs and the poles are a neutral grey of 0.35 to 0.5 (TH_Wald's Schilder.dds 0.36, its
+// pole 0.46, the stock Zeichen_01's back 0.42 and Mast_1 0.48). Where the texture has a
+// night map that comes on with the dark (not one a variable switches: a warning lamp's
+// lens), that says it better: it is the vanilla picture's stand-in for the reflection,
+// drawn by the object's author over exactly the parts that shine back - TH_Wald's
+// delineators have one for their reflectors alone, the white plastic of the post is paint.
+// `c`: the texel's linear colour; `buv`: the night map's coordinates.
+fn retro_sheeting(c: vec3<f32>, buv: vec2<f32>) -> f32 {
+    if (material.extra.w > 0.5 && material.extra.w < 1.5) {
+        let nm = sample_nightmap(buv).rgb;
+        // (in proportion to its light, not cut off below some level: a delineator's
+        // reflector far off is a few texels of a small mip, averaged with the black round
+        // it, and it is still there as a part of the pixel)
+        return clamp((max(nm.r, max(nm.g, nm.b)) - 0.004) / 0.05, 0.0, 1.0);
+    }
+    let hi = max(c.r, max(c.g, c.b));
+    let lo = min(c.r, min(c.g, c.b));
+    let white = smoothstep(0.24, 0.32, lo);
+    let colour = smoothstep(0.45, 0.65, (hi - lo) / max(hi, 1e-4));
+    return max(white, colour);
 }
 
 // The reflection mask of a [matl_envmap] material: the alpha of its [matl_envmap_mask]
@@ -1875,5 +1904,9 @@ fn shade_vanilla(in: FsIn, puddle_weight: ptr<function, f32>, eye: vec3<f32>) ->
         a = 1.0;
     }
     a = a * in.params.x;
+    if (material.retro.y > 0.5) {
+        // OMSI_DEBUG_RETRO: the sheeting magenta, as far as it shines back
+        rgb = mix(rgb, vec3<f32>(1.0, 0.0, 1.0), retro_sheeting(tex.rgb * material.color.rgb, buv));
+    }
     return vec4<f32>(rgb, a);
 }
