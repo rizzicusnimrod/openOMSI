@@ -39,7 +39,12 @@ fn headlamp(t: vec3<f32>, dir: vec3<f32>, mode: f32) -> f32 {
     // (the beam's body lies under the flat line; the wedge the kerb side's cut-off rises
     // over it gets some half of the hot spot)
     let cut = -0.57 + clamp(0.268 * h, 0.0, 1.6);
-    let edge = 0.015 + 0.985 * smoothstep(-soft, soft, cut - v);
+    // (over the cut-off the glare a lens lets through - ECE's zone III and its points a few
+    // degrees up, some 1.5 % of the hot spot - fading out a few degrees higher: kept at
+    // every height, it stood over each low beam as a sheet along the road, and the rain or
+    // fog lit it into a column of light over the lamp seen from behind)
+    let glare = 0.015 / (1.0 + pow(max(v - cut, 0.0) / 4.0, 2.0));
+    let edge = glare + 0.985 * smoothstep(-soft, soft, cut - v);
     let under = -0.57 - v;
     let vert = mix(0.45, 1.0, smoothstep(-0.35, 0.0, under)) / (1.0 + pow(max(under - 0.6, 0.0) / 1.4, 1.6));
     // (across: the hot spot's core, and a flood that widens the nearer the road - the
@@ -73,6 +78,26 @@ fn headlamp(t: vec3<f32>, dir: vec3<f32>, mode: f32) -> f32 {
 // wall of fog in front of the driver. Two lobes, 0.9 of g 0.85 and 0.1 of g -0.5.
 fn fog_phase(c: f32) -> f32 {
     return 0.9 * hg_phase(c, 0.85) + 0.1 * hg_phase(c, -0.5);
+}
+
+// The light of a headlamp the fog has scattered once already and that goes on: in fog as
+// thick as a ground fog's (some 75 m of visibility, an optical depth of one over 25 m) most
+// of a beam's light has been knocked off its way within the reach of the lamp, and the
+// droplets' forward lobe sends it on a few tens of degrees about the beam. A single
+// scattering alone left the fog over the beam black, its top a flat ceiling of light seen
+// from the cab. The scattered light as a cos^6 lobe about the beam's axis, (6 + 1) / 2pi of
+// the beam's whole light - its hot spot's intensity times the solid angle it fills: 0.036
+// sr of a low beam, 0.075 of a full beam (the profile `headlamp` integrated).
+const HEADLAMP_SPREAD_LOW: f32 = 0.036 * 7.0 / 6.2831853;
+const HEADLAMP_SPREAD_FULL: f32 = 0.075 * 7.0 / 6.2831853;
+
+// A lamp's light at r^2 = `r2` from it windowed to nothing at its `range`, as `lamp_light`
+// windows it on the surfaces. Cut off at the range sphere instead, the lit mist ended in a
+// hard edge: a row of street lamps of one height and reach a flat ceiling of light over the
+// street in the fog.
+fn fog_window(r2: f32, range: f32) -> f32 {
+    let q = min(r2 / (range * range), 1.0);
+    return (1.0 - q * q) * (1.0 - q * q);
 }
 const AIRLIGHT_CELLS: u32 = 16u;
 fn lamp_airlight(c: vec3<f32>, d: vec3<f32>, start: f32, len: f32, jitter: f32) -> vec3<f32> {
@@ -140,6 +165,15 @@ fn lamp_airlight(c: vec3<f32>, d: vec3<f32>, start: f32, len: f32, jitter: f32) 
                 }
                 var acc = 0.0;
                 var half = 0.0;
+                // a headlamp's light the fog has scattered on before (`HEADLAMP_SPREAD`): its
+                // share where the ray passes the lamp nearest, given back against the
+                // extinction from the lamp that `atten` takes off the whole beam below
+                var spread = 0.0;
+                if (l.extra.z != 0.0) {
+                    let xn = c + d * clamp(t0, start, end);
+                    let sn = sigma0 * exp(-enh.fog.y * max(xn.z - enh.fog.z, 0.0));
+                    spread = (exp(min(sn * distance(xn, l.pos.xyz), 4.0)) - 1.0) * select(HEADLAMP_SPREAD_LOW, HEADLAMP_SPREAD_FULL, l.extra.z < 0.0);
+                }
                 if (l.extra.z != 0.0 || l.dir.w > -1.5) {
                     // a beam (a headlamp, a spot): lit only where its cone or cut-off lets
                     // it - a sliver of the angles the lamp is seen under, which the nodes
@@ -150,14 +184,18 @@ fn lamp_airlight(c: vec3<f32>, d: vec3<f32>, start: f32, len: f32, jitter: f32) 
                         let tq = ta + (f32(q) + jitter) * dt;
                         let to = l.pos.xyz - (c + d * tq);
                         let r2 = max(dot(to, to), hh * hh);
+                        // (windowed to nothing at the reach, as on the surfaces: see `fog_window`)
+                        let win = fog_window(dot(to, to), range);
                         let ld = to * inverseSqrt(max(dot(to, to), 1e-6));
                         var beam = 0.0;
                         if (l.extra.z != 0.0) {
-                            beam = headlamp(-ld, l.dir.xyz, l.extra.z);
+                            let ax = max(dot(-ld, l.dir.xyz), 0.0);
+                            let ax2 = ax * ax;
+                            beam = headlamp(-ld, l.dir.xyz, l.extra.z) + spread * ax2 * ax2 * ax2;
                         } else {
                             beam = smoothstep(l.dir.w, l.extra.x, dot(-ld, l.dir.xyz));
                         }
-                        acc = acc + beam * fog_phase(dot(ld, d)) * hh * dt / r2;
+                        acc = acc + beam * win * fog_phase(dot(ld, d)) * hh * dt / r2;
                     }
                     half = 1.0;
                 } else {
@@ -169,10 +207,10 @@ fn lamp_airlight(c: vec3<f32>, d: vec3<f32>, start: f32, len: f32, jitter: f32) 
                         let phi = mid + half * gx[q];
                         let tq = t0 + hh * tan(phi);
                         let ld = normalize(l.pos.xyz - (c + d * tq));
-                        var beam = 1.0;
+                        var beam = fog_window(h * h + (tq - t0) * (tq - t0), range);
                         if (l.dir.z < -0.5) {
                             // (a lamp in a housing: see `lamp_light`)
-                            beam = 0.05 + 0.95 * smoothstep(-0.1, 0.3, ld.z);
+                            beam = beam * (0.05 + 0.95 * smoothstep(-0.1, 0.3, ld.z));
                         }
                         acc = acc + gw[q] * beam * fog_phase(-sin(phi));
                     }

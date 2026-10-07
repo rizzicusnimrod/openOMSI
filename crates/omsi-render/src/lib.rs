@@ -11970,7 +11970,8 @@ fn headlamp_profile(t: Vec3, dir: Vec3, mode: f32) -> f32 {
         return 3.0 * core + 0.8 * flood;
     }
     let cut = -0.57 + (0.268 * h).clamp(0.0, 1.6);
-    let edge = 0.015 + 0.985 * atmosphere::smoothstep(-soft, soft, cut - v);
+    let glare = 0.015 / (1.0 + ((v - cut).max(0.0) / 4.0).powi(2));
+    let edge = glare + 0.985 * atmosphere::smoothstep(-soft, soft, cut - v);
     let under = -0.57 - v;
     let vert = (0.45 + 0.55 * atmosphere::smoothstep(-0.35, 0.0, under)) / (1.0 + ((under - 0.6).max(0.0) / 1.4).powf(1.6));
     let hk = (h - 1.5) / 7.0;
@@ -13501,6 +13502,11 @@ mod tests {
         assert!(headlamp_profile(at(6.0, -0.27), level, 1.0) > 0.3);
         assert!(headlamp_profile(at(3.0, 3.0), level, 1.0) < 0.02);
         assert!(headlamp_profile(at(0.0, -8.0), level, 1.0) < 0.2 * hot);
+        // over the cut-off a lens's glare near the horizon, none up in the sky (a column of
+        // light over the lamp in the rain)
+        assert!(headlamp_profile(at(-4.0, 1.0), level, 1.0) > 0.002);
+        assert!(headlamp_profile(at(0.0, 80.0), level, 1.0) < 1e-4);
+        assert!(headlamp_profile(at(10.0, 30.0), level, 1.0) < 1e-3);
         assert!(headlamp_profile(at(6.0, -1.0), level, 1.0) > headlamp_profile(at(-6.0, -1.0), level, 1.0));
         // left-hand traffic: the same beam mirrored
         let r = headlamp_profile(at(6.0, -0.27), level, 1.0);
