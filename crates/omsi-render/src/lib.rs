@@ -7801,7 +7801,10 @@ impl Renderer {
                 continue;
             }
             let p = (l.position - ro).as_vec3();
-            let (lo, hi) = light_extent(l, p);
+            // (a street lamp reaches further in the enhanced picture: `street_lamp_reach`)
+            let street = enhanced && l.housed && l.direction.length_squared() < 1e-6;
+            let reach = if street { street_lamp_reach(l) } else { l.radius };
+            let (lo, hi) = light_extent(&PointLight { radius: reach, ..*l }, p);
             let x0 = ((lo.x - origin[0]) / LIGHT_CELL).floor();
             let x1 = ((hi.x - origin[0]) / LIGHT_CELL).floor();
             let y0 = ((lo.y - origin[1]) / LIGHT_CELL).floor();
@@ -7810,12 +7813,18 @@ impl Renderer {
                 continue;
             }
             let idx = gpu_lights.len() as u32;
-            gpu_lights.push(gpu_light(l, p));
+            let mut g = gpu_light(l, p);
+            if street {
+                // (the enhanced range only: the vanilla shader keeps its own in `pos.w`)
+                g.extra[3] = reach;
+                g.color[3] *= street_lamp_gain();
+            }
+            gpu_lights.push(g);
             if lamp_shadows && enhanced && l.housed && l.intensity > 0.0 {
                 let d = (p - cam_rel).length();
-                if d < l.radius + LAMP_SHADOW_REACH {
+                if d < reach + LAMP_SHADOW_REACH {
                     let score = l.intensity * (l.color[0] + l.color[1] + l.color[2]) * l.core * l.core / (d * d + 25.0);
-                    chosen.push((score, LampShadow { index: idx, position: p, range: l.radius }));
+                    chosen.push((score, LampShadow { index: idx, position: p, range: reach }));
                 }
             }
             for y in (y0.max(0.0) as usize)..=(y1.min(side as f32 - 1.0) as usize) {
@@ -11540,6 +11549,29 @@ fn light_extent(l: &PointLight, p: Vec3) -> (glam::Vec2, glam::Vec2) {
     let lo = corners.iter().fold(glam::Vec2::splat(f32::MAX), |m, c| m.min(*c));
     let hi = corners.iter().fold(glam::Vec2::splat(f32::MIN), |m, c| m.max(*c));
     (lo, hi)
+}
+
+/// How far a street lamp's light reaches in the enhanced picture, in its `[maplight]`
+/// radii (its `core`): Omsi.exe's light map takes it out to 16 of them (`bake_light_map`,
+/// the light falling off as the square of the distance), the scene's lights stopped at six
+/// - TH_Wald's lamps (a 2 m core on a 5.8 m pole) lit a patch round their foot, and the
+/// street between two of them, and a whole road of Budapest's pavement lamps, stood black.
+/// Twelve keeps the pools meeting at half the cost of sixteen (a lamp-lit Budapest street at
+/// 2560x1440: 1.3 ms more of the GPU's frame, sixteen 2.3); `STREET_LAMP_MAX_REACH` holds a
+/// filling station's 15 m wash in.
+const STREET_LAMP_REACH: f32 = 12.0;
+const STREET_LAMP_MAX_REACH: f32 = 60.0;
+/// A street lamp's light against the `LAMP_E` its core gives: half as much again (a 2 m core
+/// 5.8 m up gave its street 4 to 5 lux, a village street's lamp some 10).
+const STREET_LAMP_GAIN: f32 = 1.5;
+
+/// A street lamp's reach in the enhanced picture (m): see `STREET_LAMP_REACH`.
+fn street_lamp_reach(l: &PointLight) -> f32 {
+    (l.core * STREET_LAMP_REACH).min(STREET_LAMP_MAX_REACH).max(l.radius)
+}
+
+fn street_lamp_gain() -> f32 {
+    STREET_LAMP_GAIN
 }
 
 /// A light as the shaders read it, at `p` relative to the render origin.

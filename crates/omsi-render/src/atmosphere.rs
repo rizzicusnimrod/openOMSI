@@ -840,6 +840,8 @@ fn ground_sh(l: Vec3) -> [Vec3; 9] {
 /// adaptation would show it - and a moonlit field at 0.03, four and a half. (A plain power
 /// law of the light left the lit street only 1.4 stops under that, and the metering lifted
 /// it most of the rest of the way: the night came out as a dim, even overcast day.)
+///
+/// The key is taken at `SCREEN_ADAPTATION` times the luminance: see there.
 pub fn exposure_for(e_ref: f32) -> f32 {
     let e = e_ref.max(1e-6);
     // two thirds of a stop over "mid grey in full light = 0.18" (the tone curve's contrast
@@ -848,10 +850,20 @@ pub fn exposure_for(e_ref: f32) -> f32 {
     1.6 * std::f32::consts::PI / e * adaptation_key(e) / adaptation_key(DAY_REFERENCE)
 }
 
+/// The picture is looked at on a screen in a lit room, by an eye adapted to the room and not
+/// to the night: shown as dark as a dark-adapted eye takes it (the key's 0.12 for a street
+/// under its lamps), a town at night was a black picture with lamps in it - TH_Wald's and
+/// Budapest's streets read as unlit. The key is taken for ten times the luminance: a
+/// lamp-lit street is shown a stop and a quarter under a full adaptation instead of two and
+/// a half, a moonlit field hardly brighter (4.2 stops under instead of 4.5), the dusk a
+/// quarter of a stop and the day not at all (the key of `DAY_REFERENCE` moves with it).
+const SCREEN_ADAPTATION: f32 = 10.0;
+
 /// The eye's key (see `exposure_for`) for the adapting irradiance `e` (1 = 10 000 lux): the
-/// luminance it adapts to is that of a mid grey surface in this light.
+/// luminance it adapts to is that of a mid grey surface in this light (`SCREEN_ADAPTATION`
+/// times it).
 fn adaptation_key(e: f32) -> f32 {
-    let l = e * 10_000.0 * 0.18 / std::f32::consts::PI;
+    let l = e * 10_000.0 * 0.18 / std::f32::consts::PI * SCREEN_ADAPTATION;
     1.03 - 2.0 / (2.0 + (l + 1.0).log10())
 }
 
@@ -928,11 +940,12 @@ mod tests {
         assert!(night.sky_horizontal.x > night.sky_horizontal.z, "{:?}", night.sky_horizontal);
         // exposure rises into the night, but not all the way
         assert!(night.exposure > low.exposure * 100.0);
-        // a white wall under the street lamps comes out clearly below white, one lit by
-        // the night sky alone dark but not black
+        // a white wall under the street lamps comes out bright but below white (for the eye
+        // on a screen, see `SCREEN_ADAPTATION`), one lit by the night sky alone dark but not
+        // black
         let lamp = 0.9 / std::f32::consts::PI * ARTIFICIAL * night.exposure;
         let sky = 0.3 / std::f32::consts::PI * lum(night.sky_horizontal) * night.exposure;
-        assert!((0.1..0.6).contains(&lamp) && (0.0004..0.03).contains(&sky), "lamp {lamp} sky {sky}");
+        assert!((0.3..0.85).contains(&lamp) && (0.0004..0.03).contains(&sky), "lamp {lamp} sky {sky}");
     }
 
     #[test]
