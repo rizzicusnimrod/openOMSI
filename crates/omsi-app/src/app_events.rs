@@ -2858,9 +2858,12 @@ impl ApplicationHandler for App {
                     }
                     self.frames += 1;
                     let profiling = omsi_cfg::env::var_os("OMSI_PROFILE").is_some();
+                    // (asked once: a failed reading is not tried again every frame)
+                    static CPU_MARK_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                     if profiling
                         && self.cpu_mark.is_none()
                         && self.started.elapsed().as_secs_f32() > 15.0
+                        && !CPU_MARK_ASKED.swap(true, std::sync::atomic::Ordering::Relaxed)
                     {
                         self.cpu_mark =
                             process_cpu_seconds().map(|c| (c, Instant::now(), self.total_frames));

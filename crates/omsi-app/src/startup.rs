@@ -2,7 +2,22 @@
 
 use super::*;
 
-/// CPU seconds this process has used so far (all threads), from `ps`.
+/// CPU seconds this process has used so far (all threads).
+#[cfg(windows)]
+pub(crate) fn process_cpu_seconds() -> Option<f64> {
+    // (kernel and user time, in 100 ns ticks: Windows has no `ps` that takes `-o`, and the
+    // one a Git or MSYS shell puts on the path failed - started again every frame while the
+    // profile ran, 15 ms of each frame)
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let (mut created, mut exited, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+    unsafe { GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) }.ok()?;
+    let secs = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 * 1e-7;
+    Some(secs(kernel) + secs(user))
+}
+
+/// (from `ps`)
+#[cfg(not(windows))]
 pub(crate) fn process_cpu_seconds() -> Option<f64> {
     let out = std::process::Command::new("ps")
         .args(["-o", "cputime=", "-p", &std::process::id().to_string()])
