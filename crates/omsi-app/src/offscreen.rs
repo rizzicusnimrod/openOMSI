@@ -2624,7 +2624,8 @@ pub(crate) fn run_offscreen(
             }
         }
     }
-    if let Some(p) = player_ref.as_ref() {
+    // (OMSI_NO_HUD=1: neither the clock and speed lines nor the navigator - a clean picture)
+    if let Some(p) = player_ref.as_ref().filter(|_| omsi_cfg::env::var_os("OMSI_NO_HUD").is_none()) {
         let mut hud = hud::Hud::new(&mut world.fonts.lock());
         let t = clock.time;
         let mut lines = vec![
