@@ -815,6 +815,47 @@ fn fs_shadow_test(in: FsIn) {
     }
 }
 
+// The multisampled prepass's depth of a cut-out (alpha-tested) draw, with the very coverage
+// its colour draw will have: the alpha `shade_enhanced` gives it - the texel's alpha drawn
+// together round 0.5 into the ramp of `ALPHA_TO_COVERAGE`, times the tint and the fade -
+// turned into samples by the same alpha-to-coverage. So every sample given the cut-out's
+// depth here gets its colour as well (none left showing the sky behind a leaf), and its
+// edge holds its depth (no leaf behind it, drawn later, paints over it). The colour draw
+// then leaves the depth alone (`PIPE_ALPHA_PREPASSED` in lib.rs), and what is behind the
+// cut-out is rejected before it is shaded - the hidden leaves of a tree's crown, half the
+// enhanced picture's main pass at TH_Wald's terminus.
+@fragment
+fn fs_cutout_core(in: FsIn) -> @location(0) vec4<f32> {
+    var duv = tex_address(in.uv);
+    if (material.extra.x > 0.5) {
+        duv = in.uv * material.extra.z;
+    }
+    var a = diffuse_border(textureSample(t_diffuse, s_diffuse, duv), duv).a;
+    if (material.params.z > 0.5) {
+        let tm = sample_transmap(tex_address(in.uv - in.params.zw));
+        a = select(1.0, tm.a, material.params.w > 0.5);
+    }
+    let mode = material.params.x;
+    if (mode > 0.5 && mode < 1.5) {
+        let aa = max(fwidth(a) * 0.5, 1.0 / 255.0);
+        if (a < 0.5 - aa) {
+            discard;
+        }
+        a = smoothstep(0.5 - aa, 0.5 + aa, a);
+    }
+    var alpha = a * material.color.a;
+    if (mode < 0.5) {
+        alpha = 1.0;
+    }
+    alpha = alpha * in.params.x;
+    // (an LED panel's mask is read at another mip level there, a vehicle's shadow blob is
+    // no surface: neither is laid here)
+    if (material.emissive.w < -1.5 || in.params2.w > 1.5) {
+        discard;
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, alpha);
+}
+
 // Roads with feathered alpha borders stay blended while their overlaps compose.
 // Once the surface phases are complete, only fully covered diffuse pixels occlude
 // later scenery. The transparent borders must not become invisible depth walls.

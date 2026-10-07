@@ -3040,7 +3040,7 @@ impl Renderer {
             for kind in 0..PIPE_KINDS {
                 let blend = matches!(kind, PIPE_BLEND | PIPE_BLEND_NO_WRITE | PIPE_TERRAIN_PAINT)
                     .then_some(wgpu::BlendState::ALPHA_BLENDING);
-                let depth_write = kind != PIPE_BLEND_NO_WRITE && kind != PIPE_TERRAIN_PAINT;
+                let depth_write = kind != PIPE_BLEND_NO_WRITE && kind != PIPE_TERRAIN_PAINT && kind != PIPE_ALPHA_PREPASSED;
                 for cull in [false, true] {
                     for surface in [false, true] {
                         out.push(make(
@@ -3050,7 +3050,7 @@ impl Renderer {
                             depth_write,
                             cull,
                             if surface { bias } else { 0 },
-                            kind == PIPE_ALPHA_TEST,
+                            kind == PIPE_ALPHA_TEST || kind == PIPE_ALPHA_PREPASSED,
                             kind == PIPE_TERRAIN_PAINT && fs == "fs_enhanced",
                             samples,
                         ));
@@ -3945,6 +3945,8 @@ impl Renderer {
         let make_prepass_samples = |kind: u8, cull: bool, samples: u32| {
             let fragment = match kind {
                 0 => "fs_shadow",
+                // (the multisampled one: a cut-out's coverage, see `PIPE_ALPHA_PREPASSED`)
+                1 if samples > 1 => "fs_cutout_core",
                 1 => "fs_shadow_test",
                 2 => "fs_transmap_depth",
                 _ => unreachable!(),
@@ -3966,7 +3968,8 @@ impl Renderer {
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
-                multisample: wgpu::MultisampleState { count: samples, ..Default::default() },
+                // (a cut-out's samples as its colour draw will cover them: `fs_cutout_core`)
+                multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: kind == 1 && samples > 1 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some(fragment),
@@ -9583,12 +9586,53 @@ impl Renderer {
             && !puddles_wanted
             && omsi_cfg::env::var_os("OMSI_FULL_PREPASS").is_none())
         .then_some(AO_PREPASS_REACH);
-        let prepass_job = || -> (Vec<u32>, Vec<Batch>) {
+        // A presurface in the picture (an excavation's floor and walls under the ground, and
+        // the invisible cover that cuts it out of the terrain): the ground must not be in the
+        // multisampled prepass, or its depth seals the hole before the cover is drawn. The
+        // objects over the ground can be - what stands in front of a pit hides it anyway - so
+        // the prepass keeps them (`objects` below), but for those within a presurface's reach:
+        // standing in the hole, under its cover (a swimming hall's inside, its stairs), they
+        // are hidden by the cover the main pass draws, and in the prepass they had hidden the
+        // hole behind them - nothing drawn there, the sky through the hall's windows. Skipped
+        // whole, one presurface 660 m away at TH_Wald's terminus left every wall, tree and car
+        // hidden behind another to the full enhanced shading: 5 ms of the frame at 2560x1440.
+        let presurfaces: Vec<(Vec3, f32)> = visible
+            .iter()
+            .filter(|&&(i, _, _)| scene.instances[i].presurface)
+            .map(|&(i, _, _)| Self::bounding_sphere(scene, &scene.instances[i]))
+            .collect();
+        let has_presurface = !presurfaces.is_empty();
+        // left out of the multisampled prepass (see above): the ground and what is near a
+        // presurface, while one is in the picture
+        let msaa_prepass_skips = |inst: &Instance| {
+            has_presurface
+                && (inst.presurface
+                    || (effective_render_phase(inst) as u8) <= RenderPhase::OnSurface as u8
+                    || {
+                        let (c, r) = Self::bounding_sphere(scene, inst);
+                        presurfaces.iter().any(|&(pc, pr)| c.distance(pc) < r + pr)
+                    })
+        };
+        // The multisampled prepass lays the cut-outs as well, and their colour draws
+        // leave the depth to it (`PIPE_ALPHA_PREPASSED`): decided here, before the draws are
+        // batched, as `msaa_prepass` decides it below. (Not on Apple's chips, whose
+        // hidden-surface removal makes the prepass worth it only for some views.)
+        let cutout_prepassed = enhanced
+            && (with_overlays || xr_view)
+            && self.options.msaa > 1
+            && prepass_on
+            && !cfg!(target_vendor = "apple")
+            && self.prepass_msaa_pipelines.is_some()
+            && omsi_cfg::env::var_os("OMSI_NO_MSAA_PREPASS").is_none()
+            && omsi_cfg::env::var_os("OMSI_NO_CUTOUT_PREPASS").is_none();
+        let prepass_job = || -> (Vec<u32>, Vec<Batch>, Option<(Vec<u32>, Vec<Batch>)>) {
             let mut items: Vec<DrawItem> = Vec::new();
             let mut list: Vec<u32> = Vec::new();
             let mut batches: Vec<Batch> = Vec::new();
+            let mut objects: Vec<DrawItem> = Vec::new();
             for &(i, z, _) in &visible {
                 let inst = &scene.instances[i];
+                let ground = msaa_prepass_skips(inst);
                 // (`z` is the depth of the object's middle: all of it must be beyond)
                 if prepass_reach.is_some_and(|reach| z > reach && z - Self::bounding_sphere(scene, inst).1 > reach) {
                     continue;
@@ -9608,19 +9652,28 @@ impl Renderer {
                         // plain/alpha-tested materials use their ordinary depth pass;
                         // blended transmaps use the opaque-pixels-only pass.
                         let (material, look) = depth_only_material(pre_kind, mat_id, mat.look);
-                        items.push(DrawItem {
+                        let item = DrawItem {
                             pipe: pre_kind * 2 + cull as u8,
                             mesh: inst.mesh as u32,
                             range: ri as u32,
                             material,
                             look,
                             entry: inst.base + *slot,
-                        });
+                        };
+                        if has_presurface && !ground {
+                            objects.push(item);
+                        }
+                        items.push(item);
                     }
                 }
             }
             batch_items(scene, &mut items, true, &mut list, &mut batches);
-            (list, batches)
+            let objects = has_presurface.then(|| {
+                let (mut l, mut b) = (Vec::new(), Vec::new());
+                batch_items(scene, &mut objects, true, &mut l, &mut b);
+                (l, b)
+            });
+            (list, batches, objects)
         };
         // The main pass follows the authored world phases. Each phase keeps its
         // opaque/cutout draws followed by its blended draws, far to near. Transparent
@@ -9635,8 +9688,7 @@ impl Renderer {
         // Keep mesh/material order here: an excavation's floor is drawn before its
         // invisible cover writes depth. Sorting its blended cover after the terrain
         // leaves the terrain's colour in place even though the cover writes depth.
-        let has_presurface = visible.iter().any(|&(i, _, _)| scene.instances[i].presurface);
-        let mut prepass_found: Option<(Vec<u32>, Vec<Batch>)> = None;
+        let mut prepass_found: Option<(Vec<u32>, Vec<Batch>, Option<(Vec<u32>, Vec<Batch>)>)> = None;
         let pool = self.encoding_pool.as_ref();
         in_scope(pool, |scope| {
             if prepass_on {
@@ -9694,10 +9746,14 @@ impl Renderer {
                     }
                     let mut has_blend = false;
                     let cull = culls_back_faces(scene, inst);
+                    let prepassed = cutout_prepassed && !msaa_prepass_skips(inst);
                     for (ri, (_, _, slot)) in scene.meshes[inst.mesh].ranges.iter().enumerate() {
                         let mat_id = inst.materials.get(*slot as usize).copied().unwrap_or(0);
                         let mat = &scene.materials[mat_id];
-                        let kind = kind_of(mat.alpha);
+                        let kind = match kind_of(mat.alpha) {
+                            PIPE_ALPHA_TEST if prepassed => PIPE_ALPHA_PREPASSED,
+                            kind => kind,
+                        };
                         if kind == PIPE_BLEND || mat.no_z_check {
                             has_blend = true;
                             continue;
@@ -9919,13 +9975,24 @@ impl Renderer {
             main_draws[1] += cab_items.len();
             batch_items(scene, &mut cab_items, false, &mut list, &mut cab_batches);
         });
-        if let Some((pre_list, mut pre_batches)) = prepass_found {
+        // (the multisampled prepass's own, without the ground, when a presurface is in the
+        // picture: see `has_presurface`)
+        let mut msaa_prepass_batches: Option<Vec<Batch>> = None;
+        if let Some((pre_list, mut pre_batches, objects)) = prepass_found {
             let offset = list.len() as u32;
             for b in &mut pre_batches {
                 b.instances = b.instances.start + offset..b.instances.end + offset;
             }
             list.extend(pre_list);
             prepass_batches = pre_batches;
+            if let Some((obj_list, mut obj_batches)) = objects {
+                let offset = list.len() as u32;
+                for b in &mut obj_batches {
+                    b.instances = b.instances.start + offset..b.instances.end + offset;
+                }
+                list.extend(obj_list);
+                msaa_prepass_batches = Some(obj_batches);
+            }
         }
         // OMSI_SKIP_PIPE=3,1: leave pipeline kinds out of the main pass (0 opaque, 1 alpha
         // tested, 2 blended, 3 blended without depth writes, 4 surface depth, 5 terrain
@@ -9937,6 +10004,7 @@ impl Renderer {
                 let kind = b.pipe / 4;
                 !skip.contains(&kind)
                     && !(kind == PIPE_TERRAIN_PAINT && skip.contains(&PIPE_BLEND_NO_WRITE))
+                    && !(kind == PIPE_ALPHA_PREPASSED && skip.contains(&PIPE_ALPHA_TEST))
             };
             main_batches.retain(include);
             cab_batches.retain(include);
@@ -10328,11 +10396,10 @@ impl Renderer {
             || main_batches.iter().chain(&cab_batches).any(|batch| {
                 matches!(
                     batch.pipe / 4,
-                    PIPE_ALPHA_TEST | PIPE_BLEND | PIPE_BLEND_NO_WRITE
+                    PIPE_ALPHA_TEST | PIPE_ALPHA_PREPASSED | PIPE_BLEND | PIPE_BLEND_NO_WRITE
                 )
             });
         let msaa_prepass = enhanced
-            && !has_presurface
             && (with_overlays || xr_view)
             && !single
             && prepass_on
@@ -10370,8 +10437,8 @@ impl Renderer {
                 encode_batches_filtered(
                     &mut pass,
                     scene,
-                    &prepass_batches,
-                    |batch| batch.pipe / 2 != PIPE_ALPHA_TEST,
+                    msaa_prepass_batches.as_ref().unwrap_or(&prepass_batches),
+                    |batch| cutout_prepassed || batch.pipe / 2 != PIPE_ALPHA_TEST,
                     |pipe| &pipes[pipe as usize],
                 );
             }
@@ -12821,7 +12888,14 @@ const PIPE_BLEND: u8 = 2;
 const PIPE_BLEND_NO_WRITE: u8 = 3;
 const PIPE_SURFACE_DEPTH: u8 = 4;
 const PIPE_TERRAIN_PAINT: u8 = 5;
-const PIPE_KINDS: u8 = 6;
+/// An alpha-tested draw whose cut-out the multisampled prepass has laid already, sample for
+/// sample as it covers them (`fs_cutout_core`): drawn as PIPE_ALPHA_TEST, but without writing
+/// depth - so that the card tests it before shading it, and the hidden leaves of a tree's
+/// crown are not shaded at all. (A cut-out that writes depth is shaded first and tested
+/// after: its discard decides the depth.) Sorted after the opaque and alpha-tested ones of
+/// its phase, still before the phase's blended draws, which are batched apart.
+const PIPE_ALPHA_PREPASSED: u8 = 6;
+const PIPE_KINDS: u8 = 7;
 
 fn effective_render_phase(instance: &Instance) -> RenderPhase {
     if instance.presurface {
