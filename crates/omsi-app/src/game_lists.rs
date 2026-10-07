@@ -50,6 +50,8 @@ pub(crate) enum ListKind {
     PlaceType(String),
     PlaceLivery(String),
     PlaceHof(String, String),
+    /// Photo mode's panel (`crate::photo`), on this page.
+    Photo(usize),
 }
 
 /// A vehicle file of the menu's list (`Vehicles/...`) as its definition.
@@ -275,7 +277,7 @@ pub(crate) const ADJUST: &str = " ±";
 
 /// A settings window (options, vehicle, world): one with pages, and a search field.
 pub(crate) fn is_settings(kind: Option<&ListKind>) -> bool {
-    matches!(kind, Some(ListKind::Options(_) | ListKind::Vehicle(_) | ListKind::World(_)))
+    matches!(kind, Some(ListKind::Options(_) | ListKind::Vehicle(_) | ListKind::World(_) | ListKind::Photo(_)))
 }
 
 /// The rows of every page of the settings window `kind` that the search `query` finds: each
@@ -445,7 +447,7 @@ pub(crate) fn items(app: &App, kind: &ListKind) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     match kind {
         ListKind::Admin => return crate::admin::items(app),
-        ListKind::Options(_) | ListKind::Vehicle(_) | ListKind::World(_) => {
+        ListKind::Options(_) | ListKind::Vehicle(_) | ListKind::World(_) | ListKind::Photo(_) => {
             if let Some(q) = app.menu_search.as_deref().filter(|q| !q.trim().is_empty()) {
                 return search_items(app, kind, q);
             }
@@ -682,6 +684,7 @@ pub(crate) fn menu_extras(
         ListKind::Options(_) => (MenuKind::Options, head("Options..."), None),
         ListKind::Vehicle(_) => (MenuKind::Options, head("Vehicle options..."), None),
         ListKind::World(_) => (MenuKind::Options, head("World options..."), None),
+        ListKind::Photo(_) => (MenuKind::Options, head("Photo mode"), None),
         ListKind::Controls => (MenuKind::Options, head("Controls..."), None),
         ListKind::Keyboard(_) => (MenuKind::Options, head("Keyboard"), None),
         ListKind::ControllerDevices(_) => (MenuKind::Options, head("Game controllers"), None),
@@ -791,7 +794,7 @@ pub(crate) fn run_move(app: &mut App, kind: &ListKind, action: &str, mv: Move) -
             crate::admin::run(app, action);
             Some(ListKind::Admin)
         }
-        ListKind::Options(_) | ListKind::World(_) => {
+        ListKind::Options(_) | ListKind::World(_) | ListKind::Photo(_) => {
             if verb == "noop" || option_do(app, verb, arg, mv) {
                 return Some(kind.clone());
             }
@@ -853,6 +856,13 @@ pub(crate) fn run_move(app: &mut App, kind: &ListKind, action: &str, mv: Move) -
                 }
                 "traffic_clear" if step => {
                     crate::admin::clear_ai_traffic(app);
+                }
+                // photo mode's buttons (`crate::photo::action`); leaving it closes the panel
+                v if v.starts_with("photo_") && step => {
+                    crate::photo::action(app, v, arg);
+                    if app.photo.is_none() {
+                        return None;
+                    }
                 }
                 other if step => {
                     app.page_action(other);
@@ -1078,6 +1088,9 @@ pub(crate) fn slider_row(app: &App, id: &str, name: &str, desc: &str, fmt: &dyn 
 
 /// The values a slider's setting runs through.
 fn steps_of(verb: &str) -> Option<Vec<f32>> {
+    if let Some(name) = verb.strip_prefix("photo:") {
+        return crate::photo::steps(name);
+    }
     if let Some(name) = verb.strip_prefix("aid:") {
         return crate::ai_drivers::option_row(name).filter(|r| r.unit != crate::ai_drivers::Unit::Switch).map(|r| r.steps());
     }
@@ -1224,6 +1237,9 @@ fn set_camera_fov(settings: &mut crate::settings::Settings, value: f32) -> (&'st
 
 /// The value of the slider setting `verb` (`arg`: the seat's axis).
 fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
+    if let Some(name) = verb.strip_prefix("photo:") {
+        return crate::photo::value(app, name);
+    }
     if let Some(field) = verb.strip_prefix("vr_nav_") {
         return if app.vr_active() && app.player.is_some() { app.vr_nav_profile().value(field) } else { None };
     }
@@ -1287,6 +1303,11 @@ fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
 
 /// Set the slider setting `verb` to `v`; the key and value to keep for the next game.
 fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static str, String)> {
+    if let Some(name) = verb.strip_prefix("photo:") {
+        // (photo mode's settings are for the photo: none of them is kept)
+        crate::photo::set(app, name, v);
+        return None;
+    }
     if let Some(field) = verb.strip_prefix("vr_nav_") {
         app.vr_nav_set(field, v);
         return None; // Stored per bus, never in the desktop settings file.
@@ -1494,6 +1515,9 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
 
 /// Whether the switch `id` is on (None: `id` is no switch).
 fn toggle_now(app: &App, id: &str) -> Option<bool> {
+    if let Some(name) = id.strip_prefix("photo:") {
+        return crate::photo::switch_now(app, name);
+    }
     let s = &app.settings;
     Some(match id {
         "navigator" => if app.vr_active() { app.vr_nav_profile().enabled } else { app.navigator.as_ref().is_some_and(|n| n.enabled) },
@@ -1560,6 +1584,10 @@ fn toggle_now(app: &App, id: &str) -> Option<bool> {
 
 /// Switch `id` on or off; the key and value to keep for the next game.
 fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static str, String)> {
+    if let Some(name) = id.strip_prefix("photo:") {
+        crate::photo::switch_set(app, name, on);
+        return None;
+    }
     let bit = (on as u8).to_string();
     match id {
         "navigator" => {
@@ -2715,12 +2743,31 @@ fn world_pages(app: &App) -> Vec<Page> {
     crate::settings_layout::regroup(vec![("Time", time), ("Weather", weather), ("Temperature and wind", climate), ("Traffic and people", people), ("Tools", tools)], crate::settings_layout::WORLD)
 }
 
+/// Photo mode's panel: its own pages (`crate::photo::pages`) with the World window's time
+/// and weather between them, the moment's light set where the photo is set up.
+fn photo_pages(app: &App) -> Vec<Page> {
+    let mut own = crate::photo::pages(app);
+    let take = own.pop();
+    let world = world_pages(app);
+    for title in ["Time", "Weather"] {
+        if let Some(p) = world.iter().find(|p| p.0 == title) {
+            // (the real time and weather syncs and the clock's speed are settings kept for
+            // the game, out of the photo's way: the syncs wait while photo mode is on)
+            let rows = p.1.iter().filter(|r| !matches!(r.1.as_str(), "time_sync" | "speed" | "metar_sync" | "metar_src" | "metar_icao_edit" | "metar_refresh" | "metar_once")).cloned().collect();
+            own.push((p.0, rows));
+        }
+    }
+    own.extend(take);
+    own
+}
+
 /// The pages of the settings window `kind` (empty ones left out) and the one shown.
 fn pages_of(app: &App, kind: &ListKind) -> Option<(Vec<Page>, usize)> {
     let (pages, tab) = match kind {
         ListKind::Options(t) => (options_pages(app), *t),
         ListKind::Vehicle(t) => (vehicle_pages(app), *t),
         ListKind::World(t) => (world_pages(app), *t),
+        ListKind::Photo(t) => (photo_pages(app), *t),
         ListKind::Controls => (vec![("Controls", items(app, kind))], 0),
         ListKind::Keyboard(tab) => (keyboard_pages(app), *tab),
         ListKind::ControllerDevices(_) | ListKind::Controller(..) | ListKind::ControllerAxis(..) | ListKind::ControllerButtonSettings(..) => crate::game_controller_menu::pages(app, kind)?,

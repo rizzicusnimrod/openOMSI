@@ -2178,7 +2178,8 @@ impl ApplicationHandler for App {
                     // Roboto - OMSI's bitmap font HUD is the start menu's and the offscreen
                     // pictures' only)
                     scene.overlays.clear();
-                    let notes = lines;
+                    // (photo mode: its own messages alone, see `ui::Ui::draw_photo`)
+                    let notes = if self.photo.is_some() { self.service_msg.as_ref().map(|m| vec![m.0.clone()]).unwrap_or_default() } else { lines };
                     let hud = self
                         .surface
                         .as_ref()
@@ -2187,10 +2188,11 @@ impl ApplicationHandler for App {
                                 .hud_viewport((s.config.width, s.config.height))
                         })
                         .unwrap_or([0.0, 0.0, 1.0, 1.0]);
-                    if let (Some(nav), Some(p), Some(_)) = (
+                    if let (Some(nav), Some(p), Some(_), true) = (
                         self.navigator.as_mut(),
                         self.player.as_ref(),
                         self.surface.as_ref(),
+                        self.photo.is_none(),
                     ) {
                         let old_enabled = nav.enabled;
                         let old_opacity = nav.opacity;
@@ -2399,6 +2401,7 @@ impl ApplicationHandler for App {
                             chat,
                             chat_size: self.settings.chat_size,
                             tags,
+                            photo: crate::photo::view(self.photo.as_deref()),
                             notices: &self.notices,
                             notice_anchor: self.navigator.as_ref().and_then(|n| n.screen_rect()),
                         };
@@ -2407,6 +2410,8 @@ impl ApplicationHandler for App {
                     *self.profile.entry("hud").or_default() += __t.elapsed().as_secs_f64();
                 }
 
+                // photo mode: the world held still, the panel's state, its grade
+                self.photo_frame();
                 let mut lighting = match self.weather.as_ref() {
                     Some(w) => {
                         self.wetness = road_wetness(precip_of(w).1, dt as f64, self.wetness);
@@ -2463,6 +2468,9 @@ impl ApplicationHandler for App {
                     self.camera.as_ref(),
                     self.window.as_ref(),
                 ) {
+                    // photo mode: the window's picture through the photo's lens (tilt, focal length)
+                    let photo_cam = self.photo.as_deref().map(|p| crate::photo::lens_camera(p, cam));
+                    let cam = photo_cam.as_ref().unwrap_or(cam);
                     // `shot <file>` from the input script: the scene the window is showing,
                     // from its camera and lighting, into a PNG - the only way to look at
                     // what an automated window run draws (also when the window is hidden,
@@ -2723,7 +2731,7 @@ impl ApplicationHandler for App {
                                 }
                             }
                         }
-                        if self.in_cab {
+                        if self.in_cab && self.photo.is_none() {
                             if let Some(w) = self.world.as_ref() {
                                 self.mirror_hud.ensure_frame(r, scene);
                                 let hud = self
@@ -2738,6 +2746,12 @@ impl ApplicationHandler for App {
                                     (self.cursor.0 - hud[0], self.cursor.1),
                                 );
                                 crate::ui::shift_overlays(scene, start, hud[0]);
+                            }
+                        }
+                        // photo mode: its next pictures, and the window's through its lens
+                        if let Some(ph) = self.photo.as_deref_mut() {
+                            if let Some(msg) = crate::photo::capture(ph, r, scene, &lighting) {
+                                self.service_msg = Some((msg, 6.0));
                             }
                         }
                         if !mirrored

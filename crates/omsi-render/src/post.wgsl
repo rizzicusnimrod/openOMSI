@@ -21,6 +21,11 @@ struct PostParams {
     // x Enhanced+'s grade (0/1), y the vignette's strength, z sharpening, w the tone
     // curve's contrast about mid grey (1 = none; a camera's by day, less at night)
     d: vec4<f32>,
+    // photo mode (lib.rs `PhotoGrade`): x saturation, y the white balance's warmth, z its
+    // tint, w film grain
+    e: vec4<f32>,
+    // x contrast, y vignette, z photo mode's grade on (1), w the grain's seed
+    f: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> p: PostParams;
 @group(0) @binding(1) var t_src: texture_2d<f32>;
@@ -255,12 +260,26 @@ fn filmic_grade(c: vec3<f32>) -> vec3<f32> {
     return natural_tone(c * vec3<f32>(1.015, 1.0, 0.985), max(p.d.w, 1.0));
 }
 
+// Photo mode's white balance (lib.rs `PhotoGrade`): gains on the scene's light, warmer
+// (more red, less blue) or cooler, and towards magenta or green - the picture's brightness
+// kept.
+fn photo_balance(warm: f32, tint: f32) -> vec3<f32> {
+    let w = clamp(warm, -1.0, 1.0);
+    let t = clamp(tint, -1.0, 1.0);
+    let g = vec3<f32>(1.0 + 0.28 * w + 0.06 * t, 1.0 - 0.16 * t, 1.0 - 0.32 * w + 0.06 * t);
+    return g / max(dot(g, vec3<f32>(0.2126, 0.7152, 0.0722)), 1e-3);
+}
+
 // The tone-mapped picture, encoded for the display (gamma), dithered.
 fn graded(in: VsOut) -> vec3<f32> {
     let hdr = clean(textureSampleLevel(t_src, s_lin, in.uv, 0.0).rgb);
     let glow = clean(textureSampleLevel(t_base, s_lin, in.uv, 0.0).rgb);
     // the eye's scattered light of what is brighter than the screen, added
     var c = hdr + glow * p.a.x;
+    let photo = p.f.z > 0.5;
+    if (photo) {
+        c = c * photo_balance(p.e.y, p.e.z);
+    }
     let metered = textureLoad(t_adapt, vec2<i32>(0, 0), 0).r;
     let ev = clamp((p.b.z - metered) * p.c.x, -p.a.y, p.a.z) + p.b.w;
     c = max(c, vec3<f32>(0.0));
@@ -275,7 +294,24 @@ fn graded(in: VsOut) -> vec3<f32> {
     } else {
         c = natural_tone(c * pow(2.0, ev), max(p.d.w, 1.0));
     }
+    let q = in.uv * 2.0 - vec2<f32>(1.0);
+    if (photo) {
+        // saturation about the pixel's own luminance, the lens's darker corners
+        let l = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+        c = max(mix(vec3<f32>(l), c, p.e.x), vec3<f32>(0.0));
+        c = c * (1.0 - min(p.f.y, 1.0) * pow(clamp(dot(q, q) * 0.5, 0.0, 1.0), 1.4));
+    }
     var e = to_srgb(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)));
+    if (photo) {
+        // contrast about the display's middle; film grain, strongest in the middle tones
+        e = clamp((e - vec3<f32>(0.5)) * p.f.x + vec3<f32>(0.5), vec3<f32>(0.0), vec3<f32>(1.0));
+        if (p.e.w > 0.0) {
+            let g = in.clip.xy + vec2<f32>(p.f.w * 37.0, p.f.w * 91.0);
+            let n = fract(52.9829189 * fract(dot(g, vec2<f32>(0.06711056, 0.00583715)))) + fract(52.9829189 * fract(dot(g + vec2<f32>(5.3, 11.7), vec2<f32>(0.00583715, 0.06711056)))) - 1.0;
+            let lum = dot(e, vec3<f32>(0.2126, 0.7152, 0.0722));
+            e = e + vec3<f32>(n * p.e.w * 0.09 * (0.35 + 2.6 * lum * (1.0 - lum)));
+        }
+    }
     // triangular dither of one code value: no bands in the sky's gradient
     let px = in.clip.xy;
     let n1 = fract(52.9829189 * fract(dot(px, vec2<f32>(0.06711056, 0.00583715))));

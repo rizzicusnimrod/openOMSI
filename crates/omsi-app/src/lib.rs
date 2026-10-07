@@ -99,6 +99,7 @@ mod on_foot;
 mod route_arrows;
 mod server;
 mod player;
+mod photo;
 mod plugins;
 mod services;
 mod situation;
@@ -536,6 +537,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         pad_look: [false; 4],
         arrow_glance: false,
         teleport_pick: false,
+        photo: None,
         discord: None,
         discord_t: 0.0,
         #[cfg(steam)]

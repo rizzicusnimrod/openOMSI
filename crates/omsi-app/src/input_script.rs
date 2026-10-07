@@ -257,6 +257,15 @@ impl App {
             if self.game_menu.is_none() && self.placing_key(code, pressed) {
                 return;
             }
+            // photo mode (F10): its keys first, the panel's after them (`App::photo_key`)
+            if self.photo.is_some() {
+                if self.photo_key(code, pressed, repeat) {
+                    return;
+                }
+            } else if pressed && !repeat && code == KeyCode::F10 && self.game_menu.is_none() && self.editor.is_none() {
+                self.photo_enter();
+                return;
+            }
             // the game menu: Escape opens it (and pauses, except in a LAN session, which
             // goes on for the others), and while it is open the keys are its own
             if self.game_menu.is_some() {
@@ -1468,6 +1477,9 @@ impl App {
             "Delete" => Delete,
             "[" => BracketLeft,
             "]" => BracketRight,
+            "Tab" => Tab,
+            "-" => Minus,
+            "=" => Equal,
             _ => return None,
         })
     }
@@ -1713,6 +1725,10 @@ impl App {
                 // `menu <what>`: a line of the game menu by its id (`menu remove`, `menu switch`),
                 // `menu pick:<n>`: line n of the list open
                 "menu" => {
+                    // (photo mode's panel is no game menu: out of it first)
+                    if self.photo.is_some() && !arg.starts_with("pick:") {
+                        self.photo_exit();
+                    }
                     if let Some(n) = arg.strip_prefix("pick:").and_then(|n| n.parse::<usize>().ok()) {
                         self.chooser_pick(n);
                     } else {
@@ -2063,7 +2079,7 @@ impl App {
     /// A settings window (options, vehicle, world) is open.
     fn settings_list(&self) -> bool {
         use crate::game_lists::ListKind;
-        self.chooser.is_some() && matches!(self.list_kind, Some(ListKind::Options(_) | ListKind::Vehicle(_) | ListKind::World(_) | ListKind::Controls | ListKind::Keyboard(_) | ListKind::ControllerDevices(_) | ListKind::Controller(..) | ListKind::ControllerAxis(..) | ListKind::ControllerButtonSettings(..)))
+        self.chooser.is_some() && matches!(self.list_kind, Some(ListKind::Options(_) | ListKind::Vehicle(_) | ListKind::World(_) | ListKind::Photo(_) | ListKind::Controls | ListKind::Keyboard(_) | ListKind::ControllerDevices(_) | ListKind::Controller(..) | ListKind::ControllerAxis(..) | ListKind::ControllerButtonSettings(..)))
     }
 
     /// The open list is closed: back to the game menu.
@@ -2150,6 +2166,7 @@ impl App {
             Some(ListKind::Options(_)) => ListKind::Options(i),
             Some(ListKind::Vehicle(_)) => ListKind::Vehicle(i),
             Some(ListKind::World(_)) => ListKind::World(i),
+            Some(ListKind::Photo(_)) => ListKind::Photo(i),
             Some(ListKind::Keyboard(_)) => ListKind::Keyboard(i.min(1)),
             Some(ListKind::ControllerDevices(_)) => ListKind::ControllerDevices(i.min(2)),
             Some(ListKind::Controller(name, _)) => ListKind::Controller(name.clone(), i.min(3)),
@@ -2192,7 +2209,7 @@ impl App {
     pub(crate) fn list_adjust(&mut self, k: usize, mv: crate::game_lists::Move) {
         use crate::game_lists::ListKind;
         let Some(kind) = self.list_kind.clone() else { return };
-        if !matches!(kind, ListKind::Options(_) | ListKind::World(_) | ListKind::ControllerDevices(_) | ListKind::Controller(..) | ListKind::ControllerAxis(..) | ListKind::ControllerButtonSettings(..)) {
+        if !matches!(kind, ListKind::Options(_) | ListKind::World(_) | ListKind::Photo(_) | ListKind::ControllerDevices(_) | ListKind::Controller(..) | ListKind::ControllerAxis(..) | ListKind::ControllerButtonSettings(..)) {
             return;
         }
         let Some(action) = self.admin_list.as_ref().and_then(|l| l.get(k)).map(|x| x.1.clone()) else { return };
@@ -2958,6 +2975,7 @@ impl App {
                 self.close_game_menu();
                 self.take_screenshot();
             }
+            "photo" => self.photo_enter(),
             "skipstop" => {
                 self.close_game_menu();
                 self.skip_next_stop();
@@ -3280,9 +3298,10 @@ impl App {
     }
 
     /// The weather follows the METAR report and cannot be changed (the `metar_sync` setting).
-    /// In a LAN session as a client the host's weather counts: the host syncs, not us.
+    /// In a LAN session as a client the host's weather counts: the host syncs, not us. In
+    /// photo mode the photo's weather counts: the sync waits till it is left.
     pub(crate) fn metar_locked(&self) -> bool {
-        self.settings.metar_sync && !self.lan.as_ref().is_some_and(|l| l.role == omsi_net::Role::Client)
+        self.settings.metar_sync && self.photo.is_none() && !self.lan.as_ref().is_some_and(|l| l.role == omsi_net::Role::Client)
     }
 
     /// The airport whose report the sync follows: the one chosen, else the one of the weather
@@ -3339,6 +3358,10 @@ impl App {
     /// The METAR sync: with it on, the report is downloaded in the background (at once, then
     /// every ten minutes) and the weather goes over to it; `dt` is real seconds.
     pub(crate) fn tick_metar(&mut self, dt: f32) {
+        // (a report coming in while a photo is set up waits for the end of photo mode)
+        if self.photo.is_some() {
+            return;
+        }
         self.share_start_metar();
         if let Some(rx)=self.metar_rx.as_ref(){
             match rx.try_recv(){
@@ -3414,8 +3437,9 @@ impl App {
 
     /// The clock follows the real time and cannot be changed (the `time_sync` setting). In a
     /// LAN session as a client the host's clock counts: the host or the server syncs, not us.
+    /// In photo mode the photo's time counts: the sync waits till it is left.
     pub(crate) fn real_time_locked(&self) -> bool {
-        self.settings.time_sync && !self.lan.as_ref().is_some_and(|l| l.role == omsi_net::Role::Client)
+        self.settings.time_sync && self.photo.is_none() && !self.lan.as_ref().is_some_and(|l| l.role == omsi_net::Role::Client)
     }
 
     /// With the real-time sync on: hold the clock to this device's date and time (a second
@@ -4553,6 +4577,10 @@ impl crate::App {
         if !self.duty.as_ref().is_some_and(|d| d.stop_to_skip()) {
             v.retain(|x| x.0 != "skipstop");
         }
+        // (photo mode stops the world: not in a session others share, not in the headset)
+        if self.lan.is_some() || self.vr_active() {
+            v.retain(|x| x.0 != "photo");
+        }
         if self.navigator.is_none() {
             v.retain(|x| x.0 != "map");
         }
@@ -4783,7 +4811,7 @@ pub(crate) const SAVES: &str = "Saves";
 
 /// The lines of the game menu: (what, label). What can be set is on the pages behind
 /// "Options", "Vehicle options" and "World options" (see `game_lists`).
-pub(crate) const GAME_MENU: [(&str, &str); 15] = [
+pub(crate) const GAME_MENU: [(&str, &str); 16] = [
     ("resume", "Resume"),
     ("options", "Options..."),
     ("controls", "Controls..."),
@@ -4799,6 +4827,7 @@ pub(crate) const GAME_MENU: [(&str, &str); 15] = [
     ("save", "Save the situation"),
     ("saveslot", "Save to a new slot"),
     ("load", "Load the quicksave"),
+    ("photo", "Photo mode"),
     ("shot", "Screenshot"),
     ("quit", "End the session"),
 ];

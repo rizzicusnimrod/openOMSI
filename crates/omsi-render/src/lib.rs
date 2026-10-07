@@ -85,6 +85,40 @@ struct PostUniform {
     b: [f32; 4],
     c: [f32; 4],
     d: [f32; 4],
+    /// photo mode (`PhotoGrade`): x saturation, y the white balance's warmth, z its tint,
+    /// w film grain
+    e: [f32; 4],
+    /// x contrast, y vignette, z photo mode's grade on (1) or off (0), w the grain's seed
+    f: [f32; 4],
+}
+
+/// Photo mode's grade of the enhanced picture (`Renderer::photo`): what a photographer sets
+/// on the camera and in the darkroom. Neutral by default; the vanilla picture has no post
+/// passes and is left as it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PhotoGrade {
+    /// Exposure compensation (EV, stops), on top of the metering.
+    pub ev: f32,
+    /// Contrast about the middle grey of the display (1 = as is).
+    pub contrast: f32,
+    /// Colour saturation (0 = black and white, 1 = as is).
+    pub saturation: f32,
+    /// White balance: warmer (+) or cooler (-), -1..1; and the tint: magenta (+) or green (-).
+    pub warmth: f32,
+    pub tint: f32,
+    /// Darker corners (0 = none, 1 = strong).
+    pub vignette: f32,
+    /// Film grain (0 = none, 1 = strong), and its pattern's seed.
+    pub grain: f32,
+    pub seed: f32,
+    /// The glow round bright lights, as a multiple of the usual one.
+    pub glow: f32,
+}
+
+impl Default for PhotoGrade {
+    fn default() -> Self {
+        PhotoGrade { ev: 0.0, contrast: 1.0, saturation: 1.0, warmth: 0.0, tint: 0.0, vignette: 0.0, grain: 0.0, seed: 0.0, glow: 1.0 }
+    }
 }
 
 /// The enhanced lighting (enhanced_common.wgsl `Enhanced`).
@@ -244,6 +278,8 @@ const MOON_RADIUS: f32 = 0.0062;
 /// The textures of the ambient-occlusion pass for one target size.
 struct AoTargets {
     size: (u32, u32),
+    /// The depth prepass's depth (`depth_view`'s texture; read back by `depth_at`).
+    depth: wgpu::Texture,
     depth_view: wgpu::TextureView,
     ao_view: wgpu::TextureView,
     blur_view: wgpu::TextureView,
@@ -2113,6 +2149,14 @@ pub struct Renderer {
     last_frame: Option<std::time::Instant>,
     /// The next frame stands alone (an offscreen picture): the exposure is there at once.
     pub instant_exposure: bool,
+    /// Photo mode's grade of the enhanced picture (None: none).
+    pub photo: Option<PhotoGrade>,
+    /// The main view's picture moved on the screen by this much (normalized device
+    /// coordinates, 2 = the picture's width or height): photo mode's sub-pixel steps
+    /// between the pictures it averages, and the lens's own shift for its depth of field
+    /// (the camera moved across the lens, the plane in focus kept where it is). Mirrors are
+    /// not moved.
+    pub view_shift: Option<[f32; 2]>,
     /// Overlay pipeline without multisampling, for drawing the HUD after the post pass.
     overlay_pipeline_1x: wgpu::RenderPipeline,
     xr_ui_pipeline: wgpu::RenderPipeline,
@@ -4705,6 +4749,8 @@ impl Renderer {
             texture_aspect: None,
             last_frame: None,
             instant_exposure: false,
+            photo: None,
+            view_shift: None,
             overlay_pipeline_1x,
             xr_ui_pipeline,
             started: std::time::Instant::now(),
@@ -6877,8 +6923,8 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING
-                | if self.puddles.is_some() { wgpu::TextureUsages::COPY_SRC } else { wgpu::TextureUsages::empty() },
+            // (copied from: the puddles' reflections, and `depth_at`)
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         // the AO itself at half size: four times fewer pixels, and the blur hides the rest
@@ -6958,6 +7004,7 @@ impl Renderer {
         });
         self.ao = Some(AoTargets {
             size: (w, h),
+            depth,
             depth_view,
             ao_view,
             blur_view,
@@ -8894,9 +8941,15 @@ impl Renderer {
         }
         // where the sun stands on the screen (camera uniform post.zw; no shader reads it
         // since the light shafts were removed)
+        // (photo mode's shift of the picture: the main view's alone, see `view_shift`)
+        let shift = self.view_shift.filter(|_| with_overlays && projection.is_none() && !second_eye);
+        let shifted = |m: Mat4| match shift {
+            Some(s) => Mat4::from_cols(Vec4::X, Vec4::Y, Vec4::Z, Vec4::new(s[0], s[1], 0.0, 1.0)) * m,
+            None => m,
+        };
         let vp_mat = projection
             .map(|p| p * Mat4::look_to_rh((camera.position - ro).as_vec3(), camera.forward(), camera.up()))
-            .unwrap_or_else(|| camera.view_proj(aspect, ro));
+            .unwrap_or_else(|| shifted(camera.view_proj(aspect, ro)));
         let sun_clip = vp_mat * (cam_rel + sun * 5000.0).extend(1.0);
         let sun_ndc = if sun_clip.w > 0.0 {
             Vec3::new(sun_clip.x / sun_clip.w, sun_clip.y / sun_clip.w, 1.0)
@@ -9013,7 +9066,7 @@ impl Renderer {
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cu));
         if rt_frame {
-            let proj = Mat4::perspective_rh(camera.fov_deg.to_radians(), aspect, camera.far, camera.near);
+            let proj = shifted(Mat4::perspective_rh(camera.fov_deg.to_radians(), aspect, camera.far, camera.near));
             self.prepare_ray_tracing(scene, camera, lighting, vp_mat, proj, width, height, dt);
             stage(self, "ray tracing", "mirror.ray tracing");
         }
@@ -10076,7 +10129,7 @@ impl Renderer {
         // --- depth prepass + ambient occlusion (single-sampled, camera projection)
         if prepass_on {
             let proj = projection.unwrap_or_else(|| {
-                Mat4::perspective_rh(camera.fov_deg.to_radians(), aspect, camera.far, camera.near)
+                shifted(Mat4::perspective_rh(camera.fov_deg.to_radians(), aspect, camera.far, camera.near))
             });
             let u = SsaoUniform {
                 inv_proj: proj.inverse().to_cols_array_2d(),
@@ -10711,13 +10764,16 @@ impl Renderer {
             // lamp-lit street came out most of a stop brighter than any eye sees it)
             let mut m = meter_tuning();
             m[3] *= 1.0 - atmosphere::smoothstep(3.0, 7.0, self.exposure.unwrap_or(0.0) / std::f32::consts::LN_2);
+            // (photo mode's grade, for the window's picture and the photo's)
+            let photo = self.photo.filter(|_| with_overlays);
+            let pg = photo.unwrap_or_default();
             let pu = PostUniform {
                 // the metering may take a little off a bright picture and add a little to a
                 // dark one: a night stays a night, snow stays white
                 a: [
                     // (the share of the light beyond the screen's white the eye scatters
                     // further than a third of a degree, CIE 146 - see post.wgsl `fs_up`)
-                    0.2,
+                    0.2 * pg.glow.max(0.0),
                     m[2],
                     m[3],
                     if self.instant_exposure || dt <= 0.0 {
@@ -10727,7 +10783,7 @@ impl Renderer {
                     },
                 ],
                 // darker: the eye takes a few seconds; brighter: under one
-                b: [secs(2.5), secs(0.6), m[1], m[4]],
+                b: [secs(2.5), secs(0.6), m[1], m[4] + pg.ev],
                 // (w: an LED panel's dots count for this much in the glow's source. The mix
                 // the glow lands with is a few per cent - a lamp a hundred times brighter
                 // than white spreads, a white wall does not - so the dots are multiplied up
@@ -10740,6 +10796,8 @@ impl Renderer {
                     let contrast = tone_contrast(self.exposure.unwrap_or(0.0));
                     if rt_frame && omsi_cfg::env::var_os("OMSI_NO_RT_GRADE").is_none() { [1.0, 0.08, 0.0, contrast] } else { [0.0, 0.0, 0.0, contrast] }
                 },
+                e: [pg.saturation.max(0.0), pg.warmth, pg.tint, pg.grain.max(0.0)],
+                f: [pg.contrast.max(0.0), pg.vignette.max(0.0), if photo.is_some() { 1.0 } else { 0.0 }, pg.seed],
             };
             self.queue
                 .write_buffer(&self.post_buf, 0, bytemuck::bytes_of(&pu));
@@ -10997,7 +11055,20 @@ impl Renderer {
         camera: &Camera,
         lighting: &Lighting,
     ) -> Result<Vec<u8>> {
-        self.render_image(scene, width, height, camera, lighting, None)
+        self.render_image(scene, width, height, camera, lighting, None, true)
+    }
+
+    /// `render_to_image` with the window's exposure as it has adapted (photo mode: the
+    /// photo is exposed as the picture on the screen is, not as a picture on its own).
+    pub fn render_to_image_live(
+        &mut self,
+        scene: &mut Scene,
+        width: u32,
+        height: u32,
+        camera: &Camera,
+        lighting: &Lighting,
+    ) -> Result<Vec<u8>> {
+        self.render_image(scene, width, height, camera, lighting, None, false)
     }
 
     /// Capture all three physical screen projections, including the shared HUD.
@@ -11010,7 +11081,7 @@ impl Renderer {
         lighting: &Lighting,
         rig: &TripleScreen,
     ) -> Result<Vec<u8>> {
-        self.render_image(scene, width, height, camera, lighting, Some(rig))
+        self.render_image(scene, width, height, camera, lighting, Some(rig), true)
     }
 
     fn render_image(
@@ -11021,6 +11092,7 @@ impl Renderer {
         camera: &Camera,
         lighting: &Lighting,
         rig: Option<&TripleScreen>,
+        instant: bool,
     ) -> Result<Vec<u8>> {
         let tex = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen"),
@@ -11038,7 +11110,7 @@ impl Renderer {
         });
         let view = tex.create_view(&Default::default());
         // a picture on its own: the enhanced exposure is where the light puts it at once
-        self.instant_exposure = true;
+        self.instant_exposure = instant;
         if let Some(rig) = rig {
             self.render_triple(scene, &view, width, height, camera, lighting, rig);
         } else {
@@ -11056,6 +11128,43 @@ impl Renderer {
             }
         }
         Ok(out)
+    }
+
+    /// How far from the camera the surface is that the last main picture shows at `(fx, fy)`
+    /// (fractions of its width and height from the top left), along the view direction
+    /// (m): its depth prepass read back, for `camera` (its near and far planes). None
+    /// without a prepass (the vanilla picture without ambient occlusion), or at the sky.
+    /// Cut-out leaves and fences are not in the prepass: what is behind them is found.
+    pub fn depth_at(&self, fx: f32, fy: f32, camera: &Camera) -> Option<f32> {
+        let ao = self.ao.as_ref()?;
+        let (w, h) = ao.size;
+        let x = ((fx.clamp(0.0, 1.0) * w as f32) as u32).min(w.saturating_sub(1));
+        let y = ((fy.clamp(0.0, 1.0) * h as f32) as u32).min(h.saturating_sub(1));
+        // The whole picture read back (a few megabytes, once a click): a copy of just the
+        // one texel of this depth texture came back 0 on D3D12 where the full copy holds
+        // the surface.
+        let all = self.read_texture(&ao.depth, wgpu::TextureAspect::DepthOnly).ok()?;
+        let at = |px: u32, py: u32| {
+            let o = (py as usize * w as usize + px as usize) * 4;
+            all.get(o..o + 4).map_or(0.0, |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        };
+        // reversed Z (`Camera::view_proj`: near and far swapped): the far plane is 0, the
+        // sky cleared to it. A gap in a hedge or a railing right at the point: the nearest
+        // surface a few pixels round it.
+        let mut d = at(x, y);
+        if !(d > 1e-7) {
+            for py in y.saturating_sub(4)..(y + 5).min(h) {
+                for px in x.saturating_sub(4)..(x + 5).min(w) {
+                    d = d.max(at(px, py));
+                }
+            }
+        }
+        log::debug!("depth_at ({x}, {y}) of {w}x{h}: {d}");
+        if !(d > 1e-7) {
+            return None;
+        }
+        let (n, f) = (camera.near, camera.far);
+        Some(n * f / (d * (f - n) + n))
     }
 
     fn read_texture(&self, texture: &wgpu::Texture, aspect: wgpu::TextureAspect) -> Result<Vec<u8>> {

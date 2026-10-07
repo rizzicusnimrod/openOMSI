@@ -151,6 +151,7 @@ pub fn pick(all: &[(String, Weather)], now: &Weather, now_file: &str, month: i32
 }
 
 /// The cycle: when the weather changes next (seconds of the day, counted down) and its dice.
+#[derive(Clone)]
 pub struct Cycle {
     pub next_in: f64,
     rng: u64,

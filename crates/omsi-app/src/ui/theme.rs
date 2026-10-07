@@ -108,6 +108,10 @@ pub fn page_meta(title: &str) -> (&'static str, &'static str) {
         "Temperature and wind" => ("thermostat", "Temperature, humidity and wind"),
         "Traffic and people" => ("traffic", "How many vehicles and passengers there are"),
         "Tools" => ("tune", "The object editor and other helpers"),
+        "Photo camera" => ("photo_camera", "Where the camera is, how it looks and moves"),
+        "Lens" => ("zoom_in", "Focus and depth of field"),
+        "Exposure and colour" => ("wb_sunny", "Brightness, contrast, colour and the look of film"),
+        "Take the photo" => ("save", "Its size, its quality, and taking it"),
         _ => ("tune", ""),
     }
 }

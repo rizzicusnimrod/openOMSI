@@ -371,6 +371,17 @@ pub fn backdrop(opacity: f32) -> f32 {
     (opacity / 0.85).clamp(0.3, 1.3)
 }
 
+/// What photo mode shows over the picture (`App::photo_view`).
+#[derive(Clone, Copy, Debug)]
+pub struct PhotoView {
+    /// Lines at the thirds of the picture.
+    pub grid: bool,
+    /// The photo being taken: pictures done, of.
+    pub progress: Option<(u32, u32)>,
+    /// The panel hidden: a line on how to bring it back.
+    pub hint: bool,
+}
+
 /// Which menu is open: its layout follows from it.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum MenuKind {
@@ -461,6 +472,8 @@ pub struct Frame<'a> {
     pub tutorial: Option<(&'a str, &'a str, Option<&'a std::path::Path>, usize, usize)>,
     /// Name tags: a screen position (the point above a bus), the name and a second line.
     pub tags: Vec<((f32, f32), String, String, f32)>,
+    /// Photo mode: nothing of the game's interface but the photo panel and these.
+    pub photo: Option<PhotoView>,
     /// The server's notifications, oldest first.
     pub notices: &'a [Notice],
     /// Where the navigator is on the screen (the notifications stand over it, or under it
@@ -666,10 +679,68 @@ impl Ui {
         Some(Ui { origin_x: 0.0, text: TextCache::new()?, chat: ChatWidget::default(), menu_rects: Vec::new(), menu_arrows: Vec::new(), menu_scroll_thumb: None, menu_scroll_track: None, menu_ctl: Vec::new(), dd_rects: Vec::new(), dd_top: 0, dd_rows: 8, dd_scroll: None, menu_side: Vec::new(), menu_pane: Vec::new(), menu_pane_start: 0, menu_pane_go: None, menu_pane_box: None, menu_pane_scroll: None, menu_time: Vec::new(), anim: Default::default(), anim_dt: 0.0, menu_overlay_range: 0..0, vr_cursor_overlay: None, vr_tooltip_overlay: None, menu_start: 0, menu_rows: 0, menu_row_h: 1.0, images: Default::default(), info_rect: None, menu_search_rect: None, menu_close_rect: None, menu_adv_rect: None, menu_grid: false })
     }
 
+    /// Photo mode's marks over the picture: the grid at the thirds, the photo's progress
+    /// and, with the panel hidden, how to bring it back. (Notes, the clock and the rest of
+    /// the game's interface are not drawn.)
+    fn draw_photo(&mut self, r: &Renderer, scene: &mut Scene, f: &Frame, pv: PhotoView, s: f32) {
+        let (w, h) = (f.width, f.height);
+        if pv.grid && pv.progress.is_none() {
+            let line = self.text.solid(r, scene, [255, 255, 255, 90]);
+            let t = (1.0 * s).max(1.0);
+            for k in 1..3 {
+                let x = (w * k as f32 / 3.0).round();
+                let y = (h * k as f32 / 3.0).round();
+                scene.overlays.push((line, [x - t * 0.5, 0.0, x + t * 0.5, h]));
+                scene.overlays.push((line, [0.0, y - t * 0.5, w, y + t * 0.5]));
+            }
+        }
+        let px = (15.0 * s) as u32;
+        // photo mode's messages (in focus, saved), top left
+        let mut y = 16.0 * s;
+        for n in f.notes.iter().filter(|n| !n.trim().is_empty()).take(3) {
+            let l = self.text.label(r, scene, &omsi_ui::tr(n), px, [255, 255, 255, 235]);
+            let plate = self.text.plate(r, scene, 7);
+            scene.overlays.push((plate, [16.0 * s - 5.0 * s, y, 16.0 * s + l.w as f32 + 5.0 * s, y + l.h as f32]));
+            scene.overlays.push((l.tex, [16.0 * s, y, 16.0 * s + l.w as f32, y + l.h as f32]));
+            y += l.h as f32 + 2.0 * s;
+        }
+        if let Some((done, total)) = pv.progress {
+            // a bar at the foot of the picture
+            let text = format!("{} {done} / {total}", omsi_ui::tr("Taking the photo:"));
+            let l = self.text.label(r, scene, &text, px, [255, 255, 255, 240]);
+            let bw = (w * 0.4).max(l.w as f32 + 40.0 * s);
+            let x0 = ((w - bw) * 0.5).round();
+            let y0 = h - 72.0 * s;
+            let back = self.text.solid(r, scene, [12, 14, 17, 200]);
+            let fill = self.text.solid(r, scene, [90, 160, 255, 255]);
+            scene.overlays.push((back, [x0 - 12.0 * s, y0 - 10.0 * s, x0 + bw + 12.0 * s, y0 + l.h as f32 + 26.0 * s]));
+            scene.overlays.push((l.tex, [x0, y0, x0 + l.w as f32, y0 + l.h as f32]));
+            let by = y0 + l.h as f32 + 6.0 * s;
+            let k = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+            let track = self.text.solid(r, scene, [255, 255, 255, 40]);
+            scene.overlays.push((track, [x0, by, x0 + bw, by + 6.0 * s]));
+            scene.overlays.push((fill, [x0, by, x0 + bw * k, by + 6.0 * s]));
+        } else if pv.hint {
+            let text = omsi_ui::tr("Photo mode  ·  H shows the settings  ·  F12 takes the photo  ·  Esc leaves");
+            let l = self.text.label(r, scene, &text, px, [255, 255, 255, 220]);
+            let plate = self.text.plate(r, scene, 7);
+            let x0 = 16.0 * s;
+            let y0 = h - 16.0 * s - l.h as f32;
+            scene.overlays.push((plate, [x0 - 6.0 * s, y0 - 3.0 * s, x0 + l.w as f32 + 6.0 * s, y0 + l.h as f32 + 3.0 * s]));
+            scene.overlays.push((l.tex, [x0, y0, x0 + l.w as f32, y0 + l.h as f32]));
+        }
+    }
+
     /// Draw the frame's interface: its overlays go after the HUD's in `scene.overlays`.
     pub fn draw(&mut self, r: &Renderer, scene: &mut Scene, f: &Frame, dt: f32) {
         let s = f.scale.max(0.5) * f.ui_scale;
         self.text.backdrop = f.opacity;
+        // --- photo mode: the picture, the photo panel and its own marks only
+        if let Some(pv) = f.photo {
+            self.draw_photo(r, scene, f, pv, s);
+            self.draw_menu(r, scene, f);
+            return;
+        }
         // --- name tags above the other players' buses
         for ((x, y), name, sub, alpha) in &f.tags {
             let a = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
