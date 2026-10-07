@@ -631,6 +631,10 @@ impl ApplicationHandler for App {
                         t.player_high_beam = self.player.as_ref().is_some_and(|p| crate::traffic_link::high_beam(&p.vehicle));
                         t.others_signals = crate::traffic_link::lan_signals(&self.remotes);
                         t.tick(dt, self.player.as_ref().map(|p| player_outline(p)));
+                        // `--demo`'s scene: its cars, when the bus asks for them
+                        if let Some(d) = self.demo.as_mut() {
+                            d.tick(dt, t, w, r, scene, self.player.as_ref().map(|p| player_outline(p)));
+                        }
                         if let Some(w) = self.world.as_ref() {
                             w.set_switches(&t.switch_requests());
                             let rail = self.player.as_ref().and_then(|p| p.rail.as_ref()).map(|r| (r.lane, r.along));

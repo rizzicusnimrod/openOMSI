@@ -279,7 +279,7 @@ struct GpuPointLight {
     color: [f32; 4],
     /// Spot direction and cosine of the outer cone (-2 = a point light).
     dir: [f32; 4],
-    /// Cosine of the inner cone, the core radius, a headlamp's beam (1 low, -1 full), the
+    /// Cosine of the inner cone, the core radius, a headlamp's beam (`PointLight::beam`), the
     /// radius (`pos.w` is 0 on a light only the enhanced path draws, which the vanilla
     /// shader then passes by).
     extra: [f32; 4],
@@ -312,8 +312,11 @@ pub struct PointLight {
     /// The radius within which the light is at full strength (`[maplight]`'s); 0 = an
     /// eighth of `radius` (enhanced path; vanilla always takes the eighth).
     pub core: f32,
-    /// A headlamp (enhanced path), lit by a road lamp's profile instead of the cone: 1 a low
-    /// beam, with its cut-off at the lamp's horizon, -1 a full beam, without; 0 any other light.
+    /// A headlamp (enhanced path), lit by a headlamp's profile instead of the cone
+    /// (lamp_air.wgsl `headlamp`): 1 a low beam for traffic on the right, its cut-off rising
+    /// to the right, 2 one for traffic on the left, -1 a full beam, each a quarter more for a
+    /// halogen lamp (its softer cut-off); 0 any other light. A headlamp's `direction` is its
+    /// own horizon (the vehicle's pitch, no aim down).
     pub beam: f32,
     /// A lamp in a housing - a street lamp's head, a platform's light (`[maplight]`): the
     /// enhanced path sends its light down and out, a few per cent above its horizon.
@@ -526,6 +529,8 @@ struct MaterialUniform {
     /// rgb: the D3D material's ambient colour, which takes the ambient light (C); w: 1 for
     /// a texture that is a season's snow picture (no snow laid over it), 2 the map's water
     ambient: [f32; 4],
+    /// x: 1 retroreflective sheeting (`MaterialExtra::retroreflective`)
+    retro: [f32; 4],
 }
 
 /// The maps of a PBR set found beside a diffuse texture (`foo_n.png` and the rest, see
@@ -886,7 +891,7 @@ impl GpuTexture {
 struct BindKey {
     textures: [(usize, u64); 7],
     address: TexAddressing,
-    uniform: [u32; 40],
+    uniform: [u32; 44],
 }
 
 /// Bytes of a texture of `format` with `levels` mip levels.
@@ -1037,6 +1042,10 @@ pub struct MaterialExtra {
     /// factor alone, as the vanilla one shows the sphere map on it - chrome read as a
     /// faint clear coat there. A body needs a mask of its own for that (a Golf's bonnet).
     pub metal_ok: bool,
+    /// Retroreflective sheeting - a traffic sign's face, a delineator post's reflector:
+    /// under a headlamp it shines back towards the lamp as no paint does, and a driver
+    /// behind the lamps sees it blaze out of the dark (the enhanced picture).
+    pub retroreflective: bool,
 }
 
 /// The textures a material's bind group samples.
@@ -5917,6 +5926,7 @@ impl Renderer {
                 let a = extra.ambient.unwrap_or([color[0], color[1], color[2]]);
                 [a[0], a[1], a[2], if extra.water { 2.0 } else { snow_texture_flag(scene, texture) }]
             },
+            retro: [if extra.retroreflective { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         };
         let slot = |t: Option<TextureId>| {
             t.and_then(|t| scene.textures.get(t).map(|g| (t, g.gen)))
@@ -7774,10 +7784,11 @@ impl Renderer {
                 continue;
             }
             let p = (l.position - ro).as_vec3();
-            let x0 = ((p.x - l.radius - origin[0]) / LIGHT_CELL).floor();
-            let x1 = ((p.x + l.radius - origin[0]) / LIGHT_CELL).floor();
-            let y0 = ((p.y - l.radius - origin[1]) / LIGHT_CELL).floor();
-            let y1 = ((p.y + l.radius - origin[1]) / LIGHT_CELL).floor();
+            let (lo, hi) = light_extent(l, p);
+            let x0 = ((lo.x - origin[0]) / LIGHT_CELL).floor();
+            let x1 = ((hi.x - origin[0]) / LIGHT_CELL).floor();
+            let y0 = ((lo.y - origin[1]) / LIGHT_CELL).floor();
+            let y1 = ((hi.y - origin[1]) / LIGHT_CELL).floor();
             if x1 < 0.0 || y1 < 0.0 || x0 >= side as f32 || y0 >= side as f32 {
                 continue;
             }
@@ -7935,6 +7946,9 @@ impl GpuTimers {
                 .filter(|(a, b, _)| *b >= *a && *b > 0)
                 .collect();
             order.sort_by_key(|(_, b, _)| *b);
+            // (not while the map loads, OMSI_GPU_TIMERS_SKIP s, 60 by default: its cheap frames
+            // halved the averages of the passes a drive spends its time in)
+            let order = if t.born.elapsed().as_secs_f32() < t.skip { Vec::new() } else { order };
             let mut prev: Option<u64> = None;
             for (a, b, label) in &order {
                 let from = prev.unwrap_or(*a);
@@ -8788,8 +8802,11 @@ impl Renderer {
         let near_wanted = light_matrix(SHADOW_RANGE);
         let (near_m, near_age, near_origin, near_sun) = self.shadow_near_cache.get();
         let near_jumped = (near_m.project_point3(cam_rel) - near_wanted.project_point3(cam_rel)).length() > 0.03;
+        // (the moon's shadows - a full moon's 0.3 lux, faint and soft - every 4th frame, the
+        // far ones every 8th: a moonlit night spent a sunny day's shadow passes on them)
+        let (near_every, far_every) = if moon_shadows { (3, 7) } else { (1, 3) };
         let redraw_near = draw_shadows
-            && (near_age >= 1
+            && (near_age >= near_every
                 || near_jumped
                 || near_m == Mat4::IDENTITY
                 || near_origin != scene.render_origin
@@ -8818,7 +8835,7 @@ impl Renderer {
         let (far_m, far_age, far_origin, far_sun) = self.shadow_far_cache.get();
         let far_moved = (far_m.project_point3(cam_rel) - far_wanted.project_point3(cam_rel)).length() > 0.12;
         let redraw_far = draw_shadows
-            && (far_age >= 3
+            && (far_age >= far_every
                 || far_moved
                 || far_m == Mat4::IDENTITY
                 || far_origin != scene.render_origin
@@ -11489,6 +11506,25 @@ fn drawn_by(l: &PointLight, enhanced: bool) -> bool {
             }
 }
 
+/// The corners (lowest and highest x and y) of the plan a light at `p` reaches: the square
+/// round it, or for a headlamp - dark behind its glass, see lamp_air.wgsl `headlamp` - the
+/// half of that square ahead of it, which keeps the grid's cells for the lamps that light
+/// them (a city's traffic at night puts two beams of 150 m into the grid for every car).
+fn light_extent(l: &PointLight, p: Vec3) -> (glam::Vec2, glam::Vec2) {
+    let r = l.radius;
+    let a = p.truncate();
+    let fwd = l.direction.truncate();
+    if l.beam == 0.0 || fwd.length_squared() < 1e-6 {
+        return (a - r, a + r);
+    }
+    let f = fwd.normalize() * r;
+    let s = f.perp();
+    let corners = [a + s, a - s, a + f + s, a + f - s];
+    let lo = corners.iter().fold(glam::Vec2::splat(f32::MAX), |m, c| m.min(*c));
+    let hi = corners.iter().fold(glam::Vec2::splat(f32::MIN), |m, c| m.max(*c));
+    (lo, hi)
+}
+
 /// A light as the shaders read it, at `p` relative to the render origin.
 fn gpu_light(l: &PointLight, p: Vec3) -> GpuPointLight {
     let spot = l.direction.length_squared() > 1e-6;
@@ -11734,7 +11770,7 @@ fn view_lamp_light(scene: &Scene, cam_rel: Vec3, forward: Vec3) -> f32 {
                 // profile (lamp_air.wgsl `headlamp`)
                 let g = Vec3::new(x.x, x.y, p.z - 0.8) - p;
                 let gd2 = g.length_squared();
-                headlamp_profile(g / gd2.sqrt().max(1e-3), l.direction, l.beam > 0.0) / gd2.max(0.3) * window
+                headlamp_profile(g / gd2.sqrt().max(1e-3), l.direction, l.beam) / gd2.max(0.3) * window
             } else {
                 let mut e = core * core / (d2 * d2 + core.powi(4)).sqrt() * window;
                 if l.direction.length_squared() > 1e-6 {
@@ -11756,23 +11792,33 @@ fn view_lamp_light(scene: &Scene, cam_rel: Vec3, forward: Vec3) -> f32 {
     (log_sum / per_point.len() as f32).exp() - floor
 }
 
-/// A headlamp's intensity towards `t` (unit, from the lamp): lamp_air.wgsl `headlamp`.
-fn headlamp_profile(t: Vec3, dir: Vec3, low: bool) -> f32 {
+/// A headlamp's intensity towards `t` (unit, from the lamp) for its `beam` mode:
+/// lamp_air.wgsl `headlamp`.
+fn headlamp_profile(t: Vec3, dir: Vec3, mode: f32) -> f32 {
     let fwd = (dir.truncate() + glam::Vec2::new(1e-6, 0.0)).normalize();
     let ahead = t.truncate().dot(fwd);
     if ahead <= 0.0 {
         return 0.0;
     }
-    let across = (t.x * fwd.y - t.y * fwd.x).abs() / ahead;
-    let wide = 0.12 * atmosphere::smoothstep(1.0, 0.45, across) + 0.88 * (-across * across / 0.06).exp();
-    let drop = -t.z / t.truncate().length().max(1e-3);
-    let mut up = (0.06 / drop.abs().max(1e-4)).powf(3.4).min(1.0);
-    if low {
-        up *= atmosphere::smoothstep(-0.012, 0.025, drop);
-        return wide * up;
+    let side = if mode > 1.9 { -1.0 } else { 1.0 } * (t.x * fwd.y - t.y * fwd.x);
+    let soft = if mode.abs().fract() > 0.1 { 0.35 } else { 0.15 };
+    let h = side.atan2(ahead).to_degrees();
+    let v = (t.z.atan2(t.truncate().length()) - dir.z.atan2(dir.truncate().length().max(1e-4))).to_degrees();
+    if mode < 0.0 {
+        let core = (-(h * h) / 25.0 - (v + 0.3) * (v + 0.3) / 3.2).exp();
+        let over = (v - 0.5).max(0.0) / 2.5;
+        let flood_v = (-over * over).exp() / (1.0 + ((-v - 0.8).max(0.0) / 1.6).powf(1.6));
+        let flood = (0.6 * (-(h * h) / 81.0).exp() + 0.4 * (-(h * h) / 900.0).exp()) * flood_v;
+        return 3.0 * core + 0.8 * flood;
     }
-    let hot = (-across * across / 0.012 - drop * drop / 0.0004).exp();
-    wide * up + 6.0 * hot
+    let cut = -0.57 + (0.268 * h).clamp(0.0, 1.6);
+    let edge = 0.015 + 0.985 * atmosphere::smoothstep(-soft, soft, cut - v);
+    let under = -0.57 - v;
+    let vert = (0.45 + 0.55 * atmosphere::smoothstep(-0.35, 0.0, under)) / (1.0 + ((under - 0.6).max(0.0) / 1.4).powf(1.6));
+    let hk = (h - 1.5) / 7.0;
+    let wide = 0.25 + 0.45 * atmosphere::smoothstep(1.0, 6.0, under);
+    let across = (1.0 - wide) * (-hk * hk).exp() + wide * (-(h * h) / 1225.0).exp();
+    across * vert * edge
 }
 
 /// The extinction of falling snow (1/m) for a snowfall of strength `s` (0..1): the
@@ -12346,9 +12392,12 @@ struct GpuTimers {
     ready: Arc<std::sync::atomic::AtomicBool>,
     /// pass → (seconds, frames)
     totals: std::collections::BTreeMap<&'static str, (f64, u32)>,
+    /// When the timers were made, and how many seconds of frames they leave out.
+    born: std::time::Instant,
+    skip: f32,
 }
 
-const GPU_TIMER_PASSES: u32 = 16;
+const GPU_TIMER_PASSES: u32 = 64;
 
 impl GpuTimers {
     fn new(device: &wgpu::Device) -> Option<GpuTimers> {
@@ -12385,6 +12434,8 @@ impl GpuTimers {
             waiting: false,
             ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             totals: Default::default(),
+            born: std::time::Instant::now(),
+            skip: omsi_cfg::env::var("OMSI_GPU_TIMERS_SKIP").ok().and_then(|s| s.trim().parse().ok()).unwrap_or(60.0),
         })
     }
 }
@@ -13272,6 +13323,55 @@ fn snap_rect(r: [f32; 4]) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The low beam as an ECE lamp sends it: towards the kerb brighter and higher than
+    /// towards the oncoming traffic, next to nothing over the cut-off, the hot spot brighter
+    /// than the foreground; mirrored where the map drives on the left; a full beam far
+    /// brighter along the horizon; and the cut-off measured from the vehicle's own horizon.
+    #[test]
+    fn a_headlamp_has_an_asymmetric_cut_off_and_a_hot_spot() {
+        // towards (h, v) degrees from a lamp looking along +y
+        let at = |h: f32, v: f32| {
+            let (h, v) = (h.to_radians(), v.to_radians());
+            Vec3::new(h.sin() * v.cos(), h.cos() * v.cos(), v.sin())
+        };
+        let level = Vec3::Y;
+        let hot = headlamp_profile(at(1.5, -0.7), level, 1.0);
+        assert!(hot > 0.95, "{hot}");
+        // the oncoming side: 0.3 deg over its cut-off dark, the kerb side still lit there
+        assert!(headlamp_profile(at(-4.0, -0.27), level, 1.0) < 0.03);
+        assert!(headlamp_profile(at(6.0, -0.27), level, 1.0) > 0.3);
+        assert!(headlamp_profile(at(3.0, 3.0), level, 1.0) < 0.02);
+        assert!(headlamp_profile(at(0.0, -8.0), level, 1.0) < 0.2 * hot);
+        assert!(headlamp_profile(at(6.0, -1.0), level, 1.0) > headlamp_profile(at(-6.0, -1.0), level, 1.0));
+        // left-hand traffic: the same beam mirrored
+        let r = headlamp_profile(at(6.0, -0.27), level, 1.0);
+        assert!((headlamp_profile(at(-6.0, -0.27), level, 2.0) - r).abs() < 1e-5);
+        // a halogen lamp: the same beam for the same traffic, its cut-off softer
+        assert!((headlamp_profile(at(6.0, -0.27), level, 1.25) - r).abs() < 0.05);
+        assert!(headlamp_profile(at(-4.0, -0.3), level, 1.25) > 2.0 * headlamp_profile(at(-4.0, -0.3), level, 1.0));
+        assert!(headlamp_profile(at(-6.0, -0.27), level, 2.25) > 0.3);
+        // the full beam lights the horizon ahead
+        assert!(headlamp_profile(at(0.0, 0.0), level, -1.0) > 2.5);
+        assert!(headlamp_profile(at(0.0, 0.0), level, -1.25) > 2.5);
+        assert!(headlamp_profile(at(0.0, 0.0), level, 1.0) < 0.05);
+        // nothing behind the glass
+        assert_eq!(headlamp_profile(at(120.0, -1.0), level, 1.0), 0.0);
+        // a bus climbing 4 deg: its beam's hot spot climbs with it
+        let climb = Vec3::new(0.0, 4f32.to_radians().cos(), 4f32.to_radians().sin());
+        assert!((headlamp_profile(at(1.5, 3.3), climb, 1.0) - hot).abs() < 1e-3);
+    }
+
+    /// A headlamp goes into the light grid's cells ahead of it only.
+    #[test]
+    fn a_headlamp_reaches_the_cells_ahead_of_it() {
+        let lamp = PointLight { radius: 150.0, direction: Vec3::Y, beam: 1.0, ..Default::default() };
+        let (lo, hi) = light_extent(&lamp, Vec3::new(10.0, 20.0, 1.0));
+        assert!((lo - glam::Vec2::new(-140.0, 20.0)).length() < 1e-3 && (hi - glam::Vec2::new(160.0, 170.0)).length() < 1e-3, "{lo} {hi}");
+        let lamp = PointLight { radius: 40.0, ..Default::default() };
+        let (lo, hi) = light_extent(&lamp, Vec3::ZERO);
+        assert_eq!((lo, hi), (glam::Vec2::splat(-40.0), glam::Vec2::splat(40.0)));
+    }
 
     /// A textured material can have black diffuse but white ambient (depot interiors).
     /// Enhanced must not turn it into a black surface or silently replace its diffuse.

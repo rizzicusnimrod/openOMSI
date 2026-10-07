@@ -244,6 +244,9 @@ pub struct AiCar {
     pub two_stroke: Option<crate::ai_drivers::TwoStroke>,
     /// `driver` has been looked at (a car none is made for is not asked again).
     pub driver_checked: bool,
+    /// Put on the road by a demo's scene (`crate::demo`): its driver is `Driver::demo`'s, and
+    /// the bus's high beams dazzle it over a wider angle (round a bend, too).
+    pub demo: bool,
     /// What its driver shows this frame, for the LAN clients' copies (`lan_world`).
     pub shown: Shown,
 }
@@ -1087,7 +1090,18 @@ fn drive_driver(
 /// The player's bus `p` has its high beams in the eyes of a driver at `pos` heading
 /// `heading` (degrees): coming towards each other, each in the other's beam (within 14°),
 /// nearer than `range` m.
+#[cfg(test)]
 fn dazzles(p: &PlayerBox, pos: DVec3, heading: f64, range: f32) -> bool {
+    dazzles_within(p, pos, heading, range, DAZZLE_CONE)
+}
+
+/// The cosine of the angle off each other's way within which a bus's high beams dazzle an
+/// oncoming driver (some 14 deg), and a demo's car (some 37 deg: round a bend).
+const DAZZLE_CONE: f64 = 0.97;
+const DEMO_DAZZLE_CONE: f64 = 0.8;
+
+/// `dazzles` with the cone's cosine `cone`.
+fn dazzles_within(p: &PlayerBox, pos: DVec3, heading: f64, range: f32, cone: f64) -> bool {
     let d = p.0.truncate() - pos.truncate();
     let dist = d.length();
     if !(15.0..range as f64).contains(&dist) {
@@ -1095,8 +1109,7 @@ fn dazzles(p: &PlayerBox, pos: DVec3, heading: f64, range: f32) -> bool {
     }
     let ahead = |h: f64| DVec2::new(h.to_radians().sin(), h.to_radians().cos());
     let towards = d / dist;
-    const BEAM: f64 = 0.97;
-    towards.dot(ahead(heading)) > BEAM && (-towards).dot(ahead(p.1)) > BEAM
+    towards.dot(ahead(heading)) > cone && (-towards).dot(ahead(p.1)) > cone
 }
 
 /// The driver of a random car: how fast, how close, how patient (see `AiState`).
@@ -3164,6 +3177,7 @@ impl Traffic {
             driver: None,
             two_stroke: None,
             driver_checked: false,
+            demo: false,
             park: None,
             seed,
             scheme,
@@ -3196,6 +3210,42 @@ impl Traffic {
             }
         }
         None
+    }
+
+    /// A car of the map's random traffic put on `lane` at `s` metres, going `speed` m/s,
+    /// whose driver flashes as a demo's scene needs (`crate::demo`, `Driver::demo`): an
+    /// ordinary car, one whose model has high beams to flash where there is one. Its id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_demo_car(
+        &mut self,
+        world: &World,
+        renderer: &Renderer,
+        scene: &mut Scene,
+        lane: usize,
+        s: f32,
+        speed: f32,
+        flashes: crate::ai_drivers::DemoFlashes,
+    ) -> Option<u64> {
+        let car = |t: &&(Arc<VehicleType>, f32, LaneKind, usize)| t.2 == LaneKind::Street && t.0.def.mass > 0.5 && t.0.def.mass <= 2.5;
+        let mut pool: Vec<Arc<VehicleType>> = self.types.iter().filter(car).filter(|t| t.0.ai_patch.high_beam).map(|t| t.0.clone()).collect();
+        if pool.is_empty() {
+            pool = self.types.iter().filter(car).map(|t| t.0.clone()).collect();
+        }
+        if pool.is_empty() || lane >= self.net.lanes.len() {
+            return None;
+        }
+        let seed = self.rand();
+        let ty = pool[(seed % pool.len() as u64) as usize].clone();
+        let center = self.net.lanes[lane].at(s).0;
+        let id = self.create_car(world, renderer, scene, center, LaneKind::Street, lane, s, ty, seed, None, None, Some(speed), None);
+        if let Some(c) = self.cars.iter_mut().find(|c| c.id == id) {
+            c.demo = true;
+            c.driver = Some(Box::new(crate::ai_drivers::Driver::demo(c.seed, &self.driver_cfg, flashes)));
+            c.driver_checked = true;
+            let p = c.vehicle.position;
+            log::info!("demo: car {id} ({}) on lane {lane} at {s:.0} m, at ({:.0}, {:.0}), {:.0} km/h", c.vehicle.ty.def.path.display(), p.x, p.y, speed * 3.6);
+        }
+        Some(id)
     }
 
     /// The vehicle/paint sets the random traffic draws from.
@@ -5286,7 +5336,8 @@ impl Traffic {
         let st = &car.state;
         let (centre, heading, half_len, _, speed) = *player;
         // (a bus that indicates and stays for long is not waited for: it is passed)
-        if signal_age > 1.0 || speed.abs() > 3.0 || (signalling > 20.0 && speed.abs() < 0.3) || (car.vehicle.position - centre).length() > 120.0 {
+        // (a demo's car waits for it however long it indicates, see `crate::demo`)
+        if signal_age > 1.0 || speed.abs() > 3.0 || (signalling > 20.0 && speed.abs() < 0.3 && !car.demo) || (car.vehicle.position - centre).length() > 120.0 {
             return None;
         }
         let h = heading.to_radians();
@@ -5303,6 +5354,25 @@ impl Traffic {
         let l = self.player_on_way(st, car.half_width, player, 2.5)?;
         let comfortable = st.speed * st.speed / (2.0 * st.decel.max(1.0));
         (l.gap > 0.5 && l.gap >= comfortable).then_some(l.gap)
+    }
+
+    /// `letting_out` for a demo's car (see `crate::demo`): behind the bus standing and
+    /// indicating out, within 120 m and going its way, it stops 4 m short of the bus's back
+    /// wherever its lane runs - beside a stop's bay as well. The gap to that point.
+    fn demo_letting_out(&self, i: usize, player: &PlayerBox) -> Option<f32> {
+        let car = &self.cars[i];
+        let (centre, heading, half_len, _, speed) = *player;
+        if self.player_signal_age > 1.0 || speed.abs() > 0.5 {
+            return None;
+        }
+        let dir = |h: f64| DVec2::new(h.to_radians().sin(), h.to_radians().cos());
+        let fwd = dir(heading);
+        let rel = (car.vehicle.position - centre).truncate();
+        let behind = -rel.dot(fwd);
+        if !(0.0..120.0).contains(&behind) || dir(car.vehicle.heading).dot(fwd) < 0.7 || rel.perp_dot(fwd).abs() > 8.0 {
+            return None;
+        }
+        Some((behind as f32 - half_len - car.state.front - 4.0).max(0.6))
     }
 
     /// `player_in_way` for a car of half width `half_width` on the way `st` lays out (also a
@@ -6178,6 +6248,10 @@ impl Traffic {
                 .player
                 .and_then(|p| self.letting_out(i, &p, self.player_signal_age, self.player_signalling))
                 .map(|g| (g, u64::MAX));
+            // (a demo's car lets the bus out wherever its lane runs beside it, a stop's bay too)
+            if let_out_of.is_none() && self.cars[i].demo {
+                let_out_of = self.player.and_then(|p| self.demo_letting_out(i, &p)).map(|g| (g, u64::MAX));
+            }
             for (id, o) in others.iter().filter(|(id, _)| *id < 0xFFF0_0000) {
                 let Some(&(age, signalling)) = self.others_signal_age.get(id) else { continue };
                 if let Some(g) = self.letting_out(i, o, age, signalling) {
@@ -6550,11 +6624,13 @@ impl Traffic {
                     0.0
                 };
                 // the high beams of any player's bus in the driver's eyes
-                let range = self.driver_cfg.flash_dazzle_m;
+                // (a demo's car: from a little further and round a bend as well - the scene
+                // must play wherever the road bends, see `crate::demo`)
+                let (range, cone) = if car.demo { (self.driver_cfg.flash_dazzle_m.max(300.0), DEMO_DAZZLE_CONE) } else { (self.driver_cfg.flash_dazzle_m, DAZZLE_CONE) };
                 let (pos, heading) = (car.vehicle.position, car.vehicle.heading);
                 let dazzled = self.dark
-                    && ((self.player_high_beam && self.player.is_some_and(|p| dazzles(&p, pos, heading, range)))
-                        || others.iter().any(|(id, o)| self.others_signals.get(id).is_some_and(|s| s.0) && dazzles(o, pos, heading, range)));
+                    && ((self.player_high_beam && self.player.is_some_and(|p| dazzles_within(&p, pos, heading, range, cone)))
+                        || others.iter().any(|(id, o)| self.others_signals.get(id).is_some_and(|s| s.0) && dazzles_within(o, pos, heading, range, cone)));
                 // (what holds the way ahead besides the vehicle in front itself)
                 let held_ahead = [light, yield_at, merge_wait, people, parked_wait, let_out].iter().any(Option::is_some);
                 // whom it lets go first by choice: a bus out of its stop once it waits for it
@@ -8035,6 +8111,7 @@ impl Traffic {
             driver: None,
             two_stroke: None,
             driver_checked: false,
+            demo: false,
             park: None,
         });
         self.cars.len() - 1

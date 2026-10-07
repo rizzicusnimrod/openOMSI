@@ -344,6 +344,8 @@ struct MaterialParams {
     flags: vec4<f32>,
     // rgb: the D3D material's ambient colour, which takes the ambient light (C)
     ambient: vec4<f32>,
+    // x: retroreflective sheeting (a traffic sign's face, a delineator's reflector)
+    retro: vec4<f32>,
 };
 @group(1) @binding(2) var<uniform> material: MaterialParams;
 @group(1) @binding(3) var t_trans: texture_2d<f32>;

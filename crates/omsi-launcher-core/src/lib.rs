@@ -1799,7 +1799,14 @@ fn mirror_refresh(x: &str) -> &'static str {
 
 /// The page's view of a `settings.cfg` text (None: no file yet, the game's defaults).
 pub fn settings_from_text(text: Option<&str>) -> Value {
-    let mut v = json!({ "msaa": 4, "anisotropy": 8, "ssao": true, "shadows": true, "shadow_size": 2048, "navigator": true, "ui_opacity": 0.85, "navigator_corner": "bottom-left", "boarding": "auto", "detail_textures": true, "exact_fare": true, "enhanced": false, "graphics": "vanilla_plus", "fullscreen": false, "vsync": true, "volume": 0.6, "drive_keys": "simple", "render_scale": "auto", "view_distance": "auto", "language": "ENG", "texture_memory": 0, "texture_compression": true, "chat": true, "tooltips": true, "name_tags": true, "show_fps": false, "clouds": true, "pax_density": 1.0, "vol_ai": 1.0, "vol_scenery": 1.0, "mirror_size": 256, "doppler": true, "driver": true, "max_fps": 0, "min_obj_size": 0.013, "max_obj_dist": "auto" });
+    let mut v = json!({ "msaa": 8, "anisotropy": 16, "ssao": true, "shadows": true, "shadow_size": 4096, "navigator": true, "ui_opacity": 0.85, "navigator_corner": "bottom-left", "boarding": "auto", "detail_textures": true, "exact_fare": true, "enhanced": true, "graphics": "enhanced", "fullscreen": false, "vsync": true, "volume": 0.6, "drive_keys": "simple", "render_scale": "1", "view_distance": "auto", "language": "ENG", "texture_memory": 0, "texture_compression": true, "chat": true, "tooltips": true, "name_tags": true, "show_fps": false, "clouds": true, "pax_density": 1.0, "vol_ai": 1.0, "vol_scenery": 1.0, "mirror_size": 512, "doppler": true, "driver": true, "max_fps": 0, "min_obj_size": 0.013, "max_obj_dist": "auto" });
+    // (the custom fork's recommended graphics above are a computer's; a phone keeps the
+    // game's lighter ones, as its settings' defaults do)
+    if cfg!(target_os = "android") {
+        for (k, x) in [("msaa", json!(2)), ("anisotropy", json!(4)), ("ssao", json!(false)), ("shadow_size", json!(1024)), ("mirror_size", json!(128)), ("enhanced", json!(false)), ("graphics", json!("vanilla_plus")), ("render_scale", json!("auto"))] {
+            v[k] = x;
+        }
+    }
     v["triple_screen"] = json!(false);
     v["triple_span"] = json!(true);
     v["triple_hud_center"] = json!(true);
@@ -2103,19 +2110,19 @@ pub fn settings_to_text(v: &Value, old: Option<&str>) -> String {
     let f = |k: &str, d: f64| v.get(k).and_then(|x| x.as_f64()).unwrap_or(d);
     let text = format!(
         "# openOMSI settings (written by the launcher)\nversion=2\nmsaa={}\nanisotropy={}\nssao={}\nshadows={}\nshadow_size={}\nnavigator={}\nui_opacity={}\nnavigator_corner={}\nboarding={}\ndetail_textures={}\nexact_fare={}\nenhanced={}\ngraphics={}\nfullscreen={}\nvsync={}\nvolume={}\ndrive_keys={}\nrender_scale={}\nview_distance={}\nlanguage={}\ntexture_memory={}\ntexture_compression={}\nchat={}\ntooltips={}\nname_tags={}\nshow_fps={}\nclouds={}\npax_density={}\nvol_ai={}\nvol_scenery={}\nmirror_size={}\ndoppler={}\ndriver={}\nmax_fps={}\nmin_obj_size={}\nmax_obj_dist={}\n",
-        n("msaa", 4),
-        n("anisotropy", 8),
+        n("msaa", 8),
+        n("anisotropy", 16),
         b("ssao", true),
         b("shadows", true),
-        n("shadow_size", 2048),
+        n("shadow_size", 4096),
         b("navigator", true),
         f("ui_opacity", 0.85),
         v.get("navigator_corner").and_then(|x| x.as_str()).unwrap_or("bottom-left"),
         v.get("boarding").and_then(|x| x.as_str()).unwrap_or("auto"),
         b("detail_textures", true),
         b("exact_fare", true),
-        matches!(graphics_mode(v.get("graphics").and_then(|x| x.as_str()).unwrap_or("vanilla_plus")), "enhanced" | "enhanced_plus") as u8,
-        graphics_mode(v.get("graphics").and_then(|x| x.as_str()).unwrap_or("vanilla_plus")),
+        matches!(graphics_mode(v.get("graphics").and_then(|x| x.as_str()).unwrap_or("enhanced")), "enhanced" | "enhanced_plus") as u8,
+        graphics_mode(v.get("graphics").and_then(|x| x.as_str()).unwrap_or("enhanced")),
         b("fullscreen", false),
         b("vsync", true),
         f("volume", 0.6),
@@ -2124,7 +2131,7 @@ pub fn settings_to_text(v: &Value, old: Option<&str>) -> String {
         match v.get("render_scale") {
             Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
             Some(Value::Number(x)) => x.to_string(),
-            _ => "auto".to_string(),
+            _ => "1".to_string(),
         },
         // metres, or "auto" (the game's 1200 m)
         match v.get("view_distance") {
@@ -2143,7 +2150,7 @@ pub fn settings_to_text(v: &Value, old: Option<&str>) -> String {
         f("pax_density", 1.0),
         f("vol_ai", 1.0),
         f("vol_scenery", 1.0),
-        match n("mirror_size", 256) { 0 => 0, x => x.clamp(64, 2048) },
+        match n("mirror_size", 512) { 0 => 0, x => x.clamp(64, 2048) },
         b("doppler", true),
         b("driver", true),
         n("max_fps", 0).max(0),
@@ -3158,8 +3165,17 @@ mod tests {
         assert_eq!(v["language"], "ENG");
         assert_eq!(v["texture_memory"], 0);
         let text = settings_to_text(&v, None);
-        for line in ["view_distance=auto", "language=ENG", "texture_memory=0", "texture_compression=1", "render_scale=auto"] {
+        for line in ["view_distance=auto", "language=ENG", "texture_memory=0", "texture_compression=1"] {
             assert!(text.lines().any(|l| l == line), "{line} missing in\n{text}");
+        }
+        // the custom fork's recommended graphics on a computer, the lighter ones on a phone
+        let recommended: &[&str] = if cfg!(target_os = "android") {
+            &["render_scale=auto", "graphics=vanilla_plus", "msaa=2"]
+        } else {
+            &["render_scale=1", "graphics=enhanced", "enhanced=1", "msaa=8", "anisotropy=16", "shadow_size=4096", "mirror_size=512"]
+        };
+        for line in recommended {
+            assert!(text.lines().any(|l| l == *line), "{line} missing in\n{text}");
         }
         // nonsense from a hand-edited file falls back to the defaults
         let v = settings_from_text(Some("view_distance=far\nview_distance=-5\nlanguage=Klingon\ntexture_memory=lots\n"));

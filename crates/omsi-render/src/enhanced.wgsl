@@ -207,6 +207,10 @@ fn lamp_shadow_at(li: u32, p: vec3<f32>, n: vec3<f32>, thin: bool) -> f32 {
     return sum / 9.0;
 }
 
+// A retroreflective sign's light sent back towards a headlamp, relative to its albedo
+// (see `lamp_light`; a white face's diffuse light facing the lamp is 1/PI of it).
+const SIGN_RETRO: f32 = 14.0;
+
 // The point and spot lights of the pixel's grid cell: diffuse and specular.
 // `thin`: foliage, lit from whichever side the lamp is on (see the sun below).
 fn lamp_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, sf: Surface, thin: bool, shadows: bool) -> vec3<f32> {
@@ -254,7 +258,7 @@ fn lamp_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, sf: Surface, thin: bool,
         let window = (1.0 - q * q) * (1.0 - q * q);
         var e = core * core / sqrt(dist2 * dist2 + core * core * core * core) * window;
         if (l.extra.z != 0.0) {
-            e = headlamp(-ld, l.dir.xyz, l.extra.z > 0.0) / max(dist2, 0.3) * window;
+            e = headlamp(-ld, l.dir.xyz, l.extra.z) / max(dist2, 0.3) * window;
         } else if (l.dir.w > -1.5) {
             let cd = dot(-ld, l.dir.xyz);
             e = e * smoothstep(l.dir.w, l.extra.x, cd);
@@ -276,6 +280,37 @@ fn lamp_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, sf: Surface, thin: bool,
         // the lamps' own shadow maps (the few lighting the view most, see `lamp_shadow_at`)
         if (shadows) {
             irr = irr * lamp_shadow_at(li, p, n, thin);
+        }
+        // Under a headlamp the road looks far brighter than a matt surface would: seen from
+        // beside the lamp at a grazing angle, asphalt sends much of the light straight back
+        // where it came from (its grit's lit faces turned to the lamp, their shade out of
+        // sight) - the road's retroreflection (R_L, EN 1436 / CIE 144: some 20 mcd/m2/lx
+        // dry, against the 0.6 a matt surface of its albedo gives 1 deg under the lamp), and
+        // a road marking's glass beads several times more. Without it the road under a low
+        // beam darkened as the cube of the distance past 20 m; with it the road reads as a
+        // driver sees it, out to the cut-off. It is a narrow lobe round the way back to the
+        // lamp (some 3.5 deg): another car's lamps seen from the side do not show it, a
+        // driver behind the lamps does, more the further down the road. Water drowns most.
+        if (l.extra.z != 0.0 && (nl > 0.0 || thin)) {
+            let k = exp(-(1.0 - dot(ld, v)) / 0.0019);
+            if (k > 0.002) {
+                let white = smoothstep(0.3, 0.65, dot(sf.albedo, vec3<f32>(0.2126, 0.7152, 0.0722)));
+                let graze = 1.0 - clamp(nl, 0.0, 1.0);
+                let wet = clamp(enh.weather.x, 0.0, 1.0);
+                sum = sum + irr * sf.albedo * mix(0.12, 0.5, white) * k * graze * graze * (1.0 - 0.75 * wet);
+            }
+        }
+        // Retroreflective sheeting (a traffic sign's face, a delineator's reflector): its
+        // glass beads or prisms send a headlamp's light back the way it came, some hundred
+        // times what white paint would (R_A 70 - 250 cd/lx/m2 against 0.25), in a lobe a
+        // degree or two wide. A car's driver, close above the lamps, sees a sign blaze from
+        // far off; a bus driver, higher over them, a little less and only further away; and
+        // anyone off to the side sees the paint. Turned away from the lamp it gives less.
+        if (material.retro.x > 0.5 && l.extra.z != 0.0 && nl > 0.0) {
+            let ks = exp(-(1.0 - dot(ld, v)) / 0.00034);
+            if (ks > 0.002) {
+                sum = sum + irr * sf.albedo * SIGN_RETRO * ks * sqrt(nl);
+            }
         }
         if (thin) {
             // a headlamp skims the grass: it lights the tips, not a crown's every side

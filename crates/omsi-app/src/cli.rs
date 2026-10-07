@@ -169,6 +169,10 @@ pub(crate) struct Args {
     /// or "auto" = the first car that overtakes (then --snapshots are seconds after that).
     #[arg(long)]
     pub(crate) follow: Option<String>,
+    /// A scene that plays out every time, for a video (the custom fork's, see `demo.rs`):
+    /// "flashes" - a car lets the bus out of its stop, an oncoming one flashes at its high beams.
+    #[arg(long)]
+    pub(crate) demo: Option<String>,
     /// Offscreen: also save images at these seconds of the --drive run (out_<t>.png).
     #[arg(long)]
     pub(crate) snapshots: Option<String>,

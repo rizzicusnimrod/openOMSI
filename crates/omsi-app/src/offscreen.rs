@@ -384,6 +384,7 @@ pub(crate) fn run_offscreen(
     let mut spray = puddles::Spray::new();
     let spray_wet = puddles::road_wetness(initial_wetness(&weather), weather.snow);
     let spray_wind = Vec3::new(weather.wind.0.to_radians().sin(), weather.wind.0.to_radians().cos(), 0.0) * weather.wind.1 * puddles::GROUND_WIND;
+    let mut demo = args.demo.as_deref().and_then(crate::demo::Demo::new);
     for i in 0..total_frames {
         let t_s = i as f32 * dt;
         if server {
@@ -639,6 +640,9 @@ pub(crate) fn run_offscreen(
             t.player_high_beam = player.as_ref().is_some_and(|p| crate::traffic_link::high_beam(&p.vehicle));
             t.others_signals = crate::traffic_link::lan_signals(&remotes_off);
             t.tick(dt, player.as_ref().map(|p| player_outline(p)));
+            if let Some(d) = demo.as_mut() {
+                d.tick(dt, t, &world, &renderer, &mut scene, player.as_ref().map(|p| player_outline(p)));
+            }
             world.set_switches(&t.switch_requests());
             world.set_signals(&t.signal_aspects(&world.signal_routes, None));
             if let Some(p) = player.as_mut() {

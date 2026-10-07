@@ -7,10 +7,10 @@ use omsi_render::{Corona, LightMode, Lighting, PointLight, Scene};
 
 use omsi_sim::{Daylight, VehicleInstance};
 
-/// A headlight's strength for the enhanced renderer, its beam's at full (`headlamp` in
-/// `enhanced.wgsl`): the road from the bumper out to some 12 m lit about as brightly as a
-/// street under a lamp, and less beyond.
-const HEADLIGHT_INTENSITY: f32 = 1800.0;
+/// A headlight's strength for the enhanced renderer, at its low beam's hot spot (`headlamp`
+/// in `lamp_air.wgsl`): the road some 10 m ahead lit about as brightly as a street under a
+/// lamp, and the road to the cut-off still seen (its retroreflection, `enhanced.wgsl`).
+const HEADLIGHT_INTENSITY: f32 = 2400.0;
 
 /// A `[spotlight]` declaring this range or more is a full beam (the stock buses' 500, the
 /// Grand Paris-Moulon Citaro's 450), less a low beam (the stock 100, that Citaro's 200).
@@ -124,6 +124,7 @@ pub fn vehicle_lights(
     coronas: &mut Vec<Corona>,
     lights: &mut Vec<PointLight>,
     night: f32,
+    camera: DVec3,
 ) {
     let ty = &v.ty;
     // def index → loaded mesh index (animation transform)
@@ -140,6 +141,9 @@ pub fn vehicle_lights(
             None => v.body_rotation(),
         }
     };
+    let first_corona = coronas.len();
+    // (bulbs: their light goes with the vehicle's voltage)
+    let volts = if halogen() { bulb_voltage(v) } else { 1.0 };
     coronas.extend(crate::scene::model_lights_faded(&ty.model, &mesh_xf, v.position, &value_of, &v.light_fade));
     // An articulated vehicle is one visual bus, but its rear section has its own
     // `[light_enh_2]`/corona declarations and animated meshes.  The old collector only
@@ -160,17 +164,30 @@ pub fn vehicle_lights(
             &t.light_fade,
         ));
     }
+    if halogen() {
+        // a bulb's white - headlamps, position and reversing lamps - is a halogen
+        // filament's warm one; the red and amber lenses stay as they are
+        for c in &mut coronas[first_corona..] {
+            let [r, g, b] = c.color;
+            if r.min(g).min(b) > 0.7 * r.max(g).max(b) {
+                c.color = [r * HALOGEN_TINT[0], g * HALOGEN_TINT[1], b * HALOGEN_TINT[2]];
+            }
+            c.brightness *= volts;
+        }
+    }
     let body = v.body_rotation();
-    // headlights: the spotlight selected by Spot_Select
+    // headlights: the spotlight selected by Spot_Select, as far as it has come on (two of
+    // them crossing over a moment when the beam is changed, with halogen lamps)
     // (OMSI_SPOT_SELECT=n: that spotlight on, for checking the headlights in a picture)
     let forced = omsi_cfg::env::var("OMSI_SPOT_SELECT").ok().and_then(|s| s.trim().parse::<f32>().ok());
-    if let Some(sel) = forced.or_else(|| v.var("Spot_Select")) {
-        if sel >= 0.0 {
-            if let Some(sp) = ty.model.spotlights.get(sel as usize) {
+    for (sel, weight) in spot_picks(v, forced) {
+        {
+            if let Some(sp) = ty.model.spotlights.get(sel) {
                 let vals = sp.values;
                 let d = body
                     .transform_vector3(Vec3::new(vals[3], vals[4], vals[5]))
                     .normalize_or_zero();
+                let level = beam_level(body, Vec3::new(vals[3], vals[4], vals[5]));
                 // D3D's spot is only a direction: the stock NL202 puts it 3.8 m behind its
                 // nose, where the real one lit the dashboard and the windscreen from inside.
                 // It shines from the vehicle's front (or rear) face at its own height. The face
@@ -232,7 +249,7 @@ pub fn vehicle_lights(
                 let sides: &[f32] = if spread > 0.1 { &[-1.0, 1.0] } else { &[0.0] };
                 for side in sides {
                     let at = v.position + (apex + right * spread * side).as_dvec3();
-                    push_spot(lights, at, d, &vals, 1.0 / sides.len() as f32, night);
+                    push_spot(lights, at, d, level, &vals, weight * volts / sides.len() as f32, night);
                 }
             }
         }
@@ -248,9 +265,12 @@ pub fn vehicle_lights(
             for (pos, dir, share) in spotlight_2_lamps(sp, value_of(sp.variable.as_str())) {
                 let at = origin + rot.transform_point3(pos).as_dvec3();
                 let d = rot.transform_vector3(dir).normalize_or_zero();
-                push_spot(lights, at, d, &sp.values, share, night);
+                push_spot(lights, at, d, beam_level(rot, dir), &sp.values, share * volts, night);
             }
         }
+    }
+    if ty.model.spotlights.is_empty() && ty.model.spotlights_2.is_empty() {
+        ai_headlamps(v, body, &value_of, volts, camera, lights);
     }
     // [interiorlight]s light only the meshes listing them and the passengers (per-instance
     // term, see MeshProps::interior); they do not shine on the outside world.
@@ -273,43 +293,216 @@ fn spotlight_2_lamps(sp: &omsi_model::Spotlight2, k: f32) -> Vec<(Vec3, Vec3, f3
         .collect()
 }
 
-/// The lights of one headlamp at `at` shining along `d`, with a `[spotlight]`'s numbers
-/// (`vals`: colour 6-8, range 9, inner and outer cone 10 and 11) and `share` of its light.
-fn push_spot(lights: &mut Vec<PointLight>, at: DVec3, d: Vec3, vals: &[f32; 12], share: f32, night: f32) {
-    let color = [vals[6] / 255.0, vals[7] / 255.0, vals[8] / 255.0];
-    // inner and outer cone as full angles (values 10 and 11)
-    let (inner, outer) = (vals[10], vals[11]);
-    let half = |deg: f32| (deg.clamp(1.0, 179.0) * 0.5).to_radians().cos();
-    let cone = [half(inner.min(outer)), half(outer)];
+/// A beam's own horizon: the lamp's declared direction (in the vehicle's frame) without its
+/// aim up or down, turned with the vehicle - level on a level road, pitched with the bus on
+/// a hill or as it brakes. (The declared aim is a D3D spot's, the stock buses' low beam 17
+/// deg down to reach the road at all; the beam's profile has its own.)
+fn beam_level(body: glam::Mat4, dir: Vec3) -> Vec3 {
+    body.transform_vector3(Vec3::new(dir.x, dir.y, 0.0)).normalize_or_zero()
+}
+
+/// The lights of one headlamp at `at` shining along `d` (a beam along `level`, see
+/// `beam_level`), with a `[spotlight]`'s numbers (`vals`: colour 6-8, range 9, inner and
+/// outer cone 10 and 11) and `share` of its light.
+fn push_spot(lights: &mut Vec<PointLight>, at: DVec3, d: Vec3, level: Vec3, vals: &[f32; 12], share: f32, night: f32) {
     // vanilla: the spot, lit as the classic picture lights a lamp, only inside
     // its cone (three point lights along its axis stood in for it before: they
     // shone every way, on the bus's own body and saloon)
     lights.push(PointLight {
         position: at,
         radius: spot_reach(vals[9], 45.0),
-        color,
+        color: spot_color(vals),
         intensity: VANILLA_HEADLIGHT_INTENSITY * share * (0.3 + 0.7 * night),
         direction: d,
-        cone,
+        cone: spot_cone(vals),
         mode: LightMode::Vanilla,
         ..Default::default()
     });
-    // enhanced: falling off with the square of the distance from a one-metre core
-    lights.push(PointLight {
+    lights.push(enhanced_spot(at, d, level, vals, share));
+}
+
+fn spot_color(vals: &[f32; 12]) -> [f32; 3] {
+    [vals[6] / 255.0, vals[7] / 255.0, vals[8] / 255.0]
+}
+
+/// A `[spotlight]`'s cone, the cosines of its inner and outer half angle (values 10 and 11
+/// are the full angles).
+fn spot_cone(vals: &[f32; 12]) -> [f32; 2] {
+    let (inner, outer) = (vals[10], vals[11]);
+    let half = |deg: f32| (deg.clamp(1.0, 179.0) * 0.5).to_radians().cos();
+    [half(inner.min(outer)), half(outer)]
+}
+
+/// The enhanced picture's light of a headlamp (see `push_spot`): falling off with the
+/// square of the distance from a one-metre core.
+fn enhanced_spot(at: DVec3, d: Vec3, level: Vec3, vals: &[f32; 12], share: f32) -> PointLight {
+    // (a lamp pointing steeply down - a `[spotlight_2]` over a door - keeps its cone: the
+    // road lamp's profile is for one aimed along the road; a low beam's cut-off rises
+    // towards the kerb, which is on the left where the map drives on the left)
+    // (a halogen lamp: a quarter more in the beam's magnitude, its reflector's softer
+    // cut-off, see lamp_air.wgsl `headlamp`)
+    let soft = if halogen() { 0.25 } else { 0.0 };
+    let beam = if d.normalize_or_zero().z.abs() >= 0.5 || level == Vec3::ZERO {
+        0.0
+    } else if vals[9] >= FULL_BEAM_RANGE {
+        -1.0 - soft
+    } else if crate::humans::LEFT_HAND.load(std::sync::atomic::Ordering::Relaxed) {
+        2.0 + soft
+    } else {
+        1.0 + soft
+    };
+    let mut color = spot_color(vals);
+    if halogen() {
+        color = [color[0] * HALOGEN_TINT[0], color[1] * HALOGEN_TINT[1], color[2] * HALOGEN_TINT[2]];
+    }
+    PointLight {
         position: at,
         radius: spot_reach(vals[9], 60.0),
         color,
         intensity: HEADLIGHT_INTENSITY * share,
-        direction: d,
-        cone,
+        direction: if beam != 0.0 { level } else { d },
+        cone: spot_cone(vals),
         core: 1.0,
-        // (a lamp pointing steeply down - a `[spotlight_2]` over a door - keeps its cone: the
-        // road lamp's profile is for one aimed along the road)
-        beam: if d.normalize_or_zero().z.abs() >= 0.5 { 0.0 } else if vals[9] >= FULL_BEAM_RANGE { -1.0 } else { 1.0 },
+        beam,
         housed: false,
         mode: LightMode::Enhanced,
-    });
+    }
 }
+
+/// A random car's or lorry's headlamps: as `[spotlight]`s of a stock bus's, a low beam
+/// and a full beam (the colour, range and cones of the TH_Wald buses').
+const AI_LOW_BEAM: [f32; 12] = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 255.0, 255.0, 233.0, 250.0, 30.0, 70.0];
+const AI_FULL_BEAM: [f32; 12] = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 255.0, 255.0, 233.0, 500.0, 30.0, 70.0];
+
+/// A random car or lorry has no `[spotlight]`: its headlamps only glowed, and at night the
+/// oncoming cars lit no road and a car ahead none in front of it. Each side whose headlamps
+/// are on - `AI_Light`, or the drivers' `AIHL_head_l` / `AIHL_head_r`, so that a broken bulb
+/// leaves its side dark - throws a low beam (the enhanced picture's alone) from where its
+/// lamps are, and a full beam besides while the driver flashes them (`AIHL_highbeam`), each
+/// as far as its lamps' glow has come on (`light_fade`: a filament's glow with halogen
+/// lamps) and at the vehicle's voltage (`volts`, see `bulb_voltage`).
+///
+/// (Every beam is a light every pixel of the grid cells it reaches works through: a town's
+/// traffic at night was the graphics card's heaviest load. A car's beam lights the road it
+/// is seen on to some 90 m - past that it is a fiftieth of its light near the car, which
+/// only the driver behind the lamps sees, by the road's retroreflection - and a car further
+/// than `AI_BEAM_SEEN` m from the camera lights so little of the picture that it is left
+/// out. `OMSI_NO_AI_BEAMS`: none, for measuring.)
+fn ai_headlamps(v: &VehicleInstance, body: glam::Mat4, value_of: &dyn Fn(&str) -> f32, volts: f32, camera: DVec3, lights: &mut Vec<PointLight>) {
+    use omsi_sim::ai_patch::{VAR_HEAD_L, VAR_HEAD_R, VAR_HIGH_BEAM};
+    if (v.position - camera).length() > AI_BEAM_SEEN || omsi_cfg::env::var_os("OMSI_NO_AI_BEAMS").is_some() {
+        return;
+    }
+    // per side and beam (low, full): the sum of the lamps' places, their number and how far
+    // the brightest of them is on (0..1)
+    let mut beams = [[(Vec3::ZERO, 0u32, 0.0f32); 2]; 2];
+    let mut k = 0;
+    for m in &v.ty.model.meshes {
+        for l in &m.light_enh_2 {
+            let index = k;
+            k += 1;
+            let var = l.variable.trim();
+            let which = if [AI_HEADLIGHT, VAR_HEAD_L, VAR_HEAD_R].iter().any(|h| var.eq_ignore_ascii_case(h)) {
+                0
+            } else if var.eq_ignore_ascii_case(VAR_HIGH_BEAM) {
+                1
+            } else {
+                continue;
+            };
+            if l.pos[1] <= 0.0 {
+                continue;
+            }
+            let on = match v.light_fade.get(index) {
+                Some(f) => (f / if l.factor > 0.0 { l.factor } else { 1.0 }).clamp(0.0, 1.0),
+                None => (value_of(var) > 0.0) as u8 as f32,
+            };
+            let b = &mut beams[which][(l.pos[0] > 0.0) as usize];
+            b.0 += Vec3::from(l.pos);
+            b.1 += 1;
+            b.2 = b.2.max(on);
+        }
+    }
+    let d = body.transform_vector3(Vec3::Y).normalize_or_zero();
+    for (which, vals, reach) in [(0, &AI_LOW_BEAM, AI_LOW_REACH), (1, &AI_FULL_BEAM, AI_FULL_REACH)] {
+        for (sum, n, on) in beams[which] {
+            if n == 0 || on < 0.005 {
+                continue;
+            }
+            // (a hand's breadth ahead of the glass, off the car's own bumper)
+            let at = v.position + body.transform_point3(sum / n as f32 + Vec3::new(0.0, 0.1, 0.0)).as_dvec3();
+            let mut beam = enhanced_spot(at, d, d, vals, 0.5 * on * volts);
+            beam.radius = beam.radius.min(reach);
+            lights.push(beam);
+        }
+    }
+}
+
+/// The `[spotlight]`s shining and how far each has come on (`VehicleInstance::spot_fade`);
+/// `OMSI_SPOT_SELECT`'s alone and at full when that is set.
+fn spot_picks(v: &VehicleInstance, forced: Option<f32>) -> Vec<(usize, f32)> {
+    if let Some(f) = forced {
+        return if f >= 0.0 { vec![(f as usize, 1.0)] } else { Vec::new() };
+    }
+    if v.spot_fade.is_empty() {
+        return v.var("Spot_Select").filter(|s| *s >= 0.0).map(|s| vec![(s.round() as usize, 1.0)]).unwrap_or_default();
+    }
+    v.spot_fade.iter().enumerate().filter(|(_, f)| **f > 0.005).map(|(i, f)| (i, *f)).collect()
+}
+
+/// The maps whose vehicles all have halogen headlamps and incandescent bulbs - the years
+/// they are set in, before xenon and LED lamps: the Thüringer Wald of 2003 - 2005.
+const HALOGEN_MAPS: [&str; 1] = ["TH_Wald"];
+
+/// The lamps of the map being driven are halogen and incandescent (see `set_halogen_map`).
+static HALOGEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A halogen filament's time constant (s): it glows up in a tenth of a second, and its
+/// light dies a little after it is switched off.
+const FILAMENT_S: f32 = 0.1;
+
+/// A halogen lamp's light (some 3200 K) as the picture's white shows it: the eye takes
+/// much of a lamp's warmth away at night, not all of it - a warm, yellowish white beside a
+/// xenon's or an LED's blue-white.
+const HALOGEN_TINT: [f32; 3] = [1.0, 0.80, 0.56];
+
+/// Whether the map in `map_dir` has halogen lamps (`HALOGEN_MAPS`): its headlamps are then
+/// warm, with a softer cut-off, glow up and go out as filaments do, and are as bright as
+/// the vehicle's voltage lets them (see `bulb_voltage`).
+pub(crate) fn set_halogen_map(map_dir: &std::path::Path) {
+    let name = map_dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let on = HALOGEN_MAPS.iter().any(|m| name.eq_ignore_ascii_case(m));
+    HALOGEN.store(on, std::sync::atomic::Ordering::Relaxed);
+    omsi_sim::vehicle::set_lamp_filament(if on { FILAMENT_S } else { 0.0 });
+    if on {
+        log::info!("lamps: {name} has halogen headlamps and bulbs");
+    }
+}
+
+fn halogen() -> bool {
+    HALOGEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A bulb's light at the vehicle's voltage, as a share of its light with the engine
+/// running (28 V): a filament's light goes with the voltage to the power of 3.4, so the
+/// lamps are dimmer with the engine off (a resting battery's 25 V: 70 %), dim further while
+/// the starter turns the engine over, and come up when the generator charges. 1 where the
+/// vehicle has no electrics (`elec_V_battery`, `elec_V_generator`: the AI cars).
+fn bulb_voltage(v: &VehicleInstance) -> f32 {
+    let volts = v.var("elec_V_battery").unwrap_or(0.0).max(v.var("elec_V_generator").unwrap_or(0.0));
+    if !volts.is_finite() || volts < 5.0 {
+        return 1.0;
+    }
+    (volts / 28.0).clamp(0.0, 1.1).powf(3.4)
+}
+
+/// The stock AI cars' and lorries' headlight variable (their scripts' `AI_varlist`).
+const AI_HEADLIGHT: &str = "AI_Light";
+
+/// How far a random car's low and full beam reach in the picture (m), and how far from the
+/// camera a car still lights it at all (see `ai_headlamps`).
+const AI_LOW_REACH: f32 = 90.0;
+const AI_FULL_REACH: f32 = 180.0;
+const AI_BEAM_SEEN: f64 = 450.0;
 
 /// How far a `[spotlight]` reaches in the picture, from its declared range (value 9):
 /// up to `low` metres as declared, as before, and a range past the stock low beam's 100 in
@@ -342,15 +535,26 @@ mod spot_tests {
         let beam = |range: f32| {
             let vals = [0.0, 6.5, 0.76, 0.0, 1.0, -0.3, 255.0, 255.0, 233.0, range, 30.0, 80.0];
             let mut lights = Vec::new();
-            super::push_spot(&mut lights, glam::DVec3::ZERO, glam::Vec3::Y, &vals, 0.5, 1.0);
+            super::push_spot(&mut lights, glam::DVec3::ZERO, glam::Vec3::Y, glam::Vec3::Y, &vals, 0.5, 1.0);
             lights.iter().find(|l| l.mode == omsi_render::LightMode::Enhanced).map(|l| l.beam)
         };
         assert_eq!([100.0, 200.0, 450.0, 500.0].map(beam), [Some(1.0), Some(1.0), Some(-1.0), Some(-1.0)]);
         // a lamp over a door, pointing down, keeps its cone
         let vals = [0.0, 6.5, 2.5, 0.0, 0.0, -1.0, 255.0, 255.0, 233.0, 100.0, 30.0, 80.0];
         let mut lights = Vec::new();
-        super::push_spot(&mut lights, glam::DVec3::ZERO, glam::Vec3::NEG_Z, &vals, 0.5, 1.0);
+        super::push_spot(&mut lights, glam::DVec3::ZERO, glam::Vec3::NEG_Z, glam::Vec3::ZERO, &vals, 0.5, 1.0);
         assert_eq!(lights.iter().find(|l| l.mode == omsi_render::LightMode::Enhanced).map(|l| l.beam), Some(0.0));
+    }
+
+    /// A beam's horizon is the vehicle's: the declared aim down is left out, the bus's pitch
+    /// is kept (nose up on a climb: the beam looks up the hill).
+    #[test]
+    fn a_beam_pitches_with_the_vehicle_not_with_its_declared_aim() {
+        let level = super::beam_level(glam::Mat4::IDENTITY, glam::Vec3::new(0.0, 1.0, -0.3));
+        assert!((level - glam::Vec3::Y).length() < 1e-6);
+        let climb = glam::Mat4::from_rotation_x(5f32.to_radians());
+        let level = super::beam_level(climb, glam::Vec3::new(0.0, 1.0, -0.3));
+        assert!((level.z.atan2(level.y).to_degrees() - 5.0).abs() < 1e-3, "{level:?}");
     }
 
     /// `[spotlight_2]`: a pair mirrored across the axis sharing the light, or one lamp, as
@@ -498,7 +702,7 @@ pub fn collect(
         }
     }
     for v in vehicles {
-        vehicle_lights(v, &mut scene.coronas, &mut scene.lights, night);
+        vehicle_lights(v, &mut scene.coronas, &mut scene.lights, night, camera_pos);
         particle_sprites(&v.particles, &mut scene.smoke, &mut scene.coronas);
         for t in &v.trailers {
             particle_sprites(&t.particles, &mut scene.smoke, &mut scene.coronas);

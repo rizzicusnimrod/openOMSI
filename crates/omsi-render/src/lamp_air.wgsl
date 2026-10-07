@@ -2,29 +2,52 @@
 // and the light the weather's fog scatters from the lamps towards the camera (needs the
 // point lights, their grid and `camera.light_grid`).
 
-// A headlamp's intensity towards `t` (from the lamp) by the angles of a road lamp, not
-// around its axis: wide across, brightest just under the lamp's horizon where it reaches
-// far down the road, weak straight down, and with a low beam a sharp cut-off above it.
-fn headlamp(t: vec3<f32>, dir: vec3<f32>, low: bool) -> f32 {
+// A headlamp's intensity towards `t` (from the lamp; 1 at a low beam's hot spot) as an
+// ECE headlamp sends it (R112/R98 test points, a typical halogen lamp). `mode` is the
+// light's `beam`: 1 a low beam for traffic on the right, 2 one for traffic on the left
+// (mirrored), -1 a full beam, each a quarter more for a halogen lamp (1.25, 2.25, -1.25:
+// its reflector's cut-off softer than a projector's). The angles are the lamp's own: `dir` pitches with the
+// vehicle, so a beam climbs a hill's road with the bus and dips when it brakes.
+//
+// A low beam: a sharp cut-off 0.57 deg (1 %) under the horizon towards the oncoming
+// traffic, rising at 15 deg from the elbow on the kerb side up to 1 deg over it (the
+// verge, signs and pedestrians on one's own side, not the oncoming drivers' eyes); above
+// it 1.5 % of the hot spot, what the lens scatters. The hot spot lies 0.6 deg under the
+// cut-off a little towards the kerb, where the road is 40 - 70 m ahead, and the light
+// falls off below it - the foreground is lit, but no brighter than the road ahead (a
+// bright foreground would blind the eye to the distance). A full beam: a hot spot three
+// times the low beam's along the horizon and a wide flood under and a little over it.
+fn headlamp(t: vec3<f32>, dir: vec3<f32>, mode: f32) -> f32 {
     let fwd = normalize(dir.xy + vec2<f32>(1e-6, 0.0));
     let ahead = dot(t.xy, fwd);
     if (ahead <= 0.0) {
         return 0.0;
     }
-    let across = abs(t.x * fwd.y - t.y * fwd.x) / ahead;
-    let wide = 0.12 * smoothstep(1.0, 0.45, across) + 0.88 * exp(-across * across / 0.06);
-    let drop = -t.z / max(length(t.xy), 1e-3);
-    // full out to where the road is 0.06 under the lamp's horizon, then less as the cube of
-    // the drop and a little more: the road is lit evenly from the bumper on, a little
-    // brighter as far as the beam reaches, and not as one hot pool where its axis lands
-    var up = min(1.0, pow(0.06 / max(abs(drop), 1e-4), 3.4));
-    if (low) {
-        up = up * smoothstep(-0.012, 0.025, drop);
-        return wide * up;
+    // across, positive towards the kerb, and up from the lamp's horizon (degrees); a
+    // quarter more in the mode's magnitude is a halogen reflector's softer cut-off
+    let side = select(1.0, -1.0, mode > 1.9) * (t.x * fwd.y - t.y * fwd.x);
+    let soft = select(0.15, 0.35, fract(abs(mode)) > 0.1);
+    let h = degrees(atan2(side, ahead));
+    let v = degrees(atan2(t.z, length(t.xy)) - atan2(dir.z, max(length(dir.xy), 1e-4)));
+    if (mode < 0.0) {
+        let core = exp(-(h * h) / 25.0 - (v + 0.3) * (v + 0.3) / 3.2);
+        let over = max(v - 0.5, 0.0) / 2.5;
+        let flood_v = exp(-over * over) / (1.0 + pow(max(-v - 0.8, 0.0) / 1.6, 1.6));
+        let flood = (0.6 * exp(-(h * h) / 81.0) + 0.4 * exp(-(h * h) / 900.0)) * flood_v;
+        return 3.0 * core + 0.8 * flood;
     }
-    // a full beam reaches far: a narrow, bright core along the lamp's horizon
-    let hot = exp(-across * across / 0.012 - drop * drop / 0.0004);
-    return wide * up + 6.0 * hot;
+    // (the beam's body lies under the flat line; the wedge the kerb side's cut-off rises
+    // over it gets some half of the hot spot)
+    let cut = -0.57 + clamp(0.268 * h, 0.0, 1.6);
+    let edge = 0.015 + 0.985 * smoothstep(-soft, soft, cut - v);
+    let under = -0.57 - v;
+    let vert = mix(0.45, 1.0, smoothstep(-0.35, 0.0, under)) / (1.0 + pow(max(under - 0.6, 0.0) / 1.4, 1.6));
+    // (across: the hot spot's core, and a flood that widens the nearer the road - the
+    // foreground is lit over the lane and the verges, the distance in a narrow band)
+    let hk = (h - 1.5) / 7.0;
+    let wide = 0.25 + 0.45 * smoothstep(1.0, 6.0, under);
+    let across = (1.0 - wide) * exp(-hk * hk) + wide * exp(-(h * h) / 1225.0);
+    return across * vert * edge;
 }
 
 // The lamps' light the weather's fog scatters towards the camera (radiance, not
@@ -130,7 +153,7 @@ fn lamp_airlight(c: vec3<f32>, d: vec3<f32>, start: f32, len: f32, jitter: f32) 
                         let ld = to * inverseSqrt(max(dot(to, to), 1e-6));
                         var beam = 0.0;
                         if (l.extra.z != 0.0) {
-                            beam = headlamp(-ld, l.dir.xyz, l.extra.z > 0.0);
+                            beam = headlamp(-ld, l.dir.xyz, l.extra.z);
                         } else {
                             beam = smoothstep(l.dir.w, l.extra.x, dot(-ld, l.dir.xyz));
                         }
@@ -213,7 +236,7 @@ fn precip_light(x: vec3<f32>, to_eye: vec3<f32>, snow: bool) -> vec3<f32> {
                 let window = (1.0 - q * q) * (1.0 - q * q);
                 var k = core * core / sqrt(dist2 * dist2 + core * core * core * core) * window;
                 if (l.extra.z != 0.0) {
-                    k = headlamp(-ld, l.dir.xyz, l.extra.z > 0.0) / max(dist2, 0.3) * window;
+                    k = headlamp(-ld, l.dir.xyz, l.extra.z) / max(dist2, 0.3) * window;
                 } else if (l.dir.w > -1.5) {
                     k = k * smoothstep(l.dir.w, l.extra.x, dot(-ld, l.dir.xyz));
                 } else if (l.dir.z < -0.5) {

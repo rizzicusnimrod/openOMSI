@@ -56,6 +56,8 @@ pub(crate) struct App {
     pub(crate) spray: puddles::Spray,
     pub(crate) lamps_on: Option<bool>,
     pub(crate) menu: Option<menu::Menu>,
+    /// `--demo`'s scene (see `demo.rs`).
+    pub(crate) demo: Option<crate::demo::Demo>,
     pub(crate) populate_t: f32,
     pub(crate) humans_populate_t: f32,
     /// The player's bus radio as internet radio.

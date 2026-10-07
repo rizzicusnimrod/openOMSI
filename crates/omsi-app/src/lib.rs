@@ -38,6 +38,7 @@ mod game_lists;
 mod game_controller_menu;
 mod rail_drive;
 mod driver;
+mod demo;
 mod export;
 mod hud;
 mod humans;
@@ -438,6 +439,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
     let view = args.view.clone();
     let args_root_for_keys = args.root.clone();
     let clock_note = args.clock_moved.clone();
+    let demo = args.demo.as_deref().and_then(demo::Demo::new);
     // (as the last session left it, #1164)
     let info_bar = settings.info_bar;
     let is_server = args.server.is_some();
@@ -477,6 +479,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         spray: puddles::Spray::new(),
         lamps_on: None,
         menu: None,
+        demo,
         populate_t: 0.0,
         humans_populate_t: 0.0,
         radio: radio::Radio::load(&args_root_for_keys),

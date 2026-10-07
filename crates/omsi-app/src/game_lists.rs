@@ -2214,19 +2214,28 @@ fn same_value(a: &str, b: &str) -> bool {
     a == b || a.parse::<f64>().ok().zip(b.parse::<f64>().ok()).is_some_and(|(x, y)| (x - y).abs() < 1e-6)
 }
 
+// The graphics choices of the launcher's page and the game's settings alike, the custom
+// fork's recommended one (its defaults, `Settings::desktop`) marked so.
+pub(crate) const GRAPHICS_OPTIONS: &[(&str, &str)] = &[("vanilla", "Vanilla (as OMSI 2)"), ("vanilla_plus", "Vanilla+"), ("enhanced", "Enhanced (recommended)"), ("enhanced_plus", "Enhanced+")];
+pub(crate) const MSAA_OPTIONS: &[(&str, &str)] = &[("1", "Off"), ("2", "2x MSAA"), ("4", "4x MSAA"), ("8", "8x MSAA (recommended)")];
+pub(crate) const RENDER_SCALE_OPTIONS: &[(&str, &str)] = &[("auto", "Auto (lower when slow)"), ("1", "100% (recommended)"), ("0.85", "85%"), ("0.75", "75%"), ("0.67", "67%"), ("0.5", "50%")];
+pub(crate) const ANISOTROPY_OPTIONS: &[(&str, &str)] = &[("1", "Off"), ("2", "2x"), ("4", "4x"), ("8", "8x"), ("16", "16x (recommended)")];
+pub(crate) const SHADOW_SIZE_OPTIONS: &[(&str, &str)] = &[("1024", "1024"), ("2048", "2048"), ("4096", "4096 (recommended)"), ("8192", "8192")];
+pub(crate) const MIRROR_OPTIONS: &[(&str, &str)] = &[("0", "Off"), ("128", "Low (128)"), ("256", "Normal (256)"), ("512", "High (512, recommended)"), ("1024", "Very high (1024)")];
+
 fn select_options(key: &str) -> Vec<(&'static str, &'static str)> {
     match key {
-        "graphics" => vec![("vanilla", "Vanilla (as OMSI 2)"), ("vanilla_plus", "Vanilla+"), ("enhanced", "Enhanced"), ("enhanced_plus", "Enhanced+")],
-        "msaa" => vec![("1", "Off"), ("2", "2x MSAA"), ("4", "4x MSAA"), ("8", "8x MSAA")],
-        "render_scale" => vec![("auto", "Auto"), ("1", "100%"), ("0.85", "85%"), ("0.75", "75%"), ("0.67", "67%"), ("0.5", "50%")],
-        "anisotropy" => vec![("1", "Off"), ("2", "2x"), ("4", "4x"), ("8", "8x"), ("16", "16x")],
-        "shadow_size" => vec![("1024", "1024"), ("2048", "2048"), ("4096", "4096")],
+        "graphics" => GRAPHICS_OPTIONS.to_vec(),
+        "msaa" => MSAA_OPTIONS.to_vec(),
+        "render_scale" => RENDER_SCALE_OPTIONS.to_vec(),
+        "anisotropy" => ANISOTROPY_OPTIONS.to_vec(),
+        "shadow_size" => SHADOW_SIZE_OPTIONS.to_vec(),
         "shadow_casters" => vec![("all", "Every solid mesh"), ("omsi", "[shadow] meshes, as OMSI")],
         "max_fps" => vec![("0", "Screen refresh rate"), ("30", "30 fps"), ("45", "45 fps"), ("60", "60 fps"), ("120", "120 fps"), ("144", "144 fps"), ("1000", "Unlimited")],
         "view_distance" => vec![("auto", "Default (1200 m)"), ("600", "600 m - fastest"), ("900", "900 m"), ("1200", "1200 m"), ("1500", "1500 m"), ("2000", "2000 m"), ("2500", "2500 m")],
         "max_obj_dist" => vec![("auto", "Automatic"), ("500", "500 m"), ("750", "750 m"), ("900", "900 m"), ("1500", "1500 m"), ("3000", "3000 m")],
         "min_obj_size" => vec![("0.005", "All"), ("0.013", "Normal"), ("0.02", "Fewer (faster)"), ("0.03", "Few (fastest)")],
-        "mirror_size" => vec![("0", "Off"), ("128", "Low (128)"), ("256", "Normal (256)"), ("512", "High (512)"), ("1024", "Very high (1024)")],
+        "mirror_size" => MIRROR_OPTIONS.to_vec(),
         "texture_memory" => vec![("0", "Automatic"), ("500", "500 MB"), ("1000", "1 GB"), ("1500", "1.5 GB"), ("2000", "2 GB"), ("3000", "3 GB"), ("4000", "4 GB"), ("6000", "6 GB")],
         "drive_keys" => vec![("omsi", "Custom controls (Controls page)"), ("simple", "W A S D + arrows"), ("wasd", "W A S D only"), ("arrows", "Arrow keys only")],
         "resolution" => crate::launcher::pages::RESOLUTIONS.to_vec(),
@@ -3065,7 +3074,7 @@ mod tests {
     fn sixteen_x_anisotropy_can_be_chosen_in_the_game_menu() {
         let file = serde_json::json!({ "anisotropy": 16 });
         let (options, at, _) = super::select_state(&file, "anisotropy");
-        assert_eq!(at.map(|i| options[i]), Some(("16", "16x")));
+        assert_eq!(at.map(|i| options[i]), Some(("16", "16x (recommended)")));
     }
 
     #[test]

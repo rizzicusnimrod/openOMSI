@@ -877,6 +877,22 @@ impl Default for MeshProps {
     }
 }
 
+/// The time constant of an incandescent lamp's filament (s), 0 when the lamps are as their
+/// files say (see `set_lamp_filament`); an f32's bits.
+static LAMP_FILAMENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The vehicles' lamps are bulbs - a map of the years before LED and xenon lamps: none comes
+/// on or goes out faster than a filament glows up and cools down (`secs`, its time
+/// constant; 0: as the files say). It holds for every `[light_enh_2]` and the headlights'
+/// beams (`VehicleInstance::spot_fade`).
+pub fn set_lamp_filament(secs: f32) {
+    LAMP_FILAMENT.store(secs.max(0.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn lamp_filament() -> f32 {
+    f32::from_bits(LAMP_FILAMENT.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 /// Index of the material slot a `[matl]` override refers to (texture name + nth occurrence).
 pub fn override_slot(materials: &[omsi_o3d::Material], o: &MaterialDef) -> Option<usize> {
     let mut nth = 0;
@@ -959,6 +975,10 @@ pub struct VehicleInstance {
     /// followed with the light's `timeconst` (63 % of the way in that time when switched on,
     /// down to 27 % when switched off, as the stock files document it).
     pub light_fade: Vec<f32>,
+    /// How far each `[spotlight]` (in order) shines: 1 for the one `Spot_Select` picks, the
+    /// others 0 - or, with incandescent lamps (`set_lamp_filament`), followed as a filament
+    /// glows up and goes out, so a change of beam crosses over as a halogen lamp's does.
+    pub spot_fade: Vec<f32>,
     /// The meshes' transforms in the modelled pose, for `[smoothskin]` (made when needed).
     skin_rest: Vec<Mat4>,
     /// Static obstacles; the vehicle's `[boundingbox]` is kept out of them.
@@ -1237,6 +1257,7 @@ impl VehicleInstance {
             a_trans: OmsiFrames::default(),
             particles: ParticleSet::new(ty.model.particle_systems(), std::ptr::addr_of!(host) as u64 ^ 0x9e37_79b9).for_vehicle(),
             light_fade: Vec::new(),
+            spot_fade: Vec::new(),
             v_springfactor,
             rest_sag,
             ai_lift,
@@ -2676,7 +2697,22 @@ impl VehicleInstance {
                 }
             }
         }
-        // the lamps come on and go out with their `timeconst`
+        // the lamps come on and go out with their `timeconst` (a filament's at the least,
+        // where the lamps are incandescent: see `set_lamp_filament`)
+        let filament = lamp_filament();
+        // the headlights' beam: the spotlight `Spot_Select` picks
+        let pick = self.var("Spot_Select").filter(|s| s.is_finite() && *s >= 0.0).map(|s| s.round() as usize);
+        let spots = self.ty.model.spotlights.len();
+        self.spot_fade.resize(spots, 0.0);
+        for (i, b) in self.spot_fade.iter_mut().enumerate() {
+            let target = if pick == Some(i) { 1.0 } else { 0.0 };
+            *b = if filament <= 0.001 || !b.is_finite() {
+                target
+            } else {
+                let rate = if target > *b { 1.0 } else { 1.31 } / filament;
+                *b + (target - *b) * (1.0 - (-dt * rate).exp())
+            };
+        }
         let mut lf = std::mem::take(&mut self.light_fade);
         let mut part_fades: Vec<Vec<f32>> = self.trailers.iter_mut().map(|t| std::mem::take(&mut t.light_fade)).collect();
         let value = |n: &str| -> f32 { n.trim().parse::<f32>().ok().or_else(|| self.var(n.trim())).unwrap_or(0.0) };
@@ -2694,10 +2730,11 @@ impl VehicleInstance {
                     if !b.is_finite() {
                         *b = target;
                     }
-                    *b = if l.time_const <= 0.001 {
+                    let time_const = l.time_const.max(filament);
+                    *b = if time_const <= 0.001 {
                         target
                     } else {
-                        let rate = if target > *b { 1.0 } else { 1.31 } / l.time_const;
+                        let rate = if target > *b { 1.0 } else { 1.31 } / time_const;
                         *b + (target - *b) * (1.0 - (-dt * rate).exp())
                     };
                     k += 1;

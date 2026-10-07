@@ -730,9 +730,44 @@ pub struct Driver {
     courtesy_cool: f64,
     /// Why the driver last decided to flash, until `take_flash_reason` (for the log).
     flash_reason: Option<&'static str>,
+    /// A driver of `--demo` (see `Driver::demo`): its flashes as the scene needs them.
+    demo: Option<DemoFlashes>,
+    /// How many times the driver has flashed at the dazzling bus (a demo driver's rounds).
+    dazzle_rounds: u32,
+}
+
+/// What a demo driver flashes (see `crate::demo`): how many times to say "go ahead" once it
+/// has stopped to let the bus out, and how many when the bus's high beams dazzle it - a
+/// first round, and a second one a moment later if they still do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DemoFlashes {
+    pub courtesy: u32,
+    pub dazzle: u32,
+    pub dazzle_again: u32,
 }
 
 impl Driver {
+    /// A driver for a demo's scene: the habits of `new`'s, but with its lights on, no bad
+    /// habits, never pushy or provoked, and flashing exactly as `flashes` says.
+    pub fn demo(seed: u64, cfg: &Config, flashes: DemoFlashes) -> Driver {
+        let mut d = Driver::new(seed, cfg);
+        d.always = true;
+        d.no_lights = false;
+        d.no_indicator = false;
+        d.forgetful = false;
+        d.rear_fog_misuse = false;
+        d.bulb = Bulb::None;
+        d.impatient = false;
+        d.angry = false;
+        d.pusher = false;
+        d.provokable = false;
+        d.courteous = flashes.courtesy > 0;
+        d.dazzlable = flashes.dazzle > 0;
+        d.dazzle_reaction = 0.6;
+        d.demo = Some(flashes);
+        d
+    }
+
     pub fn new(seed: u64, cfg: &Config) -> Driver {
         let mut d = Dice::new(seed);
         let flaws = cfg.flaws;
@@ -828,6 +863,8 @@ impl Driver {
             courtesy_for: None,
             courtesy_cool: 0.0,
             flash_reason: None,
+            demo: None,
+            dazzle_rounds: 0,
         }
     }
 
@@ -1006,7 +1043,7 @@ impl Driver {
         if let Some(a) = ahead {
             self.seen_ahead = Some((a.id, t));
         }
-        if !cfg.flash {
+        if !cfg.flash && self.demo.is_none() {
             self.flashes_left = 0;
             return false;
         }
@@ -1065,9 +1102,22 @@ impl Driver {
         if i.dazzled && i.night {
             self.dazzled += dt;
             if self.dazzlable && self.dazzled >= self.dazzle_reaction && t >= self.dazzle_cool {
-                let n = 1 + self.dice.chance(0.5) as u32;
-                self.flash(n, 0.0, "dazzled");
-                self.dazzle_cool = t + 30.0;
+                match self.demo {
+                    // (a demo's: its first round, and a second a moment later if still dazzled)
+                    Some(demo) => {
+                        let n = if self.dazzle_rounds == 0 { demo.dazzle } else { demo.dazzle_again };
+                        if n > 0 && self.dazzle_rounds < 2 {
+                            self.flash(n, 0.0, "dazzled");
+                            self.dazzle_rounds += 1;
+                        }
+                        self.dazzle_cool = t + 0.6 * n as f64 + 1.8;
+                    }
+                    None => {
+                        let n = 1 + self.dice.chance(0.5) as u32;
+                        self.flash(n, 0.0, "dazzled");
+                        self.dazzle_cool = t + 30.0;
+                    }
+                }
             }
         } else {
             self.dazzled = 0.0;
@@ -1076,10 +1126,15 @@ impl Driver {
         // --- courteous: "go ahead" to whom they let go first ---------------------------
         // (not in the first seconds on the road: a car put down behind a bus has let it
         // go first since before anybody saw it)
-        if let Some(id) = i.courtesy.filter(|_| t > 3.0) {
+        // (a demo's driver says it as it comes to a halt behind the bus, where it is seen)
+        let demo_waits = self.demo.is_some() && speed > 2.0;
+        if let Some(id) = i.courtesy.filter(|_| (t > 3.0 || self.demo.is_some()) && !demo_waits) {
             if self.courteous && self.courtesy_for != Some(id) && t >= self.courtesy_cool {
                 self.courtesy_for = Some(id);
-                let n = 1 + self.dice.chance(0.3) as u32;
+                let n = match self.demo {
+                    Some(demo) => demo.courtesy,
+                    None => 1 + self.dice.chance(0.3) as u32,
+                };
                 let delay = self.dice.between(0.3, 0.9) as f64;
                 self.flash(n, delay, "courtesy");
                 self.courtesy_cool = t + 10.0;
