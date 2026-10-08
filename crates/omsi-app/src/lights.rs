@@ -119,6 +119,21 @@ pub fn apply_weather(
 }
 
 /// Coronas and point lights of one vehicle in its current state.
+/// How far (m) a lamp keeps its brightness by day (half of it at this distance, a fifth
+/// at twice it): see `day_fade`.
+const DAY_LAMP_REACH: f32 = 80.0;
+
+/// What a lamp's corona keeps `d` m from the camera: by day a lamp far away is a dim point
+/// in a bright street, not the bright dot its sprite keeps on the screen at any distance
+/// (the corona's size floor and its core of a pixel and a half, corona.wgsl), so beyond
+/// `DAY_LAMP_REACH` it falls away as a point's light does, the more the brighter the day.
+/// At night (`night` 1) lamps stay points of light in the dark, as they are. For vehicles'
+/// lamps, traffic lights and every other lamp lit by day.
+fn day_fade(d: f32, night: f32) -> f32 {
+    let day = (1.0 - night).clamp(0.0, 1.0);
+    1.0 - day * (1.0 - 1.0 / (1.0 + (d / DAY_LAMP_REACH).powi(2)))
+}
+
 pub fn vehicle_lights(
     v: &VehicleInstance,
     coronas: &mut Vec<Corona>,
@@ -180,6 +195,12 @@ pub fn vehicle_lights(
                 c.color = [r * HALOGEN_TINT[0], g * HALOGEN_TINT[1], b * HALOGEN_TINT[2]];
             }
             c.brightness *= volts;
+        }
+    }
+    // (by day, the farther the dimmer: `day_fade`)
+    if night < 1.0 {
+        for c in coronas[first_corona..].iter_mut().filter(|c| !c.beam && !c.halo) {
+            c.brightness *= day_fade((c.position - camera).length() as f32, night);
         }
     }
     let body = v.body_rotation();
@@ -679,7 +700,14 @@ pub fn collect(
         scene.coronas.extend(
             near.coronas
                 .iter()
-                .filter(|c| (c.position - camera_pos).length() <= CORONA_RANGE),
+                .filter(|c| (c.position - camera_pos).length() <= CORONA_RANGE)
+                .map(|c| {
+                    let mut c = *c;
+                    if !c.beam && !c.halo {
+                        c.brightness *= day_fade((c.position - camera_pos).length() as f32, night);
+                    }
+                    c
+                }),
         );
     }
     // traffic lamps glow with what they show, by day as well
@@ -692,7 +720,7 @@ pub fn collect(
                 continue;
             }
             let mut corona = *c;
-            corona.brightness *= lit.min(1.0);
+            corona.brightness *= lit.min(1.0) * day_fade((corona.position - camera_pos).length() as f32, night);
             scene.coronas.push(corona);
         }
     }
