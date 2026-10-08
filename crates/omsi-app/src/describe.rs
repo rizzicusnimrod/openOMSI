@@ -106,6 +106,10 @@ impl ControlNames {
         if let Some(t) = self.official(event) {
             return t;
         }
+        // openOMSI's own actions, which no OMSI text names
+        if event.eq_ignore_ascii_case("interface_toggle") {
+            return "Hide or show the interface".to_string();
+        }
         // variants of a trigger the key dialog knows: the mouse version of a key, a second
         // button for the same job, the outside button of a door
         for (suffix, extra) in [("_mouse", ""), ("_external", " (outside)"), ("_2", " 2"), ("_sw", ""), ("_button", "")] {

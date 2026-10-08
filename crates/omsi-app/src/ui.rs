@@ -474,6 +474,9 @@ pub struct Frame<'a> {
     pub tags: Vec<((f32, f32), String, String, f32)>,
     /// Photo mode: nothing of the game's interface but the photo panel and these.
     pub photo: Option<PhotoView>,
+    /// The interface hidden (`interface_toggle`): nothing drawn but a menu that is open, and
+    /// for a moment after it was hidden, how to bring it back (the key's name).
+    pub ui_hidden: Option<(bool, String)>,
     /// The server's notifications, oldest first.
     pub notices: &'a [Notice],
     /// Where the navigator is on the screen (the notifications stand over it, or under it
@@ -682,6 +685,17 @@ impl Ui {
     /// Photo mode's marks over the picture: the grid at the thirds, the photo's progress
     /// and, with the panel hidden, how to bring it back. (Notes, the clock and the rest of
     /// the game's interface are not drawn.)
+    /// For a moment after the interface was hidden: which key brings it back, bottom left.
+    fn draw_hidden_hint(&mut self, r: &Renderer, scene: &mut Scene, f: &Frame, key: &str, s: f32) {
+        let text = omsi_ui::tr("Interface hidden  ·  %s shows it again").replace("%s", key);
+        let l = self.text.label(r, scene, &text, (13.0 * s) as u32, [255, 255, 255, 220]);
+        let plate = self.text.plate(r, scene, 7);
+        let x0 = 16.0 * s;
+        let y0 = f.height - 16.0 * s - l.h as f32;
+        scene.overlays.push((plate, [x0 - 6.0 * s, y0 - 3.0 * s, x0 + l.w as f32 + 6.0 * s, y0 + l.h as f32 + 3.0 * s]));
+        scene.overlays.push((l.tex, [x0, y0, x0 + l.w as f32, y0 + l.h as f32]));
+    }
+
     fn draw_photo(&mut self, r: &Renderer, scene: &mut Scene, f: &Frame, pv: PhotoView, s: f32) {
         let (w, h) = (f.width, f.height);
         if pv.grid && pv.progress.is_none() {
@@ -738,6 +752,14 @@ impl Ui {
         // --- photo mode: the picture, the photo panel and its own marks only
         if let Some(pv) = f.photo {
             self.draw_photo(r, scene, f, pv, s);
+            self.draw_menu(r, scene, f);
+            return;
+        }
+        // --- the interface hidden: the picture alone (a menu opened over it is still drawn)
+        if let Some((hint, key)) = &f.ui_hidden {
+            if *hint {
+                self.draw_hidden_hint(r, scene, f, key, s);
+            }
             self.draw_menu(r, scene, f);
             return;
         }

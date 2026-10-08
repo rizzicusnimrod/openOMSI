@@ -180,6 +180,9 @@ pub(crate) struct App {
     pub(crate) teleport_pick: bool,
     /// Photo mode (F10): the world stopped, the photographer's camera and panel (`photo`).
     pub(crate) photo: Option<Box<crate::photo::Photo>>,
+    /// The interface hidden (`interface_toggle`, Ctrl+H), since when: the picture alone, but
+    /// for a menu opened over it.
+    pub(crate) ui_hidden: Option<std::time::Instant>,
     /// Discord's "Playing openOMSI" status, and when it was last brought up to date.
     pub(crate) discord: Option<crate::discord::Discord>,
     pub(crate) discord_t: f32,

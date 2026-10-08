@@ -9,7 +9,7 @@ pub(crate) fn is_game_action(name: &str) -> bool {
     name.starts_with("view_")
         || matches!(
             name.as_str(),
-            "sim_pause" | "screenshot" | "quicksave" | "toggel_mouse_ctrl" | "toggel_ctrler"
+            "sim_pause" | "screenshot" | "quicksave" | "toggel_mouse_ctrl" | "toggel_ctrler" | "interface_toggle"
         )
 }
 
@@ -3595,6 +3595,15 @@ impl App {
         true
     }
 
+    /// The key a `[game]` action of keyboard.cfg is on, as the key list names it (None: on
+    /// no key).
+    pub(crate) fn game_key_name(&self, action: &str) -> Option<String> {
+        self.game_keys
+            .iter()
+            .find(|b| b.action.eq_ignore_ascii_case(action) && b.scan_code != 0)
+            .map(|b| crate::keys::key_name(b.scan_code as i64, b.modifier as i64))
+    }
+
     /// One of OMSI's global key actions; false when it is not one this game does.
     pub(crate) fn game_action(&mut self, name: &str) -> bool {
         #[cfg(windows)]
@@ -3602,6 +3611,10 @@ impl App {
         match name {
             "sim_pause" => self.toggle_pause(),
             "screenshot" => self.take_screenshot(),
+            "interface_toggle" => {
+                self.ui_hidden = if self.ui_hidden.is_some() { None } else { Some(std::time::Instant::now()) };
+                log::info!("interface {}", if self.ui_hidden.is_some() { "hidden" } else { "shown" });
+            }
             "quicksave" => self.quick_save(),
             "view_set_ego" => {
                 // on foot from where the camera is (beside the bus in the driver's view)

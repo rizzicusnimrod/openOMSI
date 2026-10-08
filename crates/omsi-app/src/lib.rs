@@ -538,6 +538,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         arrow_glance: false,
         teleport_pick: false,
         photo: None,
+        ui_hidden: None,
         discord: None,
         discord_t: 0.0,
         #[cfg(steam)]

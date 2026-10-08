@@ -128,6 +128,12 @@ impl KeyboardCfg {
         if !self.game.iter().any(|b| b.action.eq_ignore_ascii_case("view_toggle_interior")) {
             self.game.push(KeyBinding { action: "view_toggle_interior".into(), scan_code: 0, modifier: 0 });
         }
+        // the whole interface hidden and shown again - the HUD, the navigator, the mirrors'
+        // pictures, the notes, the chat, the other players' names - for a clean view or a
+        // screenshot: Ctrl+H (35; H alone is OMSI's horn, Ctrl+Shift+H the duty's view).
+        if !self.game.iter().any(|b| b.action.eq_ignore_ascii_case("interface_toggle")) {
+            self.game.push(KeyBinding { action: "interface_toggle".into(), scan_code: 35, modifier: KEY_CTRL });
+        }
         self
     }
 

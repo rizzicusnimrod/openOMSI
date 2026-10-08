@@ -2119,6 +2119,8 @@ impl ApplicationHandler for App {
                 let menu_status = (self.game_menu.is_some() && self.chooser.is_none()).then(|| self.menu_status());
                 // (the players of a LAN session or server, for the list at the top right)
                 let players = self.players_hud();
+                // (the interface hidden: for 2.5 s after, the key that shows it again)
+                let ui_hidden = self.ui_hidden.map(|t| (t.elapsed().as_secs_f32() < 2.5, self.game_key_name("interface_toggle").unwrap_or_else(|| "Ctrl+H".into())));
                 if let (true, Some(r), Some(scene)) = (
                     self.world.is_some(),
                     self.renderer.as_ref(),
@@ -2195,7 +2197,7 @@ impl ApplicationHandler for App {
                     // pictures' only)
                     scene.overlays.clear();
                     // (photo mode: its own messages alone, see `ui::Ui::draw_photo`)
-                    let notes = if self.photo.is_some() { self.service_msg.as_ref().map(|m| vec![m.0.clone()]).unwrap_or_default() } else { lines };
+                    let notes = if self.photo.is_some() { self.service_msg.as_ref().map(|m| vec![m.0.clone()]).unwrap_or_default() } else if self.ui_hidden.is_some() { Vec::new() } else { lines };
                     let hud = self
                         .surface
                         .as_ref()
@@ -2208,7 +2210,7 @@ impl ApplicationHandler for App {
                         self.navigator.as_mut(),
                         self.player.as_ref(),
                         self.surface.as_ref(),
-                        self.photo.is_none(),
+                        self.photo.is_none() && self.ui_hidden.is_none(),
                     ) {
                         let old_enabled = nav.enabled;
                         let old_opacity = nav.opacity;
@@ -2418,6 +2420,7 @@ impl ApplicationHandler for App {
                             chat_size: self.settings.chat_size,
                             tags,
                             photo: crate::photo::view(self.photo.as_deref()),
+                            ui_hidden,
                             notices: &self.notices,
                             notice_anchor: self.navigator.as_ref().and_then(|n| n.screen_rect()),
                         };
@@ -2747,7 +2750,7 @@ impl ApplicationHandler for App {
                                 }
                             }
                         }
-                        if self.in_cab && self.photo.is_none() {
+                        if self.in_cab && self.photo.is_none() && self.ui_hidden.is_none() {
                             if let Some(w) = self.world.as_ref() {
                                 self.mirror_hud.ensure_frame(r, scene);
                                 let hud = self
