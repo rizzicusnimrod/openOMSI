@@ -71,7 +71,19 @@ pub(crate) struct Photo {
     pub(crate) job: Option<Job>,
     /// What the panel's foot says (the photo saved, where), and until when.
     pub(crate) note: Option<(String, std::time::Instant)>,
+    /// In a LAN session: the world goes on (for the others it cannot stop), so nothing is
+    /// paused, the shared clock and weather are not the photo's to change, and a photo's
+    /// pictures are all taken in one frame - spread over several, a car driving by left a
+    /// trail of copies of itself through the averaged photo.
+    pub(crate) live: bool,
     saved: Saved,
+}
+
+/// In a LAN session (`Photo::live`) a photo is taken in one frame and the game holds
+/// meanwhile: no more pictures than 64 at the window's size take (about a second and a
+/// half), fewer the larger the photo.
+fn live_pictures(samples: u32, scale: f32) -> u32 {
+    samples.min(((64.0 / (scale * scale)).floor() as u32).max(1))
 }
 
 /// The focal lengths offered (mm).
@@ -308,6 +320,10 @@ pub(crate) fn pages(app: &App) -> Vec<(&'static str, Vec<Row>)> {
         1 => "1 picture (fast)".to_string(),
         n => format!("{n} pictures"),
     }));
+    if p.live {
+        let most = live_pictures(p.samples, p.scale);
+        take.push((row("A shared session", 'i', &format!("{most} pictures at most"), "The world goes on for the others: the photo is taken in one go, and the game holds for that moment", None), "noop".to_string()));
+    }
     match p.job.as_ref() {
         Some(j) => take.push((row("Taking the photo", 'i', &format!("{} of {}", j.done, j.total), "Esc stops it", None), "noop".to_string())),
         None => take.push(button("Take the photo", "Take (F12)", "Into the Photos folder of your Screenshots, with its settings beside it", "photo_take")),
@@ -410,10 +426,7 @@ impl App {
             self.service_msg = Some(("Photo mode is not there in VR".into(), 3.0));
             return;
         }
-        if self.lan.is_some() {
-            self.service_msg = Some(("Photo mode is not there in a LAN session (the world cannot stop for the others)".into(), 4.0));
-            return;
-        }
+        let live = self.lan.is_some();
         // (from the game menu, the pause before it was opened is the one to give back)
         let paused = if self.game_menu.is_some() { self.menu_prev_pause } else { self.paused };
         let saved = Saved {
@@ -435,8 +448,10 @@ impl App {
         // the focal length nearest the view's angle now
         let focal = FOCALS.iter().copied().min_by(|a, b| (fov_of(*a) - fov).abs().total_cmp(&(fov_of(*b) - fov).abs())).unwrap_or(35.0);
         self.release_vehicle_keys();
-        self.paused = true;
-        self.menu_prev_pause = true;
+        if !live {
+            self.paused = true;
+            self.menu_prev_pause = true;
+        }
         let orbit = self.view == "outside" && self.player.is_some();
         if !orbit {
             self.view = "free".into();
@@ -456,23 +471,28 @@ impl App {
             samples: 64,
             job: None,
             note: None,
+            live,
             saved,
         }));
         self.photo_panel(true);
-        log::info!("photo mode on");
+        if live {
+            self.service_msg = Some(("Photo mode: the session goes on for everyone".into(), 4.0));
+        }
+        log::info!("photo mode on{}", if live { " (LAN: the world goes on)" } else { "" });
     }
 
     /// Photo mode off: the view, the pause, the clock and the weather as they were.
     pub(crate) fn photo_exit(&mut self) {
         // the clock: back by the time it was moved on or back in the panel - while photo mode
         // still holds the real-time sync off (it then holds the clock to the real time again)
-        if let Some((day, time)) = self.photo.as_ref().map(|p| (p.saved.day, p.saved.time)) {
+        if let Some((day, time)) = self.photo.as_ref().filter(|p| !p.live).map(|p| (p.saved.day, p.saved.time)) {
             let moved = (self.clock.day_of_year - day) as f64 * 86400.0 + (self.clock.time - time);
             if moved.abs() > 0.5 {
                 self.shift_clock(-moved);
             }
         }
         let Some(p) = self.photo.take() else { return };
+        let live = p.live;
         let s = p.saved;
         self.dropdown = None;
         self.game_menu = None;
@@ -490,7 +510,7 @@ impl App {
         }
         // the weather - another preset, or one of its sliders moved: going back over in a
         // moment (the sky follows), and the wet roads
-        if s.weather_file != self.args.weather || self.weather != s.weather {
+        if !live && (s.weather_file != self.args.weather || self.weather != s.weather) {
             self.args.weather = s.weather_file;
             self.weather_cycle = s.weather_cycle;
             if let (Some(from), Some(to)) = (self.weather.clone(), s.weather) {
@@ -654,6 +674,7 @@ impl App {
             return;
         }
         let (pw, ph) = photo_size(w, h, p.scale);
+        let pictures = if p.live { live_pictures(p.samples, p.scale) } else { p.samples }.max(1);
         let lens = (p.aperture > 0.0).then(|| (p.focal / (2.0 * p.aperture) / 1000.0, p.focus.max(0.1)));
         // the grain goes on once, on the averaged photo (the pictures' own would average out)
         let mut grade = p.grade;
@@ -670,12 +691,12 @@ impl App {
             "lens": { "focal_mm": p.focal, "fov_deg": cam.fov_deg, "aperture": p.aperture, "focus_m": p.focus },
             "grade": { "ev": p.grade.ev, "contrast": p.grade.contrast, "saturation": p.grade.saturation, "warmth": p.grade.warmth, "tint": p.grade.tint, "glow": p.grade.glow, "vignette": p.grade.vignette, "grain": p.grade.grain },
             "size": [pw, ph],
-            "pictures": p.samples,
+            "pictures": pictures,
         });
         p.job = Some(Job {
             width: pw,
             height: ph,
-            total: p.samples.max(1),
+            total: pictures,
             done: 0,
             sum: vec![0.0; (pw as usize) * (ph as usize) * 3],
             camera: cam,
@@ -688,7 +709,7 @@ impl App {
         if !enhanced {
             self.service_msg = Some(("Vanilla graphics: the colour settings need Enhanced; the photo is taken without them".into(), 4.0));
         }
-        log::info!("photo: {pw} x {ph}, {} pictures, lens {:?}", p.samples, lens);
+        log::info!("photo: {pw} x {ph}, {pictures} pictures, lens {lens:?}{}", if p.live { " (in one frame: LAN)" } else { "" });
         self.photo_refresh();
     }
 
@@ -707,8 +728,11 @@ impl App {
             self.admin_list = None;
             self.menu_search = None;
         }
-        // the world stands still while the photo is set up and taken
-        self.paused = true;
+        // the world stands still while the photo is set up and taken (in a LAN session it
+        // goes on: see `Photo::live`)
+        if !p.live {
+            self.paused = true;
+        }
         let grade = p.grade;
         let shown = self.settings.enhanced;
         if let Some(r) = self.renderer.as_mut() {
@@ -789,7 +813,7 @@ pub(crate) fn capture(
             }
         }
         job.done += 1;
-        if t0.elapsed().as_secs_f32() > FRAME_BUDGET {
+        if !photo.live && t0.elapsed().as_secs_f32() > FRAME_BUDGET {
             break;
         }
     }

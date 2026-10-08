@@ -3301,7 +3301,7 @@ impl App {
     /// In a LAN session as a client the host's weather counts: the host syncs, not us. In
     /// photo mode the photo's weather counts: the sync waits till it is left.
     pub(crate) fn metar_locked(&self) -> bool {
-        self.settings.metar_sync && self.photo.is_none() && !self.lan.as_ref().is_some_and(|l| l.role == omsi_net::Role::Client)
+        self.settings.metar_sync && self.photo.as_ref().is_none_or(|p| p.live) && !self.lan.as_ref().is_some_and(|l| l.role == omsi_net::Role::Client)
     }
 
     /// The airport whose report the sync follows: the one chosen, else the one of the weather
@@ -3359,7 +3359,7 @@ impl App {
     /// every ten minutes) and the weather goes over to it; `dt` is real seconds.
     pub(crate) fn tick_metar(&mut self, dt: f32) {
         // (a report coming in while a photo is set up waits for the end of photo mode)
-        if self.photo.is_some() {
+        if self.photo.as_ref().is_some_and(|p| !p.live) {
             return;
         }
         self.share_start_metar();
@@ -3439,7 +3439,7 @@ impl App {
     /// LAN session as a client the host's clock counts: the host or the server syncs, not us.
     /// In photo mode the photo's time counts: the sync waits till it is left.
     pub(crate) fn real_time_locked(&self) -> bool {
-        self.settings.time_sync && self.photo.is_none() && !self.lan.as_ref().is_some_and(|l| l.role == omsi_net::Role::Client)
+        self.settings.time_sync && self.photo.as_ref().is_none_or(|p| p.live) && !self.lan.as_ref().is_some_and(|l| l.role == omsi_net::Role::Client)
     }
 
     /// With the real-time sync on: hold the clock to this device's date and time (a second
@@ -4577,8 +4577,8 @@ impl crate::App {
         if !self.duty.as_ref().is_some_and(|d| d.stop_to_skip()) {
             v.retain(|x| x.0 != "skipstop");
         }
-        // (photo mode stops the world: not in a session others share, not in the headset)
-        if self.lan.is_some() || self.vr_active() {
+        // (not in the headset; in a LAN session it is there, the world going on: `Photo::live`)
+        if self.vr_active() {
             v.retain(|x| x.0 != "photo");
         }
         if self.navigator.is_none() {

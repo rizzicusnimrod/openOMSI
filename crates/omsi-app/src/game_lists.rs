@@ -2749,7 +2749,9 @@ fn photo_pages(app: &App) -> Vec<Page> {
     let mut own = crate::photo::pages(app);
     let take = own.pop();
     let world = world_pages(app);
-    for title in ["Time", "Weather"] {
+    // (in a LAN session the time and the weather are everyone's: not the photo's to set)
+    let shared = app.lan.is_some();
+    for title in ["Time", "Weather"].into_iter().filter(|_| !shared) {
         if let Some(p) = world.iter().find(|p| p.0 == title) {
             // (the real time and weather syncs and the clock's speed are settings kept for
             // the game, out of the photo's way: the syncs wait while photo mode is on)
