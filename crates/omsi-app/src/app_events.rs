@@ -699,6 +699,7 @@ impl ApplicationHandler for App {
                 ctl.ff_road = self.settings.ff_road_vib;
                 ctl.ff_engine = self.settings.ff_engine_vib;
                 ctl.ff_fade = self.settings.ff_fade;
+                ctl.ff_realistic = self.settings.ff_realistic;
                 ctl.steer_gain = if self.settings.wheel_lock >= 45.0 { (self.settings.wheel_range / self.settings.wheel_lock).clamp(0.1, 20.0) } else { 1.0 };
                 ctl.disabled = self.settings.ctrl_off.split('|').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
                 ctl.set_editing(self.game_menu.is_some() || self.chooser.is_some());
@@ -752,6 +753,21 @@ impl ApplicationHandler for App {
                     engine_load: driving.map(|p| p.vehicle.physics.controls.throttle.clamp(0.0, 1.0)).unwrap_or(0.0),
                     micro: 0.0,
                     dt,
+                    // the front axle (see `controllers::realistic_steering`): its tyres' load,
+                    // the bend the steering asks for and how much of the grip that is, and
+                    // the engine running the power steering's pump
+                    // (the front axle by its place: every axle turns a little towards the
+                    // centre of the bend in OMSI's steering, `steered` marks them all then)
+                    front_load: driving.and_then(|p| p.vehicle.rigid.as_ref()).map(|r| {
+                        let front = r.wheels.iter().map(|w| w.attach.y).fold(f32::MIN, f32::max);
+                        r.wheels.iter().filter(|w| (w.attach.y - front).abs() < 0.05 && w.on_ground).map(|w| w.load).sum()
+                    }).unwrap_or(0.0),
+                    bend_accel: driving.and_then(|p| p.vehicle.rigid.as_ref()).map(|r| (kmh / 3.6) * (kmh / 3.6) * r.kappa).unwrap_or(0.0),
+                    grip_use: driving.and_then(|p| p.vehicle.rigid.as_ref()).map(|r| r.grip_use).unwrap_or(0.0),
+                    sliding: driving.and_then(|p| p.vehicle.rigid.as_ref()).is_some_and(|r| !r.holding),
+                    road_wheel: driving.and_then(|p| p.vehicle.rigid.as_ref()).map(|r| r.steer_deg.to_radians()).unwrap_or(0.0),
+                    assisted: driving.and_then(|p| omsi_sim::startup::engine_rpm(&p.vehicle)).is_some_and(|rpm| rpm > 250.0),
+                    realistic: false,
                 });
                 crate::game_controller_menu::frame(self);
                 // OMSI's mouse control: the cursor's place across steers, above the middle

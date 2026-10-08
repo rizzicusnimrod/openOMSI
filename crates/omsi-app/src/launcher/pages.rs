@@ -675,6 +675,8 @@ fn driving_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, c
     toggle_setting(ui, s, dirty, c.row(), "Invert force feedback by default", "ff_invert");
     c.y += ui.paragraph("Wheels with a saved direction use their own setting under Controls → Game controllers.", Vec2::new(c.inner.x, c.y), c.inner.w, 12.5, Weight::Regular, TEXT_DIM) + 8.0;
     toggle_setting(ui, s, dirty, c.row(), "Invert force feedback", "ff_invert");
+    // the steering's own forces: the front axle's (tyres, power steering) or the older spring
+    toggle_setting(ui, s, dirty, c.row(), "Realistic steering forces", "ff_realistic");
     // what the wheel feels all the time while the bus runs: the road's grain and the
     // engine's buzz, and how long a jolt eases away once it is over
     for (key, label, id) in [("ff_road_vib", "Road texture vibration", "s-ffroad"), ("ff_engine_vib", "Engine vibration", "s-ffeng")] {
@@ -694,6 +696,7 @@ fn driving_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, c
         s["wheel_lock"] = json!(0.0);
         s["ff_invert"] = json!(false);
         s["ff_enabled"] = json!(true);
+        s["ff_realistic"] = json!(true);
         s["ff_road_vib"] = json!(1.0);
         s["ff_engine_vib"] = json!(1.0);
         s["ff_fade"] = json!(0.28);
@@ -2657,7 +2660,7 @@ mod settings_tests {
         }
         let driving = vec![
             "s-keys", "set-steering_linear", "set-old_steering", "set-red_steer_spd", "s-mouse", "set-mouse_smooth", "set-mouse_right_off", "set-blinker_cancel", "set-brake_hold", "set-auto_clutch", "set-momentary_gears", "s-go-keys",
-            "s-wrange", "s-wlock", "s-pedt", "s-pedb", "set-ff_enabled", "set-ff_invert", "s-ffroad", "s-ffeng", "s-fffade", "s-wreset", "s-go-pads",
+            "s-wrange", "s-wlock", "s-pedt", "s-pedb", "set-ff_enabled", "set-ff_invert", "set-ff_realistic", "s-ffroad", "s-ffeng", "s-fffade", "s-wreset", "s-go-pads",
         ];
         let mut camera = vec![
             "s-seaty",

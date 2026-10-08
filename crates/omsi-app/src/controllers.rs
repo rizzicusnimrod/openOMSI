@@ -708,6 +708,20 @@ pub struct FfInput {
     /// (see `Micro`); the caller leaves it at 0.
     pub(crate) micro: f32,
     pub dt: f32,
+    /// The front axle as `realistic_steering` takes it: the load on its tyres (N), the
+    /// bend the steering asks for (speed^2 x curvature, m/s^2, right positive), how much of
+    /// all the tyres' grip that is (`RigidBody::grip_use`), the bus sliding (its tyres let
+    /// go across), the road wheels' angle (rad, right positive) and the power steering
+    /// working (the engine runs its pump).
+    pub front_load: f32,
+    pub bend_accel: f32,
+    pub grip_use: f32,
+    pub sliding: bool,
+    pub road_wheel: f32,
+    pub assisted: bool,
+    /// The front axle's forces (`realistic_steering`) instead of the older centring spring
+    /// (Settings: `ff_realistic`); set here from the settings.
+    pub(crate) realistic: bool,
 }
 
 /// How long (s) a jolt's or a script's vibration eases away once it stops, unless the
@@ -1009,6 +1023,10 @@ pub struct Controllers {
     pub ff_invert: bool,
     /// Force feedback and rumble switched on (Settings: `ff_enabled`).
     pub ff_enabled: bool,
+    /// The steering's forces from the front axle (Settings: `ff_realistic`).
+    pub ff_realistic: bool,
+    /// Time since the last `OMSI_DEBUG_FF` line.
+    ff_debug_t: f32,
     /// How strongly the tarmac's grain is felt under the wheels (Settings: `ff_road_vib`,
     /// 0 = none).
     pub ff_road: f32,
@@ -1100,7 +1118,7 @@ impl Controllers {
     }
 
     fn with_devices(devices: Devices, cfg: Vec<DeviceCfg>) -> Controllers {
-        Controllers { settled: Vec::new(), devices, focused: true, cfg, held: HeldButtons::default(), editing: false, raw_buttons: Vec::new(), deadzone: 0.0, right_stick_look: true, pedal_throttle: 1.0, pedal_brake: 1.0, disabled: Vec::new(), ff_invert: false, ff_enabled: true, ff_road: 1.0, ff_engine: 1.0, ff_fade: FF_FADE, steer_gain: 1.0, enabled: true, actions: Vec::new(), announced: Vec::new(), moved: Vec::new(), notice: None, steer: None, ff_t: 0.0, ff_lateral: 0.0, ff_bump: 0.0, ff_bump_age: 0.0, ff_micro: Micro::default(), ff_vib: ScriptVib::default(), ff_rumble: 0.0, ff_source_logged: None, rumble: Vec::new(), #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel: None, #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel_tried: None }
+        Controllers { settled: Vec::new(), devices, focused: true, cfg, held: HeldButtons::default(), editing: false, raw_buttons: Vec::new(), deadzone: 0.0, right_stick_look: true, pedal_throttle: 1.0, pedal_brake: 1.0, disabled: Vec::new(), ff_invert: false, ff_enabled: true, ff_realistic: true, ff_debug_t: 0.0, ff_road: 1.0, ff_engine: 1.0, ff_fade: FF_FADE, steer_gain: 1.0, enabled: true, actions: Vec::new(), announced: Vec::new(), moved: Vec::new(), notice: None, steer: None, ff_t: 0.0, ff_lateral: 0.0, ff_bump: 0.0, ff_bump_age: 0.0, ff_micro: Micro::default(), ff_vib: ScriptVib::default(), ff_rumble: 0.0, ff_source_logged: None, rumble: Vec::new(), #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel: None, #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel_tried: None }
     }
 
     /// A wheel or joystick steers the bus (then the arrow keys look around, as in OMSI:
@@ -1307,6 +1325,20 @@ impl Controllers {
         // engine are not something that begins and ends: they go quiet with the bus and
         // the engine, smoothly, where they stand.
         let (vib_amp, vib_period) = self.ff_vib.step(on, f.vib_amp, f.vib_period, self.ff_fade, f.dt);
+        f.realistic = self.ff_realistic;
+        // OMSI_DEBUG_FF=1: the front axle's inputs once a second, and the force on the wheel
+        // held where it is (the steering's part: no shaking)
+        if f.on && omsi_cfg::env::var_os("OMSI_DEBUG_FF").is_some() {
+            self.ff_debug_t += f.dt.max(0.0);
+            if self.ff_debug_t >= 1.0 {
+                self.ff_debug_t = 0.0;
+                let x = self.steer.as_ref().map(|s| s.1).unwrap_or(0.0);
+                let mut t = 0.0;
+                let held = wheel_force(&FfInput { vib_amp: 0.0, wheel_bump: 0.0, micro: 0.0, ..f }, x, x, &mut t, 1.0, 0.0);
+                log::info!("force feedback: {:.1} km/h, bend {:+.2} m/s2 (measured {:+.2}), grip use {:.2}{}, front load {:.0} N, road wheels {:+.1} deg, pump {}, wheel at {x:+.3}: steering force {held:+.3} ({})",
+                    f.kmh, f.bend_accel, f.lateral_accel, f.grip_use, if f.sliding { " SLIDING" } else { "" }, f.front_load, f.road_wheel.to_degrees(), if f.assisted { "on" } else { "off" }, if f.realistic { "realistic" } else { "classic" });
+            }
+        }
         f.wheel_bump = self.ff_bump;
         f.wheel_bump_age = self.ff_bump_age;
         f.vib_amp = vib_amp;
@@ -1513,9 +1545,89 @@ fn wheel_force(f: &FfInput, x: f32, x0: f32, t: &mut f32, k_springs: f32, k_effe
     // Preserve small road details while softening kerb-sized peaks. One short
     // kick and rebound feels less like a continuously shaking wheel mount.
     let bump = f.wheel_bump.clamp(0.0, 1.0).sqrt() * 0.46 * (std::f32::consts::TAU * f.wheel_bump_age * 6.5).cos();
-let steering = ((spring + road_align) * lock_assist * assist + drag) * moving_steering_gain + damping;
+    let steering = if f.realistic {
+        realistic_steering(f, x, x0)
+    } else {
+        ((spring + road_align) * lock_assist * assist + drag) * moving_steering_gain + damping
+    };
     let micro = f.micro.clamp(-1.0, 1.0);
     (steering * k_springs.clamp(0.0, 2.0) + (shake + bump + micro) * k_effects.clamp(0.0, 2.0)).clamp(-1.0, 1.0)
+}
+
+/// The hands' torque (Nm) the device's full force stands for: about what a bus's power
+/// steering asks at its heaviest (a tight bend near the limit of grip, the wheels of a
+/// standing bus turned on the spot). A weaker wheel gives the same feel at its own scale.
+const RIM_FULL_NM: f32 = 10.0;
+/// Turns of the steering wheel to the road wheels' (a city bus's recirculating-ball box).
+const STEER_RATIO: f32 = 21.0;
+/// The front tyres' trail behind the king pins (m): the caster's, and the tyre's own at
+/// small slip, which shortens as the bend uses up the grip and is gone in a slide.
+const CASTER_TRAIL: f32 = 0.035;
+const TYRE_TRAIL: f32 = 0.055;
+/// The front of the bus lifts as its wheels turn (the king pins lean): rolling, its weight
+/// turns them back to the middle (m of lever on the axle's load).
+const KINGPIN_LEVER: f32 = 0.006;
+/// Turning the wheels of a standing bus, the tyres scrub on the road: the hands' torque
+/// (Nm) through the power steering, and how fast the wheel turns (wheel's half-range a
+/// second) for most of it; four times that without the pump.
+const SCRUB_NM: f32 = 3.0;
+const SCRUB_RATE: f32 = 0.8;
+/// The hydraulics' damping (Nm per wheel's half-range a second).
+const STEER_DAMPING_NM: f32 = 0.35;
+/// The bend's pull at the hands through the power steering (Nm at most, and the bend in
+/// m/s^2 it is most of the way there by): OMSI's steering is far more direct than a bus's
+/// (9 degrees of the wheel at 80 km/h is already a bend of 1 m/s^2), so the tyres' torque
+/// taken through the valve's curve stood the wheel stiff in its middle at any speed above
+/// a crawl. A gentle slope round the middle instead, firming up in a tight bend.
+const ALIGN_NM: f32 = 3.0;
+const ALIGN_ACCEL: f32 = 3.0;
+/// The power steering's valve: the hands feel the road's torque in full up to about
+/// `ASSIST_KNEE` (Nm at the wheel), then the pump takes all but `ASSIST_FLOOR` of the rest.
+const ASSIST_KNEE: f32 = 1.2;
+const ASSIST_FLOOR: f32 = 0.08;
+
+/// What the hands feel of `t` (Nm at the steering wheel without the pump) with it.
+fn power_assist(t: f32) -> f32 {
+    ASSIST_FLOOR * t + (1.0 - ASSIST_FLOOR) * ASSIST_KNEE * (t / ASSIST_KNEE).tanh()
+}
+
+fn smooth(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// The steering's forces as a bus's front axle makes them (-1..1 of the device's force; the
+/// wheel at `x`, `x0` the frame before): the tyres' self-aligning torque - their side force
+/// in the bend times their trail - which builds with the bend and goes light as the grip
+/// runs out (the tyre's own trail shortens) and in a slide; the axle's weight turning the
+/// wheels back at low speed; the tyres' scrub against turning a standing bus; all of it
+/// through the power steering, whose valve lets the hands feel a light load in full and
+/// little of a heavy one - and heavy everywhere with the engine off. The hydraulics damp it.
+///
+/// The bend is the one the steering asks for while the bus follows its wheels (OMSI's tyres
+/// hold until the grip is used up, `RigidBody::holding`), so the force comes with the wheel
+/// and not a moment after it (a force that lags the hands is a spring that swings); the
+/// measured one only once the bus slides.
+fn realistic_steering(f: &FfInput, x: f32, x0: f32) -> f32 {
+    let dt = f.dt.max(1e-3);
+    let v = f.kmh.abs();
+    let rolling = smooth(0.5, 5.0, v);
+    let load = if f.front_load > 1000.0 { f.front_load } else { 60_000.0 };
+    // (sliding, the side force is what the bus really turns with - less than the steering
+    // asks - in the steering's direction)
+    let accel = if f.sliding { f.bend_accel.signum() * f.lateral_accel.abs().min(f.bend_accel.abs()) } else { f.bend_accel };
+    let grip = 1.0 - smooth(0.55, 1.0, f.grip_use.max(0.0));
+    // the trail left of the tyres' (their own shortens as the grip runs out, gone sliding)
+    let trail = if f.sliding { 0.7 * CASTER_TRAIL } else { CASTER_TRAIL + TYRE_TRAIL * grip * grip } / (CASTER_TRAIL + TYRE_TRAIL);
+    let heavy = (load / 60_000.0).clamp(0.5, 2.0) * if f.assisted { 1.0 } else { 3.0 };
+    let align = -accel.signum() * ALIGN_NM * (accel.abs() / ALIGN_ACCEL).tanh() * trail * heavy * rolling;
+    let lift = -load * KINGPIN_LEVER * (2.0 * f.road_wheel.clamp(-0.8, 0.8)).sin() * rolling / STEER_RATIO;
+    let hands = align + if f.assisted { power_assist(lift) } else { lift };
+    let turning = ((x - x0) / dt).clamp(-4.0, 4.0);
+    let standing = 1.0 - smooth(0.0, 8.0, v);
+    let scrub = -SCRUB_NM * if f.assisted { 1.0 } else { 4.0 } * standing * (turning / SCRUB_RATE).tanh();
+    let damping = -STEER_DAMPING_NM * turning;
+    ((hands + scrub + damping) / RIM_FULL_NM).clamp(-1.0, 1.0)
 }
 
 /// A control several set-up devices give: the first one set wins, unless a later one is
@@ -2846,4 +2958,65 @@ mod hot_reload_tests {
         assert!(save_cfg_to(&path.join("not-a-directory.cfg"), &[]).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
+    /// The front axle's forces (`realistic_steering`): a bus at `kmh` in a bend of `bend`
+    /// m/s^2 (the steering's), its wheels at `x`.
+    fn axle(kmh: f32, bend: f32) -> super::FfInput {
+        super::FfInput { on: true, kmh, dt: 1.0 / 60.0, front_load: 65_000.0, bend_accel: bend, grip_use: (bend / 7.0).abs(), assisted: true, realistic: true, ..Default::default() }
+    }
+
+    #[test]
+    fn the_tyres_turn_the_wheel_back_out_of_the_bend_and_harder_the_tighter_it_is() {
+        let mut t = 0.0;
+        let gentle = super::wheel_force(&axle(50.0, 0.5), 0.05, 0.05, &mut t, 1.0, 0.0);
+        let firm = super::wheel_force(&axle(50.0, 2.0), 0.15, 0.15, &mut t, 1.0, 0.0);
+        let left = super::wheel_force(&axle(50.0, -2.0), -0.15, -0.15, &mut t, 1.0, 0.0);
+        assert!(gentle < -0.02 && gentle > -0.1, "{gentle}");
+        assert!(firm < gentle - 0.1, "{gentle} {firm}");
+        assert!((left + firm).abs() < 1e-4, "{left} {firm}");
+        // straight ahead, nothing
+        assert!(super::wheel_force(&axle(50.0, 0.0), 0.0, 0.0, &mut t, 1.0, 0.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_wheel_goes_light_near_the_grip_and_in_a_slide() {
+        let mut t = 0.0;
+        let firm = super::wheel_force(&axle(60.0, 3.0), 0.2, 0.2, &mut t, 1.0, 0.0);
+        let limit = super::wheel_force(&super::FfInput { grip_use: 0.98, ..axle(60.0, 6.5) }, 0.4, 0.4, &mut t, 1.0, 0.0);
+        let slide = super::wheel_force(&super::FfInput { sliding: true, lateral_accel: 6.0, grip_use: 1.4, ..axle(60.0, 9.0) }, 0.5, 0.5, &mut t, 1.0, 0.0);
+        assert!(limit > firm - 0.15, "the tyre's trail goes as the grip does: {firm} {limit}");
+        assert!(slide > limit, "sliding, the tyre's own trail is gone: {limit} {slide}");
+        assert!(slide < 0.0);
+    }
+
+    #[test]
+    fn a_standing_bus_holds_its_wheel_and_resists_turning_hard_without_the_engine() {
+        let mut t = 0.0;
+        // held still, no centring
+        assert!(super::wheel_force(&axle(0.0, 0.0), 0.4, 0.4, &mut t, 1.0, 0.0).abs() < 1e-4);
+        // turned, it pushes back against the hands; much harder with the pump off
+        let assisted = super::wheel_force(&axle(0.0, 0.0), 0.41, 0.40, &mut t, 1.0, 0.0);
+        let manual = super::wheel_force(&super::FfInput { assisted: false, ..axle(0.0, 0.0) }, 0.41, 0.40, &mut t, 1.0, 0.0);
+        assert!(assisted < -0.1, "{assisted}");
+        assert!(manual < assisted * 2.5, "{assisted} {manual}");
+        // rolling away, the scrub is gone
+        let rolling = super::wheel_force(&super::FfInput { road_wheel: 0.0, ..axle(20.0, 0.0) }, 0.41, 0.40, &mut t, 1.0, 0.0);
+        assert!(rolling > assisted * 0.3, "{assisted} {rolling}");
+    }
+
+    #[test]
+    fn at_walking_pace_the_axle_turns_the_wheel_back_to_the_middle() {
+        let mut t = 0.0;
+        let right = super::wheel_force(&super::FfInput { road_wheel: 0.5, ..axle(6.0, 0.0) }, 0.6, 0.6, &mut t, 1.0, 0.0);
+        let left = super::wheel_force(&super::FfInput { road_wheel: -0.5, ..axle(6.0, 0.0) }, -0.6, -0.6, &mut t, 1.0, 0.0);
+        assert!(right < -0.05 && left > 0.05, "{right} {left}");
+    }
+
+    #[test]
+    fn the_power_steering_lets_a_light_load_through_and_little_of_a_heavy_one() {
+        assert!((super::power_assist(0.3) - 0.3).abs() < 0.02);
+        let (a, b, c) = (super::power_assist(10.0), super::power_assist(40.0), super::power_assist(80.0));
+        assert!(a < 2.5 && b > a && c > b && c < 8.0, "{a} {b} {c}");
+        assert!((super::power_assist(-10.0) + a).abs() < 1e-5);
+    }
 }
+
