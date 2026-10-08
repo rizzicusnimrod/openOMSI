@@ -4956,27 +4956,39 @@ impl Traffic {
                 }
             }
         }
-        // keep the junction clear: the exit must take the whole car
+        // keep the junction clear: the exit must take the whole car. Looked for along the
+        // car's way past the junction - a short exit lane's queue stands on the lane after it,
+        // and the car drove in behind a queue it did not see and stopped across the junction -
+        // and a slow car there counts a little further on (it is about to stop in its queue:
+        // followed in, it left the car standing in the junction when it did).
         let ruled_before_exit = ruled;
         let mut exit_full = false;
         if !jn.inside {
             if let Some((e, de)) = jn.exit {
-                let room = on_lane
-                    .get(&e)
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[])
-                    .iter()
-                    .filter(|x| !x.3 && x.0 != i)
-                    .map(|&(j, sj, _, _)| (sj - self.cars[j].state.rear, self.cars[j].state.speed))
-                    .fold(None::<(f32, f32)>, |acc, x| {
-                        if acc.map(|a| x.0 < a.0).unwrap_or(true) {
-                            Some(x)
-                        } else {
-                            acc
+                let need = st.length + st.min_gap;
+                let mut room: Option<(f32, f32)> = None;
+                if let Some(k0) = way.iter().position(|w| w.0 == e) {
+                    for &(l, dl) in &way[k0..] {
+                        let from_exit = dl - de;
+                        if from_exit > need + 15.0 {
+                            break;
                         }
-                    });
+                        for &(j, sj, _, gone) in on_lane.get(&l).map(|v| v.as_slice()).unwrap_or(&[]) {
+                            if gone || j == i {
+                                continue;
+                            }
+                            let space = from_exit + sj - self.cars[j].state.rear;
+                            if room.is_none_or(|r| space < r.0) {
+                                room = Some((space, self.cars[j].state.speed));
+                            }
+                        }
+                        if room.is_some() {
+                            break;
+                        }
+                    }
+                }
                 if let Some((space, speed)) = room {
-                    if speed < 1.5 && space < st.length + st.min_gap && de < 40.0 {
+                    if speed < 4.0 && space + 2.0 * speed < need && de < 40.0 {
                         ruled = true;
                         exit_full = true;
                         if explain {
