@@ -169,6 +169,23 @@ impl World {
 
     /// Render texture of mirror `i` (created on first use, as large as the `mirror_size`
     /// setting says).
+    /// The wipe map's texture (`crate::wipers::MAP_W` x `MAP_H`, all wet to begin with).
+    pub fn wipe_texture(&self, renderer: &Renderer, scene: &mut Scene) -> TextureId {
+        let mut g = self.wipe_texture.lock();
+        if let Some(t) = *g {
+            return t;
+        }
+        let img = omsi_texture::Image {
+            width: crate::wipers::MAP_W as u32,
+            height: crate::wipers::MAP_H as u32,
+            rgba: [255u8, 255, 255, 255].repeat(crate::wipers::MAP_W * crate::wipers::MAP_H),
+            has_alpha: false,
+        };
+        let t = renderer.add_texture(scene, &img, false);
+        *g = Some(t);
+        t
+    }
+
     pub fn mirror_texture(&self, renderer: &Renderer, scene: &mut Scene, i: usize) -> TextureId {
         let mut g = self.mirror_textures.lock();
         if g.len() <= i {
@@ -1963,6 +1980,8 @@ pub struct World {
     parklist: Mutex<HashMap<usize, Vec<String>>>,
     /// Render textures of the player's mirrors (`reflexionN.bmp`), by camera index.
     pub mirror_textures: Mutex<Vec<Option<TextureId>>>,
+    /// The player's windscreen's wipe map (`crate::wipers`), made when a bus first needs it.
+    pub wipe_texture: Mutex<Option<TextureId>>,
     /// Width / height of the glass of the player bus mirror N (from the mesh that shows its
     /// picture), 0 when not known: the shape of the panels that copy the mirrors to the screen.
     pub mirror_aspect: Mutex<Vec<f32>>,
@@ -2893,6 +2912,7 @@ impl World {
             map_dir,
             parklist: Mutex::new(HashMap::new()),
             mirror_textures: Mutex::new(Vec::new()),
+            wipe_texture: Mutex::new(None),
             mirror_aspect: Mutex::new(Vec::new()),
             mirror_glass: Mutex::new(Vec::new()),
             chrono_dirs: parking_lot::RwLock::new(chrono_dirs),
@@ -10410,6 +10430,7 @@ fn material_extra(
         glass: false,
         night_switched: false,
         rain_film: false,
+        wiped: false,
         water: false,
         display: false,
         screen: false,
@@ -12595,6 +12616,12 @@ impl World {
                     // (all three graphics: OMSI 2's own rain, its texture sliding down the
                     // pane, looked like wet paper next to drops that bend the street)
                     extra.rain_film = rain_layer && !snowing() && omsi_cfg::env::var_os("OMSI_TEXTURE_RAIN").is_none();
+                    // the film the wipers sweep, on the player's bus: its water spot by spot
+                    // from the wipe map (`crate::wipers`), in its light map's place
+                    extra.wiped = player
+                        && extra.rain_film
+                        && ov.iter().any(|o| o.alphascale.as_deref().is_some_and(|v| v.trim().eq_ignore_ascii_case("rain_window_wiped_wetness")));
+                    let lightmap = if extra.wiped { Some(self.wipe_texture(renderer, scene)) } else { lightmap };
                     // Some mod buses put [matl_noZcheck] on the complete body mesh.
                     // That flag is for decals; on a body it disables depth writing and
                     // lets the cabin bleed through the outside shell. Keep it on genuine

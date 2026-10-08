@@ -2468,6 +2468,8 @@ impl ApplicationHandler for App {
                     .filter_map(|t| t.ty.def.bounding_box.map(|bb| (t.position, t.heading, bb))).take(3).collect();
                 lighting.detail = self.settings.detail_textures;
                 lighting.glass_wind = self.player.as_ref().map(|p| crate::lights::vehicle_velocity(&p.vehicle)).unwrap_or_default();
+                // the wipers sweep the windscreen's water (`crate::wipers`)
+                lighting.wipe = self.step_wipers(dt, lighting.rain);
                 // an LED panel's dots burn this much above their own colour (16 levels,
                 // see `Settings::led_glow`); the panel's picture and its mask are held at
                 // this mip level at most (`Settings::led_mips`)

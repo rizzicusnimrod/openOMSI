@@ -44,6 +44,9 @@ struct Enhanced {
     // rgb the moonlight on a surface facing the moon (after the clouds), w 1 while the
     // shadow maps are the moon's
     moon_light: vec4<f32>,
+    // the windscreen's wipers: rows 0-2 world to the bus's frame, 3 the bus's origin, 4 the
+    // wipe map's rectangle (x min, z min, 1 / width, 1 / height; 0: none)
+    wipe: array<vec4<f32>, 5>,
 };
 @group(0) @binding(11) var<uniform> enh: Enhanced;
 @group(0) @binding(13) var s_lin: sampler;

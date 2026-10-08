@@ -151,6 +151,10 @@ struct EnhancedUniform {
     /// rgb the moonlight on a surface facing the moon (after the clouds), w 1 while the
     /// shadow maps are the moon's (`Lighting::casts_moon_shadows`)
     moon_light: [f32; 4],
+    /// The windscreen's wipers (`Lighting::wipe`): rows 0-2 the bus's rotation turned back
+    /// (world to the bus's frame), 3 xyz its origin relative to the render origin, 4 the
+    /// wipe map's rectangle on the glass (x min, z min, 1 / width, 1 / height; 0 width: none)
+    wipe: [[f32; 4]; 5],
 }
 
 /// High-range colour targets of the enhanced path for one size: the multisampled one the
@@ -670,6 +674,16 @@ impl Camera {
     }
 }
 
+/// Where the wipe map of the player's windscreen lies (see `MaterialExtra::wiped`): the
+/// bus's origin and rotation (the frame its meshes are in: x right, y forward, z up) and
+/// the map's rectangle on the glass seen from in front (x min, z min, x max, z max).
+#[derive(Debug, Clone, Copy)]
+pub struct WipeFrame {
+    pub origin: DVec3,
+    pub rotation: glam::Mat3,
+    pub rect: [f32; 4],
+}
+
 #[derive(Clone, Debug)]
 pub struct Lighting {
     /// Objects smaller on the screen than this are not drawn: the original's
@@ -718,6 +732,8 @@ pub struct Lighting {
     /// The player's vehicle (origin, heading in degrees, `[boundingbox]` w l h cx cy cz):
     /// no rain sheen or snow cover is shaded inside it.
     pub inside: Option<(DVec3, f64, [f32; 6])>,
+    /// The player's bus's wipers: the frame the wipe map (`MaterialExtra::wiped`) lies in.
+    pub wipe: Option<WipeFrame>,
     /// Actual road height beneath the player's vehicle; independent of suspension motion.
     /// The local puddle capture is skipped when no road height is known.
     pub puddle_ground: Option<f64>,
@@ -829,6 +845,7 @@ impl Default for Lighting {
             enhanced: false,
             classic: false,
             inside: None,
+            wipe: None,
             puddle_ground: None,
             puddle_normal: Vec3::Z,
             puddle_parts: Vec::new(),
@@ -1052,6 +1069,11 @@ pub struct MaterialExtra {
     /// The film of water on a window (`[alphascale] Rain_Window_…`): drawn as drops that sit,
     /// gather and run down the glass instead of the texture sliding down as a whole.
     pub rain_film: bool,
+    /// A rain film the wipers sweep (`[alphascale] Rain_Window_Wiped_Wetness`): its water is
+    /// read, spot by spot, from the wipe map in its light map's place (`WipeFrame`) - the
+    /// drops gone where a blade has just passed and gathering again behind it - instead of
+    /// the script's one value for the whole film.
+    pub wiped: bool,
     /// The map's water (`texture/water.tga`): Enhanced draws it as water - a smooth surface
     /// mirroring the sky more the flatter it is seen, rippled by small waves.
     pub water: bool,
@@ -5950,7 +5972,7 @@ impl Renderer {
                 },
             ],
             params2: [
-                if lightmap.is_some() { 1.0 } else { 0.0 },
+                if lightmap.is_some() && !extra.wiped { 1.0 } else { 0.0 },
                 envmap.map(|e| e.1).unwrap_or(0.0),
                 moisture,
                 // bit 1: a [matl_envmap_mask]; bit 2: a [matl_transmap]; bit 4: a vehicle's
@@ -5990,7 +6012,7 @@ impl Renderer {
             retro: [
                 if extra.retroreflective { 1.0 } else { 0.0 },
                 if extra.retroreflective && debug_retro() { 1.0 } else { 0.0 },
-                0.0,
+                if extra.wiped { 1.0 } else { 0.0 },
                 0.0,
             ],
         };
@@ -7442,6 +7464,19 @@ impl Renderer {
                 c
             },
             moon_light: st.moon_light.extend(if lighting.casts_moon_shadows() { 1.0 } else { 0.0 }).to_array(),
+            wipe: lighting.wipe.map_or([[0.0; 4]; 5], |w| {
+                // (the bus's axes in the world: a point's coordinates along them are its
+                // place in the bus's frame)
+                let r = w.rotation;
+                let o = (w.origin - ro).as_vec3();
+                [
+                    r.x_axis.extend(0.0).to_array(),
+                    r.y_axis.extend(0.0).to_array(),
+                    r.z_axis.extend(0.0).to_array(),
+                    o.extend(0.0).to_array(),
+                    [w.rect[0], w.rect[1], 1.0 / (w.rect[2] - w.rect[0]).max(1e-3), 1.0 / (w.rect[3] - w.rect[1]).max(1e-3)],
+                ]
+            }),
             moon_disc: st.moon_disc.extend((1.0 - 0.18 * (st.input.haze - 1.0).max(0.0)).clamp(0.2, 1.0) * 0.55).to_array(),
         };
         self.queue
@@ -9909,7 +9944,9 @@ impl Renderer {
                         // original, whose blend takes it out whole; drawn anyway it ran the full
                         // shading over the whole windscreen for nothing - a bus's cab view had
                         // three or four such screen-sized layers.
-                        if mat.alpha == AlphaMode::Blend && inst.slot_alpha.get(*slot as usize).is_some_and(|a| *a < 1.0 / 512.0) {
+                        // (not the wipers' film: its water is the wipe map's, spot by spot -
+                        // the script's one value for it goes to 0 while the wipers run)
+                        if mat.alpha == AlphaMode::Blend && mat.uniform.retro[2] < 0.5 && inst.slot_alpha.get(*slot as usize).is_some_and(|a| *a < 1.0 / 512.0) {
                             continue;
                         }
                         // Ground blends use the C++ handler's no-write composition;

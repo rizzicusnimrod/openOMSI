@@ -59,6 +59,7 @@ mod radio;
 mod puddles;
 mod quit;
 mod rain;
+mod wipers;
 mod scene;
 mod schedule;
 mod schedule_paper;
@@ -539,6 +540,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         teleport_pick: false,
         photo: None,
         ui_hidden: None,
+        wipers: None,
         discord: None,
         discord_t: 0.0,
         #[cfg(steam)]

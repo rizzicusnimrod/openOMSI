@@ -447,6 +447,16 @@ fn display_level(t: vec3<f32>) -> vec3<f32> {
     return x + 0.04 * smoothstep(vec3<f32>(0.0), vec3<f32>(0.08), x);
 }
 
+// The water on the windscreen where the wipers sweep, at `world`: the wipe map (in the
+// film's light map's place, see `MaterialExtra::wiped`) seen from in front of the bus - each
+// texel how much rain has gathered there since a blade last passed.
+fn wiped_wetness(world: vec3<f32>) -> f32 {
+    let d = world - enh.wipe[3].xyz;
+    let q = vec3<f32>(dot(enh.wipe[0].xyz, d), dot(enh.wipe[1].xyz, d), dot(enh.wipe[2].xyz, d));
+    let m = clamp(vec2<f32>((q.x - enh.wipe[4].x) * enh.wipe[4].z, 1.0 - (q.z - enh.wipe[4].y) * enh.wipe[4].w), vec2<f32>(0.0), vec2<f32>(1.0));
+    return textureSampleLevel(t_light, s_diffuse, m, 0.0).r;
+}
+
 fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bool, eye: vec3<f32>) -> vec4<f32> {
     if (material.emissive.w > 1.5) {
         // a pane's film of water: drops, not the sliding texture (see `rain_glass`), each a
@@ -454,7 +464,9 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
         let v = camera.cam_pos.xyz - in.world;
         let vn = normalize(v);
         let in_cab = inside_vehicle(camera.cam_pos.xyz) * near_player_vehicle(in.world) > 0.5;
-        let g = rain_glass(in.world, in.uv - in.params.zw, in.normal, in.params.x, camera.post.y, in_cab);
+        // (the film the wipers sweep: its water where this spot is, from the wipe map)
+        let wet = select(in.params.x, wiped_wetness(in.world), material.retro.z > 0.5 && enh.wipe[4].z > 0.0);
+        let g = rain_glass(in.world, in.uv - in.params.zw, in.normal, wet, camera.post.y, in_cab);
         let through = rain_through(g, vn);
         let valid = dot(through, through) > 1e-4;
         // (the picture behind is as the HDR pass drew it: exposed already)
