@@ -39,6 +39,7 @@ mod game_controller_menu;
 mod rail_drive;
 mod driver;
 mod demo;
+mod events;
 mod export;
 mod hud;
 mod humans;
@@ -483,6 +484,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         lamps_on: None,
         menu: None,
         demo,
+        events: None,
         populate_t: 0.0,
         humans_populate_t: 0.0,
         radio: radio::Radio::load(&args_root_for_keys),

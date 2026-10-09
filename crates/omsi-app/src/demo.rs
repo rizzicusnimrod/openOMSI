@@ -150,7 +150,7 @@ fn dir(h: f64) -> DVec2 {
 
 /// The street lane the bus stands on going its way: the nearest within 6 m whose way there
 /// is within 45 deg of the bus's heading (lane, distance along it).
-fn lane_under(net: &Network, p: DVec3, heading: f64) -> Option<(usize, f32)> {
+pub(crate) fn lane_under(net: &Network, p: DVec3, heading: f64) -> Option<(usize, f32)> {
     let want = dir(heading);
     let mut best: Option<(usize, f32, f64)> = None;
     for (i, l) in net.lanes.iter().enumerate() {
@@ -170,7 +170,7 @@ fn lane_under(net: &Network, p: DVec3, heading: f64) -> Option<(usize, f32)> {
 
 /// `dist` metres back along the road from `s` on `lane`, going back through the lane that
 /// leads into it most nearly straight on; where the network ends, its first metre.
-fn walk_back(net: &Network, mut lane: usize, mut s: f32, mut dist: f32) -> (usize, f32) {
+pub(crate) fn walk_back(net: &Network, mut lane: usize, mut s: f32, mut dist: f32) -> (usize, f32) {
     for _ in 0..64 {
         if s >= dist {
             return (lane, s - dist);
@@ -217,7 +217,7 @@ fn walk_ahead(net: &Network, mut lane: usize, mut s: f32, mut dist: f32) -> (usi
 
 /// The lane of the oncoming traffic beside `s` on `lane`: the nearest street lane within
 /// 10 m going the other way (lane, distance along it).
-fn oncoming_lane(net: &Network, lane: usize, s: f32) -> Option<(usize, f32)> {
+pub(crate) fn oncoming_lane(net: &Network, lane: usize, s: f32) -> Option<(usize, f32)> {
     let (p, h) = net.lanes[lane].at(s);
     let back = -dir(h as f64);
     let mut best: Option<(usize, f32, f64)> = None;

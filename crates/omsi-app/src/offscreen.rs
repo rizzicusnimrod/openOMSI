@@ -385,6 +385,7 @@ pub(crate) fn run_offscreen(
     let spray_wet = puddles::road_wetness(initial_wetness(&weather), weather.snow);
     let spray_wind = Vec3::new(weather.wind.0.to_radians().sin(), weather.wind.0.to_radians().cos(), 0.0) * weather.wind.1 * puddles::GROUND_WIND;
     let mut demo = args.demo.as_deref().and_then(crate::demo::Demo::new);
+    let mut events = crate::events::Events::new(&world.map_dir, crate::events::Config::from_settings(&settings), 0x5eed);
     for i in 0..total_frames {
         let t_s = i as f32 * dt;
         if server {
@@ -643,6 +644,17 @@ pub(crate) fn run_offscreen(
             if let Some(d) = demo.as_mut() {
                 d.tick(dt, t, &world, &renderer, &mut scene, player.as_ref().map(|p| player_outline(p)));
             }
+            if let Some(ev) = events.as_mut() {
+                ev.update_route(duty.as_ref(), schedule.as_ref(), &world, t);
+                let stops = crate::events::duty_stops(duty.as_ref());
+                let cx = crate::events::Ctx {
+                    player: player.as_ref().map(|p| player_outline(p)),
+                    stops: &stops,
+                    horn: player.as_ref().is_some_and(|p| crate::traffic_link::horn(&p.vehicle)),
+                    host: true,
+                };
+                ev.tick(dt, t, &world, &renderer, &mut scene, &cx);
+            }
             world.set_switches(&t.switch_requests());
             world.set_signals(&t.signal_aspects(&world.signal_routes, None));
             if let Some(p) = player.as_mut() {
@@ -659,6 +671,10 @@ pub(crate) fn run_offscreen(
                     }
                 }
                 let due = (d.trip_index, d.next_stop);
+                // (the stops' places as their tiles come, as the window's duty learns them)
+                if i % 30 == 0 {
+                    d.learn_loaded(&world.object_positions.lock());
+                }
                 let served = d.update(&mut player.vehicle, parse_time(&args.time) + t_s as f64);
                 if let Some((arrival, departure)) = served {
                     career.stop_served(arrival, departure);
@@ -1259,9 +1275,12 @@ pub(crate) fn run_offscreen(
                 lighting.detail = settings.detail_textures;
                 world.finish_texture_upgrades(&renderer, &mut scene);
                 let pixels = renderer.render_to_image(&mut scene, w, h, &cam, &lighting)?;
+                // (to the hundredth where the times asked for are that close: frame after frame)
+                let fine = (ts * 10.0 - (ts * 10.0).round()).abs() > 0.01;
                 let path = out.with_file_name(format!(
-                    "{}_{ts:.1}.png",
-                    out.file_stem().and_then(|s| s.to_str()).unwrap_or("snap")
+                    "{}_{}.png",
+                    out.file_stem().and_then(|s| s.to_str()).unwrap_or("snap"),
+                    if fine { format!("{ts:.2}") } else { format!("{ts:.1}") }
                 ));
                 image::save_buffer(&path, &pixels, w, h, image::ColorType::Rgba8)?;
                 if omsi_cfg::env::var_os("OMSI_BLEND_AB").is_some() {
@@ -2686,6 +2705,7 @@ pub(crate) fn run_offscreen(
             let frame = navigator::NavFrame {
                 traffic: traffic.as_ref(),
                 players: lan_off.as_ref().map(|l| lan::nav_players(&remotes_off, l.my_id)).unwrap_or_default(),
+                events: events.as_ref().zip(traffic.as_ref()).map(|(e, t)| e.markers(t)).unwrap_or_default(),
                 bus: p.vehicle.position,
                 heading: p.vehicle.heading,
                 speed_kmh: p.vehicle.physics.velocity_kmh(),

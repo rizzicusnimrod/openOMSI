@@ -58,6 +58,8 @@ pub(crate) struct App {
     pub(crate) menu: Option<menu::Menu>,
     /// `--demo`'s scene (see `demo.rs`).
     pub(crate) demo: Option<crate::demo::Demo>,
+    /// The traffic events' director for the map (see `events.rs`; None on a map without).
+    pub(crate) events: Option<crate::events::Events>,
     pub(crate) populate_t: f32,
     pub(crate) humans_populate_t: f32,
     /// The player's bus radio as internet radio.

@@ -126,6 +126,17 @@ pub(crate) fn cursor_ray(cam: &Camera, x: f32, y: f32, w: f32, h: f32) -> (DVec3
 pub(crate) fn follow_id(args: &Args, traffic: Option<&traffic::Traffic>) -> Option<u64> {
     match args.follow.as_deref()? {
         "auto" => traffic?.last_overtaker.map(|o| o.0),
+        // a traffic event's car (`events.rs`), kept while it exists
+        "event" => {
+            thread_local!(static EVENT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) });
+            let t = traffic?;
+            if let Some(id) = EVENT.with(|c| c.get()).filter(|id| t.car_pose(*id).is_some()) {
+                return Some(id);
+            }
+            let id = t.cars.iter().find(|c| c.halt.is_some() || c.event.is_some()).map(|c| c.id)?;
+            EVENT.with(|c| c.set(Some(id)));
+            Some(id)
+        }
         // the oldest car that is driving when first asked, kept while it exists
         "moving" => {
             thread_local!(static CHOSEN: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) });

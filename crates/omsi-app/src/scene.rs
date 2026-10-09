@@ -3000,7 +3000,8 @@ impl World {
         if let Some(t) = self.object_types.lock().get(&key) {
             return t.clone();
         }
-        let path = omsi_cfg::resolve_path(&self.root, rel);
+        // (a full path - an object the game brings itself, `events::triangle_sco` - as it is)
+        let path = if std::path::Path::new(rel).is_absolute() { std::path::PathBuf::from(rel) } else { omsi_cfg::resolve_path(&self.root, rel) };
         let loaded = (|| -> Option<Arc<ObjectType>> {
             let mut sco = SceneryObject::load(&path)
                 .map_err(|e| log::warn!("{e}"))

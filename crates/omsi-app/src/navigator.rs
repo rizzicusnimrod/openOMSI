@@ -57,6 +57,8 @@ const TRAM: Color = Color::rgba(240, 190, 30, 1.0);
 const LINE_TEXT: Color = Color::rgba(15, 15, 15, 1.0);
 /// The other players of a LAN session or server: an arrow the way they face, with their name.
 const PLAYER: Color = Color::rgba(190, 96, 255, 1.0);
+/// A traffic event's badge (`NavEvent`).
+const EVENT: Color = Color::rgba(255, 176, 32, 1.0);
 
 /// What a traffic vehicle is on the map: a trolleybus (its model has trolley poles to
 /// raise, `cp_SHTANGALEV` or `shtanga_lev_rot`), a tram, a bus (one on a timetable or
@@ -174,6 +176,29 @@ pub struct NavStop {
     pub arrival: f64,
 }
 
+/// A traffic event on the road (`crate::events`) as the maps show it: where it is, its icon
+/// and its name; an emergency vehicle's badge flashes blue and red.
+#[derive(Debug, Clone)]
+pub struct NavEvent {
+    pub position: DVec3,
+    pub icon: &'static str,
+    pub name: String,
+    pub emergency: bool,
+}
+
+/// A traffic event's badge colour (an emergency vehicle's flashing blue and red with the
+/// clock, `time` in s).
+fn event_colour(ev: &NavEvent, time: f64) -> Color {
+    if !ev.emergency {
+        return EVENT;
+    }
+    if (time * 2.5).floor() as i64 % 2 == 0 {
+        Color::rgba(40, 110, 255, 1.0)
+    } else {
+        Color::rgba(230, 45, 45, 1.0)
+    }
+}
+
 /// Another player of the session as the maps show them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NavPlayer {
@@ -189,6 +214,8 @@ pub struct NavFrame<'a> {
     pub traffic: Option<&'a Traffic>,
     /// The other players of a LAN session or server, on both maps (#1011, #1080).
     pub players: Vec<NavPlayer>,
+    /// The traffic events on the road (`crate::events`), on both maps.
+    pub events: Vec<NavEvent>,
     pub bus: DVec3,
     /// Compass heading (degrees, 0 = +y, clockwise).
     pub heading: f64,
@@ -1198,6 +1225,50 @@ impl Navigator {
             ui.circle(sp, badge, fill);
             ui.icon(&mut self.atlas, "directions_bus", sp, if next { 12.5 } else { 10.5 } * s, TEXT);
         }
+        // the traffic events: a badge each with its icon; one beyond the map at its edge, the
+        // way it lies from the bus, with how far it is
+        for ev in &f.events {
+            let inner = map.pad(14.0 * s, 14.0 * s);
+            let (p, off) = match project(vpm, vp, rel(ev.position)).filter(|p| inner.contains(*p)) {
+                Some(p) => (p, None),
+                None => {
+                    let Some(bp) = project(vpm, vp, rel(f.bus)).filter(|p| inner.contains(*p)) else { continue };
+                    let d = (ev.position - f.bus).truncate();
+                    let a = (angle_diff(self.cam_heading, d.x.atan2(d.y).to_degrees()) as f32).to_radians();
+                    let dir = Vec2::new(a.sin(), -a.cos());
+                    let mut t = f32::MAX;
+                    if dir.x > 1e-4 {
+                        t = t.min((inner.right() - bp.x) / dir.x);
+                    } else if dir.x < -1e-4 {
+                        t = t.min((inner.x - bp.x) / dir.x);
+                    }
+                    if dir.y > 1e-4 {
+                        t = t.min((inner.bottom() - bp.y) / dir.y);
+                    } else if dir.y < -1e-4 {
+                        t = t.min((inner.y - bp.y) / dir.y);
+                    }
+                    if !t.is_finite() {
+                        continue;
+                    }
+                    (bp + dir * t, Some(d.length()))
+                }
+            };
+            let fill = event_colour(ev, f.time);
+            let k = if off.is_some() { 0.8 } else { 1.0 };
+            ui.circle(p, 10.5 * s * k, Color::rgba(10, 10, 10, 0.95));
+            ui.circle(p, 9.0 * s * k, fill);
+            ui.icon(&mut self.atlas, ev.icon, p, 12.5 * s * k, if ev.emergency { Color::WHITE } else { Color::rgba(25, 20, 10, 1.0) });
+            if let Some(dist) = off {
+                let t = if dist >= 1000.0 { format!("{:.1} km", dist / 1000.0) } else { format!("{:.0} m", ((dist / 10.0).round() * 10.0).max(10.0)) };
+                let px = 9.0 * s;
+                let tw = self.fonts.width(&t, px, Weight::Bold) + 8.0 * s;
+                // (beside the badge, towards the map's middle)
+                let below = p.y < map.center().y;
+                let r = Rect::new((p.x - tw * 0.5).clamp(map.x + 2.0 * s, map.right() - tw - 2.0 * s), if below { p.y + 10.0 * s } else { p.y - 23.0 * s }, tw, 13.0 * s);
+                ui.rounded(r, 3.5 * s, Color::rgba(12, 12, 12, 0.9));
+                ui.text_in(&mut self.atlas, &self.fonts, &t, px, Weight::Bold, r, Align::Center, fill);
+            }
+        }
         // the public transport's lines: a tag in its colour above its dot (the nearest first,
         // none on top of another)
         lines.sort_by(|a, b| (a.0 - f.bus).length().total_cmp(&(b.0 - f.bus).length()));
@@ -1477,7 +1548,7 @@ fn congestion_on(net: &Network, traffic: &Network, c: &HashMap<usize, f32>) -> H
 
 impl<'a> NavFrame<'a> {
     fn clone_ref(&self) -> NavFrame<'a> {
-        NavFrame { traffic: self.traffic, players: self.players.clone(), bus: self.bus, heading: self.heading, speed_kmh: self.speed_kmh, outside_temp: self.outside_temp, inside_temp: self.inside_temp, line: self.line.clone(), terminus: self.terminus.clone(), stops: self.stops.clone(), delay: self.delay, passengers: self.passengers, time: self.time, weekday: self.weekday, language: self.language, screen: self.screen, ui_scale: self.ui_scale, follow_window: self.follow_window, dt: self.dt, stop_requested: self.stop_requested, info_rect: self.info_rect }
+        NavFrame { traffic: self.traffic, players: self.players.clone(), events: self.events.clone(), bus: self.bus, heading: self.heading, speed_kmh: self.speed_kmh, outside_temp: self.outside_temp, inside_temp: self.inside_temp, line: self.line.clone(), terminus: self.terminus.clone(), stops: self.stops.clone(), delay: self.delay, passengers: self.passengers, time: self.time, weekday: self.weekday, language: self.language, screen: self.screen, ui_scale: self.ui_scale, follow_window: self.follow_window, dt: self.dt, stop_requested: self.stop_requested, info_rect: self.info_rect }
     }
 }
 
@@ -2655,6 +2726,27 @@ impl Navigator {
         for (k, name, r) in stop_labels {
             ui.rounded(r, 4.0 * s, Color::rgba(12, 12, 12, 0.85));
             ui.text_in(&mut self.atlas, &self.fonts, &name, 12.5 * s, if k == 0 { Weight::Bold } else { Weight::Medium }, r.pad(6.0 * s, 0.0), Align::Left, if k == 0 { TEXT } else { TEXT_DIM });
+        }
+        // the traffic events: a badge with its icon, its name beside it where there is room
+        for ev in &f.events {
+            let p = to_screen(ev.position);
+            if !win.contains(p) || p.y < 44.0 * s {
+                continue;
+            }
+            let fill = event_colour(ev, f.time);
+            ui.circle(p, 12.0 * s, Color::rgba(10, 10, 10, 0.95));
+            ui.circle(p, 10.5 * s, fill);
+            ui.icon(&mut self.atlas, ev.icon, p, 14.0 * s, if ev.emergency { Color::WHITE } else { Color::rgba(25, 20, 10, 1.0) });
+            let px = 11.0 * s;
+            let name = self.fonts.fit(&ev.name, px, Weight::Bold, 180.0 * s);
+            let tw = self.fonts.width(&name, px, Weight::Bold) + 10.0 * s;
+            let r = Rect::new(p.x + 15.0 * s, p.y - 8.0 * s, tw, 16.0 * s);
+            if taken.iter().any(|o| rects_overlap(o, &r)) {
+                continue;
+            }
+            taken.push(r);
+            ui.rounded(r, 4.0 * s, Color::rgba(12, 12, 12, 0.9));
+            ui.text_in(&mut self.atlas, &self.fonts, &name, px, Weight::Bold, r, Align::Center, fill);
         }
         // the other players: an arrow the way they face and their name (as on the small map)
         for pl in &f.players {

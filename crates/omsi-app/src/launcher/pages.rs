@@ -997,6 +997,15 @@ fn gameplay_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, cols: [Rect; 2]) ->
     sel_setting(ui, s, dirty, "s-unsched", c.row(), "Random traffic", "ai_unsched_factor", &[("25", "25%"), ("50", "50%"), ("75", "75%"), ("100", "100%"), ("150", "150%"), ("200", "200%")]);
     sel_setting(ui, s, dirty, "s-maxsched", c.row(), "Timetable vehicles", "ai_max_scheduled", &[("0", "All"), ("10", "At most 10"), ("25", "At most 25"), ("50", "At most 50")]);
     sel_setting(ui, s, dirty, "s-maxpark", c.row(), "Parked cars", "ai_max_parked", &[("-1", "None"), ("0", "Every space"), ("35", "At most 35"), ("100", "At most 100"), ("250", "At most 250")]);
+    // (the custom fork's traffic events: the Thüringer Wald for now, see `crate::events`)
+    c.section(ui, "Traffic events (Thüringer Wald)");
+    sel_setting(ui, s, dirty, "s-events", c.row(), "How often", "traffic_events", &[("off", "Off"), ("rare", "Rarely"), ("normal", "Now and then"), ("often", "Often")]);
+    toggle_setting(ui, s, dirty, c.row(), "Breakdowns", "traffic_events.breakdown");
+    toggle_setting(ui, s, dirty, c.row(), "Deliveries in the street", "traffic_events.delivery");
+    toggle_setting(ui, s, dirty, c.row(), "Cars in bus stops", "traffic_events.stop");
+    toggle_setting(ui, s, dirty, c.row(), "Ambulances on a call", "traffic_events.emergency");
+    toggle_setting(ui, s, dirty, c.row(), "Slow lorries on country roads", "traffic_events.slow");
+    toggle_setting(ui, s, dirty, c.row(), "Learner drivers", "traffic_events.learner");
     let left = c.used();
     // OMSI's own options (options.cfg)
     let mut c = Col::new(ui, cols[1], "Simulation");
@@ -2702,6 +2711,8 @@ mod settings_tests {
         let sound = vec!["s-vol", "s-volai", "s-volsc", "set-doppler", "s-voices", "radio-name-0", "radio-url-0", "radio-del-0", "radio-add"];
         let gameplay = vec![
             "s-board", "set-exact_fare", "s-pax", "set-get_up", "s-unsched", "s-maxsched", "s-maxpark",
+            "s-events", "set-traffic_events.breakdown", "set-traffic_events.delivery", "set-traffic_events.stop",
+            "set-traffic_events.emergency", "set-traffic_events.slow", "set-traffic_events.learner",
             "s-maint", "set-collision_vehicles", "set-collision_objects", "set-collision_pedestrians", "set-use_real_time", "set-use_real_date", "set-time_sync", "set-metar_sync", "s-timespeed",
         ];
         let general = vec![

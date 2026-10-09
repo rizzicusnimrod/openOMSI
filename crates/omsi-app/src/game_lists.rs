@@ -1522,6 +1522,12 @@ fn toggle_now(app: &App, id: &str) -> Option<bool> {
     Some(match id {
         "navigator" => if app.vr_active() { app.vr_nav_profile().enabled } else { app.navigator.as_ref().is_some_and(|n| n.enabled) },
         "nav_ai" => app.navigator.as_ref().map_or(s.nav_ai, |n| n.show_ai),
+        "traffic_event_breakdown" => s.traffic_event_breakdown,
+        "traffic_event_delivery" => s.traffic_event_delivery,
+        "traffic_event_stop" => s.traffic_event_stop,
+        "traffic_event_emergency" => s.traffic_event_emergency,
+        "traffic_event_slow" => s.traffic_event_slow,
+        "traffic_event_learner" => s.traffic_event_learner,
         "shadows" => s.shadows,
         "head" => s.head_movement,
         "cam_smooth" => s.driverview_smooth,
@@ -1611,6 +1617,30 @@ fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static str, String
         "shadows" => {
             app.settings.shadows = on;
             Some(("shadows", bit))
+        }
+        "traffic_event_breakdown" => {
+            app.settings.traffic_event_breakdown = on;
+            Some(("traffic_events.breakdown", bit))
+        }
+        "traffic_event_delivery" => {
+            app.settings.traffic_event_delivery = on;
+            Some(("traffic_events.delivery", bit))
+        }
+        "traffic_event_stop" => {
+            app.settings.traffic_event_stop = on;
+            Some(("traffic_events.stop", bit))
+        }
+        "traffic_event_emergency" => {
+            app.settings.traffic_event_emergency = on;
+            Some(("traffic_events.emergency", bit))
+        }
+        "traffic_event_slow" => {
+            app.settings.traffic_event_slow = on;
+            Some(("traffic_events.slow", bit))
+        }
+        "traffic_event_learner" => {
+            app.settings.traffic_event_learner = on;
+            Some(("traffic_events.learner", bit))
         }
         "head" => {
             app.settings.head_movement = on;
@@ -2273,6 +2303,7 @@ fn select_options(key: &str) -> Vec<(&'static str, &'static str)> {
         "maintenance" => vec![("0", "Infinite (no wear)"), ("1", "Very bad"), ("2", "Bad"), ("3", "Normal"), ("4", "Good")],
         "ai_unsched_factor" => vec![("25", "25%"), ("50", "50%"), ("75", "75%"), ("100", "100%"), ("150", "150%"), ("200", "200%")],
         "ai_max_scheduled" => vec![("0", "All"), ("10", "At most 10"), ("25", "At most 25"), ("50", "At most 50")],
+        "traffic_events" => vec![("off", "Off"), ("rare", "Rarely"), ("normal", "Now and then"), ("often", "Often")],
         "ai_max_parked" => vec![("-1", "None"), ("0", "Every space"), ("35", "At most 35"), ("100", "At most 100"), ("250", "At most 250")],
         "language" => omsi_launcher_lib::LANGUAGES.iter().map(|l| (l.0, l.1)).collect(),
         "vr_scale" => vec![("0.5", "50%"), ("0.65", "65%"), ("0.8", "80%"), ("1", "100%")],
@@ -2380,6 +2411,13 @@ fn options_pages(app: &App) -> Vec<Page> {
         pick("ai_unsched_factor", "Random traffic", later),
         pick("ai_max_scheduled", "Timetable vehicles", later),
         pick("ai_max_parked", "Parked cars", later),
+        pick("traffic_events", "Traffic events", "Now and then something happens on the road ahead (the Thüringer Wald for now)"),
+        switch_row(app, "traffic_event_breakdown", "Breakdowns", "A car stands half off the road with its hazard lights on"),
+        switch_row(app, "traffic_event_delivery", "Deliveries in the street", "A lorry or van stands in a town street's lane for a few minutes"),
+        switch_row(app, "traffic_event_stop", "Cars in bus stops", "A car stands in one of your next stops; it leaves when you honk or have served the stop"),
+        switch_row(app, "traffic_event_emergency", "Ambulances on a call", "An ambulance with blue lights and siren comes up behind; the cars pull over for it - make room too"),
+        switch_row(app, "traffic_event_slow", "Slow lorries on country roads", "An old lorry at tractor speed; it pulls over now and then to let the queue past"),
+        switch_row(app, "traffic_event_learner", "Learner drivers", "A slow, careful driver in town, late away from the lights"),
     ]
         .into_iter()
         .flatten()

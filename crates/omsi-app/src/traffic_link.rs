@@ -14,6 +14,12 @@ pub(crate) fn high_beam(v: &omsi_sim::VehicleInstance) -> bool {
     omsi_cfg::env::var_os("OMSI_HIGH_BEAM").is_some() || v.var("lights_fern").is_some_and(|x| x > 0.5)
 }
 
+/// The vehicle's horn sounds: `cockpit_hupe`, the stock buses' variable for it (the add-on
+/// ones' too), or `horn`.
+pub(crate) fn horn(v: &omsi_sim::VehicleInstance) -> bool {
+    v.var("cockpit_hupe").or_else(|| v.var("horn")).is_some_and(|x| x > 0.5)
+}
+
 /// `player_outline` of any vehicle moving at `speed` (m/s).
 pub(crate) fn vehicle_outline(v: &omsi_sim::VehicleInstance, speed: f32) -> traffic::PlayerBox {
     let bb =

@@ -260,6 +260,17 @@ pub struct Settings {
     /// the tyres' scrub when parked (see `controllers::realistic_steering`); off: the older,
     /// simpler centring spring.
     pub ff_realistic: bool,
+    /// Traffic events (`crate::events`, the Thüringer Wald for now): how often something
+    /// happens on the road ahead - "off", "rare", "normal", "often" - and which of them
+    /// (a breakdown, a delivery, a car in the bus's stop). `traffic_events` and
+    /// `traffic_events.<kind>` in the file.
+    pub traffic_events: String,
+    pub traffic_event_breakdown: bool,
+    pub traffic_event_delivery: bool,
+    pub traffic_event_stop: bool,
+    pub traffic_event_emergency: bool,
+    pub traffic_event_slow: bool,
+    pub traffic_event_learner: bool,
     /// OMSI's held brake on the keyboard (see `KeyboardAxes::pedal_hold`); `brake_hold` in
     /// the file - the old `pedal_hold` (off unless set, and holding the throttle as well)
     /// is left behind.
@@ -349,6 +360,17 @@ pub fn pedal_curve(v: f32, strength: f32) -> f32 {
     v.clamp(0.0, 1.0).powf(1.0 / g)
 }
 
+/// A `traffic_events` level as the settings keep it: "off", "rare", "normal" or "often"
+/// (anything else is "normal"; 0 reads as off).
+pub(crate) fn traffic_events_level(v: &str) -> &'static str {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "off" | "0" | "false" | "no" => "off",
+        "rare" => "rare",
+        "often" => "often",
+        _ => "normal",
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         if crate::platform::MOBILE {
@@ -378,7 +400,7 @@ impl Settings {
     /// picture go soft for seconds. An 8192 shadow map took a fifth of a day's frame on an
     /// RX 6700 XT, 1024 mirrors another tenth, for little to be seen; 8x MSAA a twentieth.)
     fn desktop() -> Self {
-        Self { msaa: 8, anisotropy: 16, ssao: true, shadows: true, shadow_size: 4096, shadow_blobs: true, navigator: true, ui_opacity: 0.85, notes: true, ui_scale: 1.0, ui_scale_window: true, navigator_corner: "bottom-left".into(), boarding: "auto".into(), detail_textures: true, exact_fare: true, enhanced: true, graphics: "enhanced".into(), triple: Default::default(), triple_span: true, triple_hud_center: true, vr: false, vr_scale: 0.65, vr_head_smoothing_ms: 0.0, vr_mirror_rate: 16.0, vr_desktop_mirror: true, fullscreen: false, vsync: true, volume: 0.6, drive_keys: "simple".into(), post_aa: "fxaa".into(), render_scale: 1.0, language: "ENG".into(), pax_voices: "all".into(), nav_arrows: false, nav_ai: true, get_up: false, texture_compression: true, texture_memory: 0, auto_clutch: true, momentary_gears: false, auto_shift: false, min_obj_size: 0.013, max_obj_dist: -1.0, max_fps: 0, chat: true, chat_size: 1.0, tooltips: true, name_tags: true, show_fps: false, clouds: true, pax_density: 1.0, vol_ai: 1.0, vol_scenery: 1.0, mirror_size: 512, mirror_hud: 0, mirror_refresh: "full".into(), doppler: true, driver: true, maintenance: 0, ai_unsched_factor: 1.0, ai_max_scheduled: 0, ai_max_parked: 0, ai_max_humans: 200, ai_drivers: Default::default(), exhaust: 0.67, classic_ui: false, advanced_settings: false, collision_vehicles: true, collision_objects: true, collision_pedestrians: true, head_movement: true, driverview_smooth: true, hands_in_cab: false, alt_view: true, precision_zoom: false, time_speed: 1.0, time_sync: false, metar_sync: false, metar_station: String::new(), machine_translation: false, shadow_casters: "all".into(), ctrl_deadzone: 0.0, right_stick_look: true, ctrl_off: String::new(), steering_linear: false, old_steering: false, red_steer_spd: false, reflections: true, led_glow: 6, led_mips: 1.3, mouse_sens: 1.0, graphics_api: "auto".into(), ff_invert: false, ff_enabled: true, ff_road_vib: 1.0, ff_engine_vib: 1.0, ff_fade: 0.28, ff_realistic: true, brake_hold: true, mouse_steering: false, mouse_right_off: false, mouse_smooth: true, look_sens: 1.0, look_smoothing_ms: 0.0, blinker_cancel: true, wheel_range: 900.0, wheel_lock: 0.0, fov: 0.0, camera_collision: true, steer_look: false, steer_look_angle: 30.0, steer_look_response: 0.25, head_idle: 0.0, head_idle_pace: 1.0, pedal_throttle: 1.0, pedal_brake: 1.0, seat: [0.0; 3], seat_pitch_deg: 0.0, head_tracking: false, head_tracking_port: 4242, head_tracking_invert: String::new(), discord_status: true, discord_app_id: String::new(), voice_chat: true, info_bar: false }
+        Self { msaa: 8, anisotropy: 16, ssao: true, shadows: true, shadow_size: 4096, shadow_blobs: true, navigator: true, ui_opacity: 0.85, notes: true, ui_scale: 1.0, ui_scale_window: true, navigator_corner: "bottom-left".into(), boarding: "auto".into(), detail_textures: true, exact_fare: true, enhanced: true, graphics: "enhanced".into(), triple: Default::default(), triple_span: true, triple_hud_center: true, vr: false, vr_scale: 0.65, vr_head_smoothing_ms: 0.0, vr_mirror_rate: 16.0, vr_desktop_mirror: true, fullscreen: false, vsync: true, volume: 0.6, drive_keys: "simple".into(), post_aa: "fxaa".into(), render_scale: 1.0, language: "ENG".into(), pax_voices: "all".into(), nav_arrows: false, nav_ai: true, get_up: false, texture_compression: true, texture_memory: 0, auto_clutch: true, momentary_gears: false, auto_shift: false, min_obj_size: 0.013, max_obj_dist: -1.0, max_fps: 0, chat: true, chat_size: 1.0, tooltips: true, name_tags: true, show_fps: false, clouds: true, pax_density: 1.0, vol_ai: 1.0, vol_scenery: 1.0, mirror_size: 512, mirror_hud: 0, mirror_refresh: "full".into(), doppler: true, driver: true, maintenance: 0, ai_unsched_factor: 1.0, ai_max_scheduled: 0, ai_max_parked: 0, ai_max_humans: 200, ai_drivers: Default::default(), exhaust: 0.67, classic_ui: false, advanced_settings: false, collision_vehicles: true, collision_objects: true, collision_pedestrians: true, head_movement: true, driverview_smooth: true, hands_in_cab: false, alt_view: true, precision_zoom: false, time_speed: 1.0, time_sync: false, metar_sync: false, metar_station: String::new(), machine_translation: false, shadow_casters: "all".into(), ctrl_deadzone: 0.0, right_stick_look: true, ctrl_off: String::new(), steering_linear: false, old_steering: false, red_steer_spd: false, reflections: true, led_glow: 6, led_mips: 1.3, mouse_sens: 1.0, graphics_api: "auto".into(), ff_invert: false, ff_enabled: true, ff_road_vib: 1.0, ff_engine_vib: 1.0, ff_fade: 0.28, ff_realistic: true, traffic_events: "normal".into(), traffic_event_breakdown: true, traffic_event_delivery: true, traffic_event_stop: true, traffic_event_emergency: true, traffic_event_slow: true, traffic_event_learner: true, brake_hold: true, mouse_steering: false, mouse_right_off: false, mouse_smooth: true, look_sens: 1.0, look_smoothing_ms: 0.0, blinker_cancel: true, wheel_range: 900.0, wheel_lock: 0.0, fov: 0.0, camera_collision: true, steer_look: false, steer_look_angle: 30.0, steer_look_response: 0.25, head_idle: 0.0, head_idle_pace: 1.0, pedal_throttle: 1.0, pedal_brake: 1.0, seat: [0.0; 3], seat_pitch_deg: 0.0, head_tracking: false, head_tracking_port: 4242, head_tracking_invert: String::new(), discord_status: true, discord_app_id: String::new(), voice_chat: true, info_bar: false }
     }
 }
 
@@ -602,6 +624,13 @@ impl Settings {
                 "ff_invert" => s.ff_invert = b(v),
                 "ff_enabled" => s.ff_enabled = b(v),
                 "ff_realistic" => s.ff_realistic = b(v),
+                "traffic_events" => s.traffic_events = traffic_events_level(v).into(),
+                "traffic_events.breakdown" => s.traffic_event_breakdown = b(v),
+                "traffic_events.delivery" => s.traffic_event_delivery = b(v),
+                "traffic_events.stop" => s.traffic_event_stop = b(v),
+                "traffic_events.emergency" => s.traffic_event_emergency = b(v),
+                "traffic_events.slow" => s.traffic_event_slow = b(v),
+                "traffic_events.learner" => s.traffic_event_learner = b(v),
                 "ff_road_vib" => s.ff_road_vib = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 4.0)).unwrap_or(s.ff_road_vib),
                 "ff_engine_vib" => s.ff_engine_vib = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 4.0)).unwrap_or(s.ff_engine_vib),
                 "ff_fade" => s.ff_fade = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 1.5)).unwrap_or(s.ff_fade),
@@ -695,6 +724,14 @@ impl Settings {
         text.push_str(&format!("discord_status={}\ndiscord_app_id={}\n", self.discord_status as u8, self.discord_app_id));
         text.push_str(&format!("auto_shift={}\n", self.auto_shift as u8));
         text.push_str(&format!("ff_realistic={}\n", self.ff_realistic as u8));
+        text.push_str(&format!(
+            "traffic_events={}\ntraffic_events.breakdown={}\ntraffic_events.delivery={}\ntraffic_events.stop={}\n",
+            self.traffic_events, self.traffic_event_breakdown as u8, self.traffic_event_delivery as u8, self.traffic_event_stop as u8
+        ));
+        text.push_str(&format!(
+            "traffic_events.emergency={}\ntraffic_events.slow={}\ntraffic_events.learner={}\n",
+            self.traffic_event_emergency as u8, self.traffic_event_slow as u8, self.traffic_event_learner as u8
+        ));
         text.push_str(&format!("right_stick_look={}\n", self.right_stick_look as u8));
         text.push_str(&format!("voice_chat={}\n", self.voice_chat as u8));
         text
@@ -869,6 +906,21 @@ mod tests {
         assert_eq!(Settings::from_text("mirror_size=32\n").mirror_size, 64);
         let off = Settings { mirror_size: 0, ..Default::default() };
         assert_eq!(Settings::from_text(&off.to_text()).mirror_size, 0);
+    }
+
+    #[test]
+    fn traffic_events_round_trip() {
+        let d = Settings::default();
+        assert_eq!(d.traffic_events, "normal");
+        assert!(d.traffic_event_breakdown && d.traffic_event_delivery && d.traffic_event_stop);
+        let s = Settings::from_text("traffic_events=Often\ntraffic_events.delivery=0\n");
+        assert_eq!(s.traffic_events, "often");
+        assert!(!s.traffic_event_delivery && s.traffic_event_stop);
+        let back = Settings::from_text(&s.to_text());
+        assert_eq!((back.traffic_events.as_str(), back.traffic_event_delivery), ("often", false));
+        assert_eq!(Settings::from_text("traffic_events=0\n").traffic_events, "off");
+        let s = Settings::from_text("traffic_events.slow=0\n");
+        assert!(!Settings::from_text(&s.to_text()).traffic_event_slow && s.traffic_event_emergency && s.traffic_event_learner);
     }
 
     #[test]

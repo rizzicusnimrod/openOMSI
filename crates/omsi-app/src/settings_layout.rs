@@ -77,6 +77,15 @@ pub const OPTIONS: &[PageDef] = &[
                 it("sel ai_max_scheduled", "Timetable buses", "How many other buses run on the map's timetable"),
                 it("sel ai_max_parked", "Parked cars", "How many cars stand at the kerbs and in car parks"),
             ]),
+            sec("Traffic events (Thüringer Wald)", &[
+                it("sel traffic_events", "Traffic events", "Now and then something happens on the road ahead of your bus"),
+                it("traffic_event_breakdown", "Breakdowns", "A car stands half off the road with its hazard lights on"),
+                it("traffic_event_delivery", "Deliveries in the street", "A lorry or van stands in a town street's lane for a few minutes"),
+                it("traffic_event_stop", "Cars in bus stops", "A car stands in one of your next stops; it leaves when you honk or have served the stop"),
+                it("traffic_event_emergency", "Ambulances on a call", "An ambulance with blue lights and siren comes up behind; the cars pull over for it - make room too"),
+                it("traffic_event_slow", "Slow lorries on country roads", "An old lorry at tractor speed; it pulls over now and then to let the queue past"),
+                it("traffic_event_learner", "Learner drivers", "A slow, careful driver in town, late away from the lights"),
+            ]),
             sec("AI drivers", &[
                 it("aid:enabled", "Realistic AI drivers", "Cars switch their lights on by the weather, use hazard lights, honk and make small mistakes"),
                 it("aid:style", "Driving style", "How firmly cars and lorries take bends and junctions: calm, normal or brisk"),

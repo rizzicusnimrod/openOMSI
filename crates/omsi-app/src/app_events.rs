@@ -635,6 +635,23 @@ impl ApplicationHandler for App {
                         if let Some(d) = self.demo.as_mut() {
                             d.tick(dt, t, w, r, scene, self.player.as_ref().map(|p| player_outline(p)));
                         }
+                        // the traffic events (`events.rs`): the map's director, its settings
+                        // as they are now; a LAN client's traffic is the host's
+                        if self.events.as_ref().is_none_or(|e| e.map_dir() != w.map_dir.as_path()) {
+                            self.events = crate::events::Events::new(&w.map_dir, crate::events::Config::from_settings(&self.settings), t.time.to_bits() as u64 ^ 0x9e37_79b9);
+                        }
+                        if let Some(ev) = self.events.as_mut() {
+                            ev.set_config(crate::events::Config::from_settings(&self.settings));
+                            ev.update_route(self.duty.as_ref(), self.schedule.as_ref(), w, t);
+                            let stops = crate::events::duty_stops(self.duty.as_ref());
+                            let cx = crate::events::Ctx {
+                                player: self.player.as_ref().map(|p| player_outline(p)),
+                                stops: &stops,
+                                horn: self.player.as_ref().is_some_and(|p| crate::traffic_link::horn(&p.vehicle)),
+                                host: self.lan.as_ref().is_none_or(|l| l.role != omsi_net::Role::Client),
+                            };
+                            ev.tick(dt, t, w, r, scene, &cx);
+                        }
                         if let Some(w) = self.world.as_ref() {
                             w.set_switches(&t.switch_requests());
                             let rail = self.player.as_ref().and_then(|p| p.rail.as_ref()).map(|r| (r.lane, r.along));
@@ -2255,6 +2272,7 @@ impl ApplicationHandler for App {
                         let frame = navigator::NavFrame {
                             traffic: self.traffic.as_ref(),
                             players: self.lan.as_ref().map(|l| crate::lan::nav_players(&self.remotes, l.my_id)).unwrap_or_default(),
+                            events: self.events.as_ref().zip(self.traffic.as_ref()).map(|(e, t)| e.markers(t)).unwrap_or_default(),
                             bus: at,
                             heading,
                             speed_kmh: p.vehicle.physics.velocity_kmh(),
