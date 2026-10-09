@@ -26,6 +26,11 @@ struct Camera {
     // lights they belong to (-1: none)
     lamp_view_proj: array<mat4x4<f32>, 4>,
     lamp_shadow: vec4<f32>,
+    // Enhanced: the vehicles a headlamp's light stops at (lib.rs `LightBlocker`), three
+    // rows each taking a point into its box's own measure (-1..1 on each axis)
+    blockers: array<vec4<f32>, 72>,
+    // Enhanced: how much of each lamp shadow map's shadow shows (fading in or out)
+    lamp_fade: vec4<f32>,
 };
 
 // 1 when the point lies inside the player's vehicle (its [boundingbox], shrunk a little so
@@ -726,9 +731,13 @@ fn vs_shadow_far(in: VsIn) -> VsOut {
 }
 
 // Enhanced: a street lamp's shadow map (one of the tiles under the far map), looking down
-// from its head.
-fn shadow_lamp(in: VsIn, k: u32) -> VsOut {
-    let e = draw_list[in.inst];
+// from its head. (`inst`: the instance index as the entry point read it - naga adds the
+// draw's first instance on DX12 only to a builtin read in the entry point itself; read here
+// from the `VsIn` passed down it lacked it, and every lamp caster but those at the draw
+// list's start drew another object: the street's light came and went with the near
+// shadow map's redraw, every 4th frame at night.)
+fn shadow_lamp(in: VsIn, inst: u32, k: u32) -> VsOut {
+    let e = draw_list[inst];
     let m = model_matrix(e);
     let wp = m * vec4<f32>(in.pos, 1.0);
     var out: VsOut;
@@ -749,22 +758,22 @@ fn shadow_lamp(in: VsIn, k: u32) -> VsOut {
 
 @vertex
 fn vs_shadow_lamp0(in: VsIn) -> VsOut {
-    return shadow_lamp(in, 0u);
+    return shadow_lamp(in, in.inst, 0u);
 }
 
 @vertex
 fn vs_shadow_lamp1(in: VsIn) -> VsOut {
-    return shadow_lamp(in, 1u);
+    return shadow_lamp(in, in.inst, 1u);
 }
 
 @vertex
 fn vs_shadow_lamp2(in: VsIn) -> VsOut {
-    return shadow_lamp(in, 2u);
+    return shadow_lamp(in, in.inst, 2u);
 }
 
 @vertex
 fn vs_shadow_lamp3(in: VsIn) -> VsOut {
-    return shadow_lamp(in, 3u);
+    return shadow_lamp(in, in.inst, 3u);
 }
 
 @fragment

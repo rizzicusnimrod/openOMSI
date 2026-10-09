@@ -70,6 +70,11 @@ struct CameraUniform {
     /// and the light indices they belong to (-1: none).
     lamp_view_proj: [[[f32; 4]; 4]; 4],
     lamp_shadow: [f32; 4],
+    /// Enhanced: the vehicles a headlamp's light stops at (`Scene::light_blockers`), three
+    /// rows each: a point (render-origin relative) to its box's own measure, -1..1 an axis.
+    blockers: [[f32; 4]; LIGHT_BLOCKERS * 3],
+    /// How much of each lamp shadow map's shadow shows (`LampShadow::fade`).
+    lamp_fade: [f32; 4],
 }
 
 /// The period the sky's cloud patterns repeat with (m): 5 x the cloud field (14 km), 8 x
@@ -363,6 +368,9 @@ pub struct PointLight {
     pub housed: bool,
     /// Which path draws the light.
     pub mode: LightMode,
+    /// A headlamp's (enhanced path): the vehicles of `Scene::light_blockers` its light stops
+    /// at, one bit each - those ahead of it, never its own.
+    pub blockers: u32,
 }
 
 impl Default for PointLight {
@@ -378,9 +386,23 @@ impl Default for PointLight {
             beam: 0.0,
             housed: false,
             mode: LightMode::Both,
+            blockers: 0,
         }
     }
 }
+
+/// A vehicle as a box that stops the headlamps' light (`PointLight::blockers`): a car
+/// ahead keeps the beams behind it off the road beyond it, as its body does. Its middle,
+/// its axes (the columns: right, forward, up) and its half sizes along them.
+#[derive(Debug, Clone, Copy)]
+pub struct LightBlocker {
+    pub center: DVec3,
+    pub rotation: glam::Mat3,
+    pub half: Vec3,
+}
+
+/// How many vehicles stop the headlamps' light (`Scene::light_blockers`; the nearest).
+pub const LIGHT_BLOCKERS: usize = 24;
 
 /// Which renderer a light belongs to: a vehicle's headlight is three point lights along
 /// its axis for the vanilla path and one real spot light for the enhanced one.
@@ -534,6 +556,72 @@ struct LampShadow {
     index: u32,
     position: Vec3,
     range: f32,
+    /// How much of its shadow shows: 0..1 while it fades in or out (`LampSlot`).
+    fade: f32,
+}
+
+/// A street lamp holding one of the `LAMP_SHADOWS` shadow maps from frame to frame: where it
+/// stands (world), how far its shadow has faded in, and whether it is fading out for a
+/// stronger lamp. A lamp keeps its map until another lights the view clearly more
+/// (`LAMP_SWAP`), and a map changes hands over `LAMP_FADE` s: chosen afresh every frame by
+/// the score alone, the shadows under the lamps along a street popped in and out as the
+/// bus drove past, and flickered where two lamps scored alike and the camera shook.
+#[derive(Debug, Clone, Copy)]
+struct LampSlot {
+    at: DVec3,
+    fade: f32,
+    leaving: bool,
+}
+const LAMP_FADE: f32 = 0.5;
+const LAMP_SWAP: f32 = 1.3;
+
+/// The lamps that hold the shadow maps after this frame, from the candidates (score and
+/// world position, the best first) and the seconds since the last: those holding a map keep
+/// it, a free map goes to the best lamp without one, and the weakest holder fades out for a
+/// lamp that beats it by `LAMP_SWAP`; a holder no longer among the candidates (far behind)
+/// lets go at once. Maps filled from nothing - the first frame, after a jump - show at once.
+/// Each map's candidate (an index into `chosen`) and how far its shadow has faded in.
+fn hold_lamp_slots(slots: &mut [Option<LampSlot>; LAMP_SHADOWS], chosen: &[(f32, DVec3)], dt: f32) -> Vec<(usize, f32)> {
+    let find = |at: DVec3| chosen.iter().position(|c| (c.1 - at).length_squared() < 0.01);
+    for s in slots.iter_mut() {
+        if s.is_some_and(|x| find(x.at).is_none()) {
+            *s = None;
+        }
+    }
+    let fresh = slots.iter().all(|s| s.is_none());
+    let step = (dt.max(0.0) / LAMP_FADE).min(1.0);
+    for s in slots.iter_mut() {
+        if let Some(x) = s {
+            x.fade = if x.leaving { x.fade - step } else { (x.fade + step).min(1.0) };
+            if x.leaving && x.fade <= 0.0 {
+                *s = None;
+            }
+        }
+    }
+    for &(score, at) in chosen {
+        if slots.iter().flatten().any(|x| (x.at - at).length_squared() < 0.01) {
+            continue;
+        }
+        if let Some(free) = slots.iter().position(|s| s.is_none()) {
+            slots[free] = Some(LampSlot { at, fade: if fresh { 1.0 } else { 0.0 }, leaving: false });
+            continue;
+        }
+        // all held: the weakest makes way for a clearly stronger one (one at a time)
+        if !slots.iter().flatten().any(|x| x.leaving) {
+            let weakest = slots
+                .iter()
+                .enumerate()
+                .filter_map(|(k, s)| s.and_then(|x| find(x.at)).map(|c| (k, chosen[c].0)))
+                .min_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some((k, _)) = weakest.filter(|w| score > w.1 * LAMP_SWAP) {
+                if let Some(x) = slots[k].as_mut() {
+                    x.leaving = true;
+                }
+            }
+        }
+        break;
+    }
+    slots.iter().flatten().filter_map(|x| find(x.at).map(|c| (c, x.fade.clamp(0.0, 1.0)))).collect()
 }
 
 impl LampShadow {
@@ -1308,6 +1396,9 @@ pub struct Scene {
     pub interior_lights: Vec<PointLight>,
     interior_free: Vec<(u32, u32)>,
     pub coronas: Vec<Corona>,
+    /// The vehicles the headlamps' light stops at this frame (the first `LIGHT_BLOCKERS`;
+    /// a beam's `PointLight::blockers` names them by place).
+    pub light_blockers: Vec<LightBlocker>,
     /// Smoke particles for the next frame (set by the app every frame).
     pub smoke: Vec<SmokeParticle>,
     smoke_buf: Option<wgpu::Buffer>,
@@ -2249,6 +2340,8 @@ pub struct Renderer {
     shadow_far_cache: std::cell::Cell<(Mat4, u32, DVec3, Vec3)>,
     /// The same for the near cascade, drawn every other frame (see `render_inner`).
     shadow_near_cache: std::cell::Cell<(Mat4, u32, DVec3, Vec3)>,
+    /// The street lamps holding the lamp shadow maps (`LampSlot`).
+    lamp_slots: std::cell::RefCell<[Option<LampSlot>; LAMP_SHADOWS]>,
     /// Shadow atlas matrices from the first OpenXR eye, reused by the second eye.
     xr_shadow_cache: std::cell::Cell<Option<(DVec3, Vec3, Mat4, Mat4, Mat4)>>,
     /// Depth-only pipeline that fills its viewport with the far depth: clears the close
@@ -4738,6 +4831,7 @@ impl Renderer {
             shadow_far_cache: std::cell::Cell::new((Mat4::IDENTITY, 0, DVec3::ZERO, Vec3::ZERO)),
             shadow_near_cache: std::cell::Cell::new((Mat4::IDENTITY, 0, DVec3::ZERO, Vec3::ZERO)),
             xr_shadow_cache: std::cell::Cell::new(None),
+            lamp_slots: Default::default(),
             shadow_clear_pipeline,
             mip_pipeline,
             mip_layout,
@@ -4963,6 +5057,7 @@ impl Renderer {
             grid_buf: None,
             corona_buf: None,
             corona_count: 0,
+            light_blockers: Vec::new(),
             smoke: Vec::new(),
             smoke_buf: None,
             smoke_count: 0,
@@ -7861,7 +7956,7 @@ impl Renderer {
     /// by, whose radius it reads as 0, and the mirrors show no headlight pools. The three
     /// stand-in points stay out of it, or a street full of cars would fill the grid cells'
     /// sixteen places before the street lamps got theirs.
-    fn prepare_lights(&self, scene: &mut Scene, cam_rel: Vec3, enhanced: bool, lamp_shadows: bool) -> ([f32; 4], Vec<LampShadow>) {
+    fn prepare_lights(&self, scene: &mut Scene, cam_rel: Vec3, enhanced: bool, lamp_shadows: bool, dt: f32) -> ([f32; 4], Vec<LampShadow>) {
         // the street lamps that get a shadow map: the few lighting the camera's
         // surroundings most (by their strength over the distance)
         let mut chosen: Vec<(f32, LampShadow)> = Vec::new();
@@ -7909,7 +8004,7 @@ impl Renderer {
                 let d = (p - cam_rel).length();
                 if d < reach + LAMP_SHADOW_REACH {
                     let score = l.intensity * (l.color[0] + l.color[1] + l.color[2]) * l.core * l.core / (d * d + 25.0);
-                    chosen.push((score, LampShadow { index: idx, position: p, range: reach }));
+                    chosen.push((score, LampShadow { index: idx, position: p, range: reach, fade: 1.0 }));
                 }
             }
             for y in (y0.max(0.0) as usize)..=(y1.min(side as f32 - 1.0) as usize) {
@@ -7970,9 +8065,19 @@ impl Renderer {
         if rebuilt {
             self.rebuild_camera_bind_group(scene);
         }
-        chosen.sort_by(|a, b| b.0.total_cmp(&a.0));
-        let lamps = chosen.into_iter().take(LAMP_SHADOWS).map(|c| c.1).collect();
+        let lamps = if lamp_shadows && enhanced { self.hold_lamp_shadows(chosen, ro, dt) } else { Vec::new() };
         ([origin[0], origin[1], LIGHT_CELL, side as f32], lamps)
+    }
+
+    /// The street lamps whose shadow maps are drawn this frame, from the candidates and
+    /// their scores (`hold_lamp_slots`).
+    fn hold_lamp_shadows(&self, mut chosen: Vec<(f32, LampShadow)>, ro: DVec3, dt: f32) -> Vec<LampShadow> {
+        chosen.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let at: Vec<(f32, DVec3)> = chosen.iter().map(|(s, l)| (*s, ro + l.position.as_dvec3())).collect();
+        hold_lamp_slots(&mut self.lamp_slots.borrow_mut(), &at, dt)
+            .into_iter()
+            .map(|(c, fade)| LampShadow { fade, ..chosen[c].1 })
+            .collect()
     }
 
     /// Take in the pass times of the last timed frame once its readback has arrived.
@@ -8824,7 +8929,10 @@ impl Renderer {
             && omsi_cfg::env::var_os("OMSI_NO_PUDDLE_REFLECTIONS").is_none();
         let reflection_frame = !enhanced && puddles_wanted && self.reflection_pass.is_some();
         let masked_frame = enhanced || reflection_frame;
-        let (grid, lamp_shadows) = self.prepare_lights(scene, cam_rel, enhanced_frame, lighting.lamp_shadows && with_overlays && projection.is_none() && self.shadow_pipelines.len() > 6);
+        let (grid, lamp_shadows) = self.prepare_lights(scene, cam_rel, enhanced_frame, lighting.lamp_shadows && with_overlays && projection.is_none() && self.shadow_pipelines.len() > 6 && omsi_cfg::env::var_os("OMSI_NO_LAMP_SHADOWS").is_none(), self.last_frame.map_or(0.0, |t| t.elapsed().as_secs_f32()));
+        if omsi_cfg::env::var_os("OMSI_DEBUG_LAMP_SHADOWS").is_some() {
+            log::info!("lamp shadows: {:?}", lamp_shadows.iter().map(|l| (l.index, (l.position.x * 10.0).round() / 10.0, (l.position.y * 10.0).round() / 10.0, (l.position.z * 10.0).round() / 10.0, l.range.round(), (l.fade * 100.0).round() / 100.0)).collect::<Vec<_>>());
+        }
         self.prepare_coronas(scene, lighting.night, lighting.inside.as_ref().filter(|v| point_in_vehicle_box(camera.position, v)));
         self.prepare_smoke(scene, camera.position);
         // ambient occlusion only for the real picture, not for the mirrors
@@ -9100,6 +9208,8 @@ impl Renderer {
             wind: [lighting.glass_wind.x, lighting.glass_wind.y, lighting.glass_wind.z, 1.0],
             lamp_view_proj: std::array::from_fn(|k| lamp_shadows.get(k).map_or(Mat4::IDENTITY, |l| l.view_proj()).to_cols_array_2d()),
             lamp_shadow: std::array::from_fn(|k| lamp_shadows.get(k).map_or(-1.0, |l| l.index as f32)),
+            blockers: blocker_rows(&scene.light_blockers, ro),
+            lamp_fade: std::array::from_fn(|k| lamp_shadows.get(k).map_or(0.0, |l| l.fade)),
         };
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cu));
@@ -11788,6 +11898,21 @@ fn street_lamp_gain() -> f32 {
 }
 
 /// A light as the shaders read it, at `p` relative to the render origin.
+/// The headlamps' blockers as the shader takes them (`Camera::blockers`): for each, the
+/// three rows that take a point (render-origin relative) into its box's measure, where
+/// the box is -1..1 on every axis.
+fn blocker_rows(blockers: &[LightBlocker], ro: DVec3) -> [[f32; 4]; LIGHT_BLOCKERS * 3] {
+    let mut rows = [[0.0; 4]; LIGHT_BLOCKERS * 3];
+    for (j, b) in blockers.iter().take(LIGHT_BLOCKERS).enumerate() {
+        let c = (b.center - ro).as_vec3();
+        for (k, (axis, half)) in [(b.rotation.x_axis, b.half.x), (b.rotation.y_axis, b.half.y), (b.rotation.z_axis, b.half.z)].into_iter().enumerate() {
+            let a = axis.normalize_or_zero() / half.max(0.05);
+            rows[j * 3 + k] = [a.x, a.y, a.z, -a.dot(c)];
+        }
+    }
+    rows
+}
+
 fn gpu_light(l: &PointLight, p: Vec3) -> GpuPointLight {
     let spot = l.direction.length_squared() > 1e-6;
     let dir = if spot {
@@ -11811,7 +11936,9 @@ fn gpu_light(l: &PointLight, p: Vec3) -> GpuPointLight {
         pos: [p.x, p.y, p.z, vanilla_radius],
         color: [l.color[0], l.color[1], l.color[2], l.intensity],
         dir,
-        extra: [l.cone[0], l.core, l.beam, l.radius],
+        // (a headlamp's inner cone is not read - its profile is: x holds its blockers
+        // instead, a whole number below 2^24, exact in an f32)
+        extra: [if l.beam != 0.0 { (l.blockers & 0xff_ffff) as f32 } else { l.cone[0] }, l.core, l.beam, l.radius],
     }
 }
 
@@ -15686,6 +15813,29 @@ mod tests {
     }
 
     #[test]
+    fn a_blocker_takes_its_box_to_minus_one_to_one() {
+        // a car 4 m long, 1.8 wide, 1.4 high, its middle at (100, 50, 1), heading east (its
+        // forward axis along +x), the render origin at (90, 40, 0)
+        let b = LightBlocker {
+            center: DVec3::new(100.0, 50.0, 1.0),
+            rotation: glam::Mat3::from_cols(Vec3::new(0.0, -1.0, 0.0), Vec3::X, Vec3::Z),
+            half: Vec3::new(0.9, 2.0, 0.7),
+        };
+        let rows = blocker_rows(&[b], DVec3::new(90.0, 40.0, 0.0));
+        let local = |p: Vec3| Vec3::new(
+            Vec3::from_slice(&rows[0][..3]).dot(p) + rows[0][3],
+            Vec3::from_slice(&rows[1][..3]).dot(p) + rows[1][3],
+            Vec3::from_slice(&rows[2][..3]).dot(p) + rows[2][3],
+        );
+        // its front bumper's middle, its right side, its roof (render-origin relative)
+        assert!((local(Vec3::new(12.0, 10.0, 1.0)) - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-5);
+        assert!((local(Vec3::new(10.0, 9.1, 1.0)) - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5);
+        assert!((local(Vec3::new(10.0, 10.0, 1.7)) - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5);
+        // the rows past the blockers given stay empty
+        assert_eq!(rows[3], [0.0; 4]);
+    }
+
+    #[test]
     fn each_path_gets_its_own_headlights() {
         let lamp = PointLight {
             radius: 30.0,
@@ -15726,14 +15876,17 @@ mod tests {
         assert_eq!(g.dir[3], -2.0);
         assert_eq!(g.extra[1..], [5.0, 0.0, 30.0]);
         // a spot: no radius for the vanilla shader, the cone and the range for the enhanced
+        // (a headlamp's inner cone is not read: its blockers take its place)
         let g = gpu_light(&spot, Vec3::ZERO);
         assert_eq!(g.pos[3], 0.0);
         assert_eq!(g.extra[3], 60.0);
         assert!(
             (Vec3::from_slice(&g.dir[..3]).length() - 1.0).abs() < 1e-5
                 && g.dir[3] == 0.82
-                && g.extra[0] == 0.97
+                && g.extra[0] == 0.0
         );
+        assert_eq!(gpu_light(&PointLight { blockers: 0b1010_0000_0000_0000_0000_0001, ..spot }, Vec3::ZERO).extra[0], 0xa0_0001 as f32);
+        assert_eq!(gpu_light(&PointLight { beam: 0.0, blockers: 5, ..spot }, Vec3::ZERO).extra[0], 0.97);
         // a headlight's beam gain rides along; a plain lamp has none
         assert_eq!(g.extra[2], 24.0);
         assert_eq!(gpu_light(&lamp, Vec3::ZERO).extra[2], 0.0);

@@ -84,12 +84,16 @@ fn vs_main(in: CoronaIn) -> CoronaOut {
         sout.uv = c * 0.5 + 0.5;
         let a = min(in.color.a, 1.0);
         sout.color = vec4<f32>(in.color.rgb, a);
+        // (where the puff is, for the enhanced light on it: `fs_smoke_enhanced`)
+        sout.wpos = vec4<f32>(in.pos, 3.0);
         // Omsi.exe lets a puff sink on into the road, which cuts it off in a straight line
         // (under a wheel's spray: bright bands across the road); here it fades out over
         // its lowest part into the ground it was thrown up from (up.x, when up.y is 1),
         // from up.w above it (`smoke_ground_fade`) down to nothing
         if (in.up.y > 0.5) {
             sout.ground = vec2<f32>(wp.z - in.up.x, in.up.w);
+            // (the enhanced picture's: its size and how high its middle is over the ground)
+            sout.cone = vec2<f32>(size, in.pos.z - in.up.x);
         }
         if (!(a > 0.001) || (bitcast<u32>(a) & 0x7f800000u) == 0x7f800000u) {
             sout.clip = vec4<f32>(0.0, 0.0, 2.0, 1.0);
@@ -339,8 +343,40 @@ fn fs_smoke(in: CoronaOut) -> @location(0) vec4<f32> {
     return smoke_color(in);
 }
 
+// How smoke scatters light (per steradian): its fine droplets and soot mostly forwards - a
+// two-stroke's oil haze or a bus's exhaust against a low sun glows silver - and, the light
+// having bounced about in a dense puff, some of it every way, so that with the sun behind
+// the viewer it is a dull grey but not a black one.
+fn smoke_phase(c: f32) -> f32 {
+    return 0.5 * hg_phase(c, 0.55) + 0.5 * 0.4 / PI;
+}
+
+// Enhanced graphics: smoke in the light of the air round it (the fog's, as the rain's in
+// `precip_light`) and of the sun and the moon by `smoke_phase`. Its thin edges pass on more of
+// the light that comes through from behind than its thick middle. (No lamps: the module keeps
+// to what the oldest OpenGL chips can read, and no shadow map: smoke in a forest's shade
+// still takes the sun.)
 @fragment
 fn fs_smoke_enhanced(in: CoronaOut) -> @location(0) vec4<f32> {
-    let c = smoke_color(in);
-    return vec4<f32>(c.rgb * enh.exposure.y, c.a);
+    let t = textureSample(t_corona, s_corona, vec2<f32>(in.uv.x, 1.0 - in.uv.y));
+    var over_ground = select(1.0, smoothstep(0.0, in.ground.y, in.ground.x), in.ground.y > 0.0);
+    // A puff set off over the road - exhaust, not a wheel's spray thrown up from under it -
+    // thins out over its lower part towards the road: lit against the sun, the few
+    // centimetres of `smoke_ground_fade` drew a bright trail cut off along the road in a line.
+    if (in.ground.y > 0.0 && in.cone.y > 0.0) {
+        over_ground = smoothstep(0.0, max(in.ground.y, min(in.cone.y, in.cone.x * 0.6)), in.ground.x);
+    }
+    let a = clamp(t.a * in.color.a * over_ground, 0.0, 1.0);
+    let to_eye = normalize(camera.cam_pos.xyz - in.wpos.xyz);
+    // (what comes through from behind: a dense middle passes on little of it)
+    let thin = 1.0 - 0.7 * a;
+    // (radiance: the air's light as a lit surface of the puff's colour would send it back,
+    // the sun's and the moon's by the phase)
+    var light = enh.fog_color.rgb / 0.9;
+    if (enh.lights.w > 0.0) {
+        let c = dot(-camera.sun_dir.xyz, to_eye);
+        light = light + enh.sun.rgb * smoke_phase(c) * mix(1.0, thin, smoothstep(0.0, 0.8, c));
+    }
+    light = light + enh.moon_light.rgb * smoke_phase(dot(-enh.moon.xyz, to_eye));
+    return vec4<f32>(in.color.rgb * t.rgb * light * enh.exposure.x, a);
 }

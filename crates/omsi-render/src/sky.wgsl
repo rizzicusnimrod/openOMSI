@@ -32,6 +32,11 @@ struct Camera {
     // lights they belong to (-1: none)
     lamp_view_proj: array<mat4x4<f32>, 4>,
     lamp_shadow: vec4<f32>,
+    // Enhanced: the vehicles a headlamp's light stops at (lib.rs `LightBlocker`), three
+    // rows each taking a point into its box's own measure (-1..1 on each axis)
+    blockers: array<vec4<f32>, 72>,
+    // Enhanced: how much of each lamp shadow map's shadow shows (fading in or out)
+    lamp_fade: vec4<f32>,
 };
 
 // A hash of a lattice point, from its integer bits.

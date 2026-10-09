@@ -394,6 +394,7 @@ fn enhanced_spot(at: DVec3, d: Vec3, level: Vec3, vals: &[f32; 12], share: f32) 
         beam,
         housed: false,
         mode: LightMode::Enhanced,
+        blockers: 0,
     }
 }
 
@@ -736,8 +737,33 @@ pub fn collect(
             log::info!("smoke: {} particles from objects, first at ({:.1}, {:.1}, {:.1}) size {:.2} alpha {:.2}", scene.smoke.len(), p.position.x, p.position.y, p.position.z, p.size, p.alpha);
         }
     }
-    for v in vehicles {
+    // the vehicles the headlamps' light stops at: the nearest ones, each with the vehicle
+    // it belongs to (a beam passes its own)
+    let mut blockers: Vec<(usize, f64, omsi_render::LightBlocker)> = Vec::new();
+    for (i, v) in vehicles.iter().enumerate() {
+        let parts = std::iter::once((&v.ty, v.position, v.body_rotation()))
+            .chain(v.trailers.iter().map(|t| (&t.ty, t.position, t.body_rotation())));
+        for (ty, position, rotation) in parts {
+            let d = (position - camera_pos).length();
+            if d < BLOCKER_RANGE {
+                if let Some(b) = light_blocker(ty, position, rotation) {
+                    blockers.push((i, d, b));
+                }
+            }
+        }
+    }
+    blockers.sort_by(|a, b| a.1.total_cmp(&b.1));
+    blockers.truncate(omsi_render::LIGHT_BLOCKERS);
+    scene.light_blockers.clear();
+    scene.light_blockers.extend(blockers.iter().map(|b| b.2));
+    for (i, v) in vehicles.iter().enumerate() {
+        let first = scene.lights.len();
         vehicle_lights(v, &mut scene.coronas, &mut scene.lights, night, camera_pos);
+        for l in &mut scene.lights[first..] {
+            if l.beam != 0.0 {
+                l.blockers = beam_blockers(l, &blockers, i);
+            }
+        }
         particle_sprites(&v.particles, &mut scene.smoke, &mut scene.coronas);
         for t in &v.trailers {
             particle_sprites(&t.particles, &mut scene.smoke, &mut scene.coronas);
@@ -809,6 +835,60 @@ pub fn collect(
     // nearest lights first: the grid cells hold a limited number
     // (total_cmp: a light at a NaN position must not end the game)
     scene.lights.sort_by(|a, b| (a.position - camera_pos).length_squared().total_cmp(&(b.position - camera_pos).length_squared()));
+}
+
+/// How far from the camera a vehicle stops the headlamps' light (`LightBlocker`; the
+/// nearest `LIGHT_BLOCKERS` of them): a car's beams reach some 90 m (`AI_LOW_REACH`).
+const BLOCKER_RANGE: f64 = 150.0;
+/// A blocker's floor at least this high over the vehicle's origin, which is on the road:
+/// the road under a car lies in its shadow, not in its box.
+const BLOCKER_FLOOR: f32 = 0.15;
+
+/// A vehicle's body as a box that stops the headlamps' light: its `[boundingbox]` (or the
+/// model's own extent), from `BLOCKER_FLOOR` up.
+fn light_blocker(ty: &omsi_sim::VehicleType, position: DVec3, rotation: glam::Mat4) -> Option<omsi_render::LightBlocker> {
+    let (lo, hi) = match ty.def.bounding_box {
+        Some(bb) if bb[0] > 0.1 && bb[1] > 0.1 && bb[2] > 0.1 => {
+            let (c, h) = (Vec3::new(bb[3], bb[4], bb[5]), Vec3::new(bb[0], bb[1], bb[2]) * 0.5);
+            (c - h, c + h)
+        }
+        _ => ty.model_box()?,
+    };
+    let lo = Vec3::new(lo.x, lo.y, lo.z.max(BLOCKER_FLOOR));
+    if hi.z - lo.z < 0.3 || !(lo.is_finite() && hi.is_finite()) || (hi - lo).max_element() > 60.0 {
+        return None;
+    }
+    let rotation = glam::Mat3::from_mat4(rotation);
+    Some(omsi_render::LightBlocker {
+        center: position + (rotation * ((lo + hi) * 0.5)).as_dvec3(),
+        rotation,
+        half: (hi - lo) * 0.5,
+    })
+}
+
+/// The blockers a headlamp's light stops at (`PointLight::blockers`): not its own vehicle's
+/// (`own`), not one the lamp is in, only those within its reach and ahead of it (a cone of
+/// some 60 degrees round its axis, the boxes' size given).
+fn beam_blockers(l: &PointLight, blockers: &[(usize, f64, omsi_render::LightBlocker)], own: usize) -> u32 {
+    let axis = l.direction.normalize_or_zero();
+    let mut mask = 0u32;
+    for (j, (owner, _, b)) in blockers.iter().enumerate() {
+        if *owner == own {
+            continue;
+        }
+        let to = (b.center - l.position).as_vec3();
+        let local = b.rotation.transpose() * -to;
+        if (local.abs() - b.half).max_element() < 0.0 {
+            continue;
+        }
+        let d = to.length();
+        let r = b.half.length();
+        let along = to.dot(axis);
+        if d - r < l.radius && along + r > 0.5 * d {
+            mask |= 1 << j;
+        }
+    }
+    mask
 }
 
 /// How far Omsi.exe moves every `[smoke]` and `[particle_emitter]` puff towards the eye in

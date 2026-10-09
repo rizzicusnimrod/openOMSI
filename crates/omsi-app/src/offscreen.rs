@@ -249,6 +249,12 @@ pub(crate) fn run_offscreen(
         .filter_map(|v| v.trim().parse::<f32>().ok())
         .collect();
     snapshot_times.sort_by(|a, b| a.total_cmp(b));
+    // `OMSI_CAM_DOLLY=east,north,up`: the --cam camera moving at that speed (m/s) from the
+    // first snapshot on, for the flicker that only shows in motion (shimmer, z-fighting)
+    let dolly: Option<(DVec3, f32)> = omsi_cfg::env::var("OMSI_CAM_DOLLY").ok().and_then(|v| {
+        let f: Vec<f64> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        (f.len() == 3 && args.cam.is_some()).then(|| (DVec3::new(f[0], f[1], f[2]), snapshot_times.first().copied().unwrap_or(0.0)))
+    });
     let drive_start = player
         .as_ref()
         .map(|p| p.vehicle.position)
@@ -1192,6 +1198,9 @@ pub(crate) fn run_offscreen(
                     near: camera.near,
                     far: camera.far,
                 };
+                if let Some((v, t0)) = dolly {
+                    cam.position += v * (ts - t0) as f64;
+                }
                 if let Some(p) = player.as_mut() {
                     p.sync_transforms(
                         &renderer,
