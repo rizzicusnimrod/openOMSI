@@ -229,6 +229,8 @@ struct Mirror {
     odometer: HashMap<u32, f32>,
     /// What its driver does, by car (`CarExtras`).
     extras: HashMap<u32, CarExtras>,
+    /// Seconds a car out of sight has not had its scripts run for (`traffic::UNSEEN_STEP`).
+    owed: HashMap<u32, f32>,
     /// `OMSI_DEBUG_DRIVERS`: seconds since the last report, toots heard in all.
     debug_t: f32,
     toots_heard: u32,
@@ -756,6 +758,7 @@ impl LanWorld {
                             horns: c.shown.horns & 3,
                             bulb: c.shown.bulb,
                             smoker: c.shown.smoker,
+                            siren: c.siren,
                         },
                     });
                 }
@@ -991,6 +994,7 @@ impl LanWorld {
             m.shown.clear();
             m.odometer.clear();
             m.extras.clear();
+            m.owed.clear();
             log::info!(
                 "LAN: {}",
                 if want_on {
@@ -1127,6 +1131,7 @@ impl LanWorld {
                 m.shown.remove(&id);
                 m.odometer.remove(&id);
                 m.extras.remove(&id);
+                m.owed.remove(&id);
             }
             let new: Vec<u32> = m
                 .cars
@@ -1277,18 +1282,35 @@ impl LanWorld {
                                 lights: c.lights,
                                 at_station: c.at_station as i32,
                                 at_station_side: sides.get(i).copied().unwrap_or(0.0),
-                                priority_warning: false,
+                                // (the host's: its script sounds the siren here too)
+                                priority_warning: c.looks.siren,
                             },
                         )
                     })
                     .collect();
-                let mut run: Vec<(&mut omsi_sim::VehicleInstance, &AiFrame)> = t
+                // (a car out of sight - see `Traffic::mark_seen` - in steps of a tenth of a
+                // second, as the host drives its far cars: its lamps and wheels are not seen)
+                let owed = &mut m.owed;
+                let mut run: Vec<(&mut omsi_sim::VehicleInstance, &AiFrame, f32)> = t
                     .cars
                     .iter_mut()
                     .enumerate()
-                    .filter_map(|(i, car)| frames.get(&i).map(|f| (&mut car.vehicle, f)))
+                    .filter_map(|(i, car)| {
+                        let f = frames.get(&i)?;
+                        if car.vehicle.ai_visuals {
+                            owed.remove(&(car.id as u32));
+                            return Some((&mut car.vehicle, f, dt));
+                        }
+                        let o = owed.entry(car.id as u32).or_insert(0.0);
+                        *o += dt;
+                        if *o < crate::traffic::UNSEEN_STEP {
+                            return None;
+                        }
+                        let step = std::mem::take(o);
+                        Some((&mut car.vehicle, f, step))
+                    })
                     .collect();
-                run.par_iter_mut().for_each(|(v, f)| v.update_ai(dt, f));
+                run.par_iter_mut().for_each(|(v, f, dt)| v.update_ai(*dt, f));
             }
             // what the host's drivers do beyond lights and indicators (`ai_drivers`): the
             // model's lamps of each side (a broken bulb), the rear fog lamp, a flash of the

@@ -673,6 +673,9 @@ impl App {
         for u in updates {
             self.apply_world_update(u);
         }
+        for (k, s) in ["lan.net", "lan.world", "lan.remotes", "lan.draw"].into_iter().zip(std::mem::take(&mut self.remotes.stage_secs)) {
+            *self.profile.entry(k).or_default() += s;
+        }
         let cmds = self.lan.as_mut().map(|l| l.take_commands()).unwrap_or_default();
         for (from, text) in cmds {
             self.lan_command(from, &text);

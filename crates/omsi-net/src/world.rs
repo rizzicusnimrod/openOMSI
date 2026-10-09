@@ -40,6 +40,9 @@
 //!   lamp 1, high beams 1, horn toots so far 2 (wrapping), broken bulb 3 (0 none, 1 head
 //!   left, 2 head right, 3 brake left, 4 brake right), a smoky two-stroke 1 - what its
 //!   driver does (`ai_drivers`); an older game neither sends nor reads it
+//!   (the custom fork) sirens: tag 4 (0b0110), then for each car above, in order: its siren
+//!   sounds 1 (an emergency vehicle told something holds it up, `TrafficPriorityWarningNeeded`
+//!   - the client's copy runs the same script); after the looks, read only after them
 //! ```
 //!
 //! A car takes 17 bytes, a person 12 (17 while waiting at a stop), a light program 6.
@@ -64,6 +67,8 @@ const CAR_BITS: usize = 24 + 19 + 19 + 17 + 12 + 8 + 8 + 11 + 8 + 2 + 1 + 1 + 2;
 /// A car's looks at the end of the datagram, and the tag before them.
 const LOOKS_BITS: usize = 8;
 const LOOKS_TAG: u64 = 0b1010;
+/// A car's siren after the looks, and the tag before them.
+const SIREN_TAG: u64 = 0b0110;
 const PERSON_FOOT_BITS: usize = 24 + 2 + 2 + 19 + 19 + 17 + 8 + 6 + 1;
 const PERSON_WAIT_BITS: usize = 32 + 8;
 const PERSON_ABOARD_BITS: usize = 24 + 2 + 2 + 24 + 12 + 13 + 10 + 8 + 8;
@@ -104,7 +109,8 @@ pub struct CarState {
 /// What a random car's driver does that the client's copy shows (`ai_drivers`): the rear
 /// fog lamp, a flash of the high beams, the horn (toots so far, wrapping at 4), a broken
 /// bulb (0 none, 1 head left, 2 head right, 3 brake left, 4 brake right) and whether it is
-/// a badly tuned two-stroke.
+/// a badly tuned two-stroke; and an emergency vehicle's siren (sent in a section of its
+/// own, see the module).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CarLooks {
     pub rear_fog: bool,
@@ -112,6 +118,7 @@ pub struct CarLooks {
     pub horns: u8,
     pub bulb: u8,
     pub smoker: bool,
+    pub siren: bool,
 }
 
 impl CarLooks {
@@ -130,6 +137,8 @@ impl CarLooks {
             horns: (b >> 2 & 3) as u8,
             bulb: (b >> 4 & 7) as u8,
             smoker: b >> 7 & 1 != 0,
+            // (its own section: `decode`)
+            siren: false,
         }
     }
 }
@@ -281,10 +290,10 @@ pub fn encode(frame: &WorldFrame, protocol: u8) -> Vec<Vec<u8>> {
             &[]
         };
         let parked: Option<(bool, &[u32])> = if first { frame.parked.as_ref().map(|(c, k)| (*c && k.len() <= 127, &k[..k.len().min(127)])) } else { None };
-        left = left.saturating_sub(lights.len() * LIGHT_BITS + gone.len() * GONE_BITS + 1 + parked.map(|p| 8 + p.1.len() * 32).unwrap_or(0) + 4);
+        left = left.saturating_sub(lights.len() * LIGHT_BITS + gone.len() * GONE_BITS + 1 + parked.map(|p| 8 + p.1.len() * 32).unwrap_or(0) + 8);
         let c0 = ci;
-        while ci < cars.len() && ci - c0 < 127 && left >= CAR_BITS + LOOKS_BITS {
-            left -= CAR_BITS + LOOKS_BITS;
+        while ci < cars.len() && ci - c0 < 127 && left >= CAR_BITS + LOOKS_BITS + 1 {
+            left -= CAR_BITS + LOOKS_BITS + 1;
             ci += 1;
         }
         let p0 = pi;
@@ -412,6 +421,10 @@ pub fn encode(frame: &WorldFrame, protocol: u8) -> Vec<Vec<u8>> {
         w.put(LOOKS_TAG, 4);
         for c in &cars[c0..ci] {
             w.put(c.looks.bits(), LOOKS_BITS as u32);
+        }
+        w.put(SIREN_TAG, 4);
+        for c in &cars[c0..ci] {
+            w.put(c.looks.siren as u64, 1);
         }
         out.push(w.finish());
         first = false;
@@ -559,9 +572,98 @@ pub fn decode(data: &[u8], protocol: u8) -> Option<WorldFrame> {
             for (c, l) in f.cars.iter_mut().zip(looks) {
                 c.looks = l;
             }
+            // (the sirens: a game of this fork from before them has only its padding here)
+            if r.get(4) == Some(SIREN_TAG) {
+                let sirens: Vec<bool> = (0..f.cars.len()).map_while(|_| r.get(1).map(|b| b == 1)).collect();
+                if sirens.len() == f.cars.len() {
+                    for (c, s) in f.cars.iter_mut().zip(sirens) {
+                        c.looks.siren = s;
+                    }
+                }
+            }
         }
     }
     Some(f)
+}
+
+/// The traffic event on the host's roads (the custom fork's `events.rs`), as the clients
+/// are told it every couple of seconds and on a change:
+///
+/// ```text
+/// EVENT|<kind>|<car id>|<player id>|<x>,<y>,<z>,<heading> (or -)|<x>,<y> (or -)
+/// EVENT|-                                         none now
+/// ```
+///
+/// `<kind>`: breakdown, delivery, stop, emergency, slow or learner; `<player id>` the player
+/// it was put on the road for (0 the host's own bus); the four numbers where the object it
+/// set up stands (a broken-down car's warning triangle) and which way it faces (deg); the
+/// last two where the event's car is (for the maps of a client too far off to have it:
+/// as of the message, which a moving car's is not sent again for).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrafficEvent {
+    pub kind: String,
+    pub car: u32,
+    pub player: u32,
+    pub prop: Option<[f64; 4]>,
+    pub at: Option<[f64; 2]>,
+}
+
+/// The kinds of traffic event a client takes.
+pub const EVENT_KINDS: [&str; 6] = ["breakdown", "delivery", "stop", "emergency", "slow", "learner"];
+
+impl TrafficEvent {
+    /// The same event, wherever its car has got to since (`at`).
+    pub fn same(&self, other: &TrafficEvent) -> bool {
+        (&self.kind, self.car, self.player, self.prop) == (&other.kind, other.car, other.player, other.prop)
+    }
+
+    /// The message for `ev` (None: no event now).
+    pub fn encode(ev: Option<&TrafficEvent>) -> String {
+        match ev {
+            None => "EVENT|-".into(),
+            Some(e) => format!(
+                "EVENT|{}|{}|{}|{}|{}",
+                crate::clean_text(&e.kind, 16),
+                e.car.min(MAX_ID),
+                e.player,
+                e.prop.map(|p| format!("{:.2},{:.2},{:.2},{:.1}", p[0], p[1], p[2], p[3])).unwrap_or_else(|| "-".into()),
+                e.at.map(|p| format!("{:.1},{:.1}", p[0], p[1])).unwrap_or_else(|| "-".into())
+            ),
+        }
+    }
+
+    /// From the fields of an `EVENT` message: Some(None) for none now, None for a message
+    /// that does not read (a kind not known, a number out of range).
+    pub fn decode(parts: &[&str]) -> Option<Option<TrafficEvent>> {
+        if parts.first() != Some(&"EVENT") {
+            return None;
+        }
+        let kind = parts.get(1)?.trim().to_ascii_lowercase();
+        if kind == "-" {
+            return Some(None);
+        }
+        if !EVENT_KINDS.contains(&kind.as_str()) {
+            return None;
+        }
+        let car = parts.get(2)?.trim().parse::<u32>().ok().filter(|i| *i <= MAX_ID)?;
+        let player = parts.get(3)?.trim().parse::<u32>().ok()?;
+        let prop = match parts.get(4).map(|s| s.trim()) {
+            None | Some("-") | Some("") => None,
+            Some(s) => {
+                let v: Vec<f64> = s.split(',').filter_map(|x| x.trim().parse::<f64>().ok()).filter(|x| x.is_finite() && x.abs() < 1.0e7).collect();
+                if v.len() != 4 {
+                    return None;
+                }
+                Some([v[0], v[1], v[2], v[3]])
+            }
+        };
+        // (where its car is: a message without it says nothing of it)
+        let at = parts.get(5).and_then(|s| {
+            let v: Vec<f64> = s.split(',').filter_map(|x| x.trim().parse::<f64>().ok()).filter(|x| x.is_finite() && x.abs() < 1.0e7).collect();
+            (v.len() == 2).then(|| [v[0], v[1]])
+        });
+        Some(Some(TrafficEvent { kind, car, player, prop, at }))
+    }
 }
 
 /// A car (false) or a person (true) of the host's world, by id.
@@ -706,7 +808,7 @@ mod tests {
             brake: true,
             lights: true,
             at_station: -1,
-            looks: CarLooks { rear_fog: true, high_beam: false, horns: 3, bulb: 2, smoker: true },
+            looks: CarLooks { rear_fog: true, high_beam: false, horns: 3, bulb: 2, smoker: true, siren: true },
         }
     }
 
@@ -777,8 +879,8 @@ mod tests {
         let d = encode(&f, 4);
         assert_eq!(d.len(), 1);
         // (two parked spaces add 9 bytes: 1 + 1 + 7 + 2 x 32 bits; the cars' looks 3: a
-        // tag of 4 bits and a byte a car)
-        assert!(d[0].len() <= 135, "{} bytes", d[0].len());
+        // tag of 4 bits and a byte a car; their sirens 1: a tag of 4 bits and a bit a car)
+        assert!(d[0].len() <= 136, "{} bytes", d[0].len());
         let g = decode(&d[0], 4).unwrap();
         assert_eq!((g.seq, g.host_ms), (65535, 123_456_789));
         assert_eq!(g.cars.len(), 2);
@@ -816,7 +918,9 @@ mod tests {
         assert_eq!(g.parked, Some((true, vec![242685, 7])));
         // anything else is not a frame
         assert!(decode(&d[0], 3).is_none());
-        assert!(decode(&d[0][..d[0].len() - 3], 4).is_none() || d[0].len() < 3);
+        // (cut into its parked spaces: the looks and the sirens after them are optional
+        // sections, a frame cut short of them is an older game's)
+        assert!(decode(&d[0][..d[0].len() - 6], 4).is_none() || d[0].len() < 6);
         for n in 0..d[0].len() {
             let _ = decode(&d[0][..n], 4);
         }

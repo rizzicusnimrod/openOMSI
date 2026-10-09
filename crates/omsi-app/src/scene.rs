@@ -12617,10 +12617,11 @@ impl World {
                     // (all three graphics: OMSI 2's own rain, its texture sliding down the
                     // pane, looked like wet paper next to drops that bend the street)
                     extra.rain_film = rain_layer && !snowing() && omsi_cfg::env::var_os("OMSI_TEXTURE_RAIN").is_none();
-                    // the film the wipers sweep, on the player's bus: its water spot by spot
-                    // from the wipe map (`crate::wipers`), in its light map's place
-                    extra.wiped = player
-                        && extra.rain_film
+                    // the film the wipers sweep: its water spot by spot from the wipe map
+                    // (`crate::wipers`), in its light map's place - on the player's bus, and
+                    // on any other of the type, which another player's may be, ridden in (the
+                    // map is where the camera rides; elsewhere the film keeps its script's)
+                    extra.wiped = extra.rain_film
                         && ov.iter().any(|o| o.alphascale.as_deref().is_some_and(|v| v.trim().eq_ignore_ascii_case("rain_window_wiped_wetness")));
                     let lightmap = if extra.wiped { Some(self.wipe_texture(renderer, scene)) } else { lightmap };
                     // Some mod buses put [matl_noZcheck] on the complete body mesh.

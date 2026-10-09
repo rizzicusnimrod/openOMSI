@@ -655,6 +655,8 @@ pub(crate) fn run_offscreen(
                 let stops = crate::events::duty_stops(duty.as_ref());
                 let cx = crate::events::Ctx {
                     player: player.as_ref().map(|p| player_outline(p)),
+                    others: &[],
+                    remote: None,
                     stops: &stops,
                     horn: player.as_ref().is_some_and(|p| crate::traffic_link::horn(&p.vehicle)),
                     host: true,

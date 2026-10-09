@@ -368,6 +368,35 @@ pub fn settings(l: &mut Launcher, area: Rect) {
     }
 }
 
+/// The dialog that asks before joining a host with a map or a bus it does not share with
+/// us (`State::join_problems`): back to choose another, or join anyway.
+pub fn join_dialog(l: &mut Launcher) {
+    let Some(problems) = l.state.join_warning.clone() else { return };
+    let size = l.ui.size;
+    let full = Rect::new(0.0, 0.0, size.x, size.y);
+    l.ui.solid(full);
+    l.ui.p().rect(full, omsi_ui::Color::rgba(0, 0, 0, 0.62));
+    let w = (size.x - 48.0).min(560.0);
+    let h = 130.0 + 76.0 * problems.len() as f32;
+    let r = Rect::new((size.x - w) * 0.5, (size.y - h) * 0.5, w, h);
+    l.ui.panel(r);
+    let inner = Rect::new(r.x + 24.0, r.y + 20.0, r.w - 48.0, r.h - 40.0);
+    l.ui.icon("warning", Vec2::new(inner.x + 14.0, inner.y + 14.0), 26.0, DANGER);
+    l.ui.text_in("Join this host anyway?", Rect::new(inner.x + 38.0, inner.y, inner.w - 38.0, 28.0), 18.0, Weight::Bold, TEXT, Align::Left);
+    for (k, p) in problems.iter().enumerate() {
+        l.ui.paragraph(p, Vec2::new(inner.x, inner.y + 40.0 + 76.0 * k as f32), inner.w, 13.0, Weight::Regular, TEXT_DIM);
+    }
+    let by = inner.bottom() - 38.0;
+    if l.ui.button("join-no", Rect::new(inner.right() - 290.0, by, 140.0, 38.0), "Choose again", None, ButtonKind::Normal) {
+        l.state.join_warning = None;
+    }
+    if l.ui.button("join-yes", Rect::new(inner.right() - 140.0, by, 140.0, 38.0), "Join anyway", Some("play_arrow"), ButtonKind::Danger) {
+        l.state.join_warning = None;
+        l.state.join_confirmed = true;
+        l.state.launch();
+    }
+}
+
 /// The dialog that asks before every setting goes back to how it came.
 pub fn reset_dialog(l: &mut Launcher) {
     let size = l.ui.size;

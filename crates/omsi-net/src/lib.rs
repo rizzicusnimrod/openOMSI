@@ -48,6 +48,9 @@
 //!                                                host: its own people on foot
 //! DESC|c|<id>|<file>|<scheme>|<line>|<dest>      host → client: what a car is
 //! DESC|p|<id>|<file>                             either way: what a person is
+//! EVENT|<kind>|<car>|<player>|<x,y,z,heading>|<x,y>  host → clients: the traffic event on the
+//!                                                 road now (`world::TrafficEvent`; `EVENT|-`
+//!                                                 none), every two seconds and on a change
 //! WANT|<id>|c<id>,p<id>,…                        client → host: descriptions lost on the way
 //! CLAIM|<id>|<person>,…                          client → host: waiting people its bus takes
 //! GRANT|<person>,… / DENY|<person>,…             host → client: handed over, or not
@@ -132,6 +135,10 @@ pub const INFO_EVERY: f32 = 2.0;
 pub const INFO_MIN_GAP: f32 = 0.25;
 /// Seconds between two CLOCK messages of the host.
 pub const CLOCK_EVERY: f32 = 5.0;
+/// The host tells the clients its traffic event this often (and on a change); a client
+/// forgets one not told again for `EVENT_STALE`.
+pub const EVENT_EVERY: Duration = Duration::from_secs(2);
+pub const EVENT_STALE: Duration = Duration::from_secs(9);
 /// At most this many other players: a host turns away the next one, a client ignores more.
 pub const MAX_PEERS: usize = 32;
 /// At most this many players may be loading at the same time (joined, no state yet).
@@ -1385,6 +1392,10 @@ pub struct LanSession {
     pub warnings: Vec<String>,
     /// The game has placed its vehicle according to the host's list (set by the game).
     pub spawn_settled: bool,
+    /// The host's traffic event as it last told it (client), and when.
+    traffic_event: Option<(world::TrafficEvent, Instant)>,
+    /// The traffic event last sent to the clients, and when (host).
+    event_out: (Option<world::TrafficEvent>, Option<Instant>),
     /// Where our bus stands, for the host's list of what stands there (client).
     place: Option<Footprint>,
     /// The host's list of the vehicles near `place`.
@@ -1500,6 +1511,8 @@ impl LanSession {
             welcome: None,
             welcomes: 0,
             warnings: Vec::new(),
+            traffic_event: None,
+            event_out: (None, None),
             spawn_settled: role == Role::Host,
             place: None,
             near: None,
@@ -2001,6 +2014,32 @@ impl LanSession {
         }
         self.world_sent.set(self.world_sent.get() + n as u64);
         n
+    }
+
+    /// Tell the clients the traffic event on the road now (host): on a change at once, else
+    /// every `EVENT_EVERY` (a datagram may be lost on the way).
+    pub fn share_traffic_event(&mut self, ev: Option<world::TrafficEvent>) {
+        if self.role != Role::Host {
+            return;
+        }
+        // (a moving car's place alone is no change: it goes with the next round)
+        let same = match (&self.event_out.0, &ev) {
+            (Some(a), Some(b)) => a.same(b),
+            (None, None) => true,
+            _ => false,
+        };
+        if same && self.event_out.1.is_some_and(|t| t.elapsed() < EVENT_EVERY) {
+            return;
+        }
+        let text = world::TrafficEvent::encode(ev.as_ref());
+        self.broadcast(text.as_bytes(), None);
+        self.event_out = (ev, Some(Instant::now()));
+    }
+
+    /// The host's traffic event on the road now, as it last told it (client); None when there
+    /// is none, or it has said nothing for `EVENT_STALE`.
+    pub fn traffic_event(&self) -> Option<&world::TrafficEvent> {
+        self.traffic_event.as_ref().filter(|(_, at)| at.elapsed() < EVENT_STALE).map(|(e, _)| e)
     }
 
     /// Tell player `id` what a car or person of the world is (host).
@@ -2709,6 +2748,11 @@ impl LanSession {
                             text,
                             mine: false,
                         });
+                    }
+                }
+                ("EVENT", Role::Client) => {
+                    if let Some(ev) = world::TrafficEvent::decode(&parts) {
+                        self.traffic_event = ev.map(|e| (e, Instant::now()));
                     }
                 }
                 ("NOTE", Role::Client) => {

@@ -239,6 +239,9 @@ pub struct AiCar {
     pub give_way: f32,
     /// Seconds it has followed something going slowly (`Traffic::plan_overtake`).
     pub slow_lead: f32,
+    /// Its siren sounds: an emergency vehicle told something holds it up
+    /// (`TrafficPriorityWarningNeeded`), as the LAN clients are told it.
+    pub siren: bool,
     /// A rail vehicle: the track it has come along, (odometer, point), oldest first -
     /// where its rear bogie and its coupled cars and sections run (see `rail_behind`).
     pub rail_trail: std::collections::VecDeque<(f64, DVec3)>,
@@ -522,7 +525,7 @@ const UNSEEN_NEAR: f64 = 80.0;
 const UNSEEN_FAR: f64 = 150.0;
 /// (s) Ten times a second: at 50 km/h a step of 1.4 m, which its driving model takes as
 /// smoothly as a frame's; the cars about it see it where it was at most that long ago.
-const UNSEEN_STEP: f32 = 0.1;
+pub(crate) const UNSEEN_STEP: f32 = 0.1;
 
 /// How near an articulated AI bus has to be for its bellows to be reshaped as its joint
 /// turns (m): the fold of the bend is a few centimetres, which is a screen pixel or more
@@ -3275,6 +3278,7 @@ impl Traffic {
             event: None,
             give_way: 0.0,
             slow_lead: 0.0,
+            siren: false,
             seed,
             scheme,
         });
@@ -4448,6 +4452,7 @@ impl Traffic {
         &mut self,
         i: usize,
         lead: Option<(Lead, Option<usize>)>,
+        lead_other: Option<u32>,
         obstacle_len: f32,
         way: &[(usize, f32)],
         by_lane: &HashMap<usize, Vec<(usize, f32, f32, bool)>>,
@@ -4484,7 +4489,11 @@ impl Traffic {
             && (emergency || lane.speed_limit_kmh >= 60.0 || v_o < 0.45 * limit);
         // (one turning off to the left, or a bus about to stop, is not overtaken)
         let turning = match who {
-            Some(usize::MAX) => self.player_blinker & 1 != 0,
+            // (a LAN player's bus by its own indicators)
+            Some(usize::MAX) => match lead_other {
+                Some(id) => self.others_signals.get(&id).is_some_and(|s| s.1 & 1 != 0),
+                None => self.player_blinker & 1 != 0,
+            },
             Some(j) if j < self.cars.len() => self.cars[j].state.blinker & 1 != 0 || (self.cars[j].bus.is_some() && !emergency) || self.cars[j].give_way > 0.0,
             _ => true,
         };
@@ -6444,6 +6453,8 @@ impl Traffic {
                 (d.length() < 25.0 && along < me.state.front as f64 + 2.0).then_some(other.id)
             });
             let mut lead = ahead.map(|(l, j)| (l, Some(j)));
+            // (the LAN player whose bus that is, when the lead is one: its own indicators)
+            let mut lead_other: Option<u32> = None;
             // the player's bus, wherever it overlaps this car's way, or a LAN player's (the
             // nearest in the way stands for "the player's bus" in what follows)
             let (mut player, mut player_standing) = (player, player_standing);
@@ -6464,6 +6475,7 @@ impl Traffic {
                 if let Some(l) = self.player_in_way(i, o, self.others_acc.get(id).map_or(0.0, |x| x.1)) {
                     if lead.map(|x| l.gap < x.0.gap).unwrap_or(true) {
                         lead = Some((l, Some(usize::MAX)));
+                        lead_other = Some(*id);
                         player = Some(*o);
                         player_standing = self.others_still.get(id).copied().unwrap_or(0.0);
                     }
@@ -6719,7 +6731,7 @@ impl Traffic {
                 parked_box,
                 &feet,
             );
-            self.plan_overtake(i, if parked_ahead { None } else { lead }, obstacle_len, &way_now, &by_lane, dt);
+            self.plan_overtake(i, if parked_ahead { None } else { lead }, lead_other, obstacle_len, &way_now, &by_lane, dt);
             // passing: back into the lane once past (and give up if the way out closes
             // before the car has moved)
             {
@@ -7386,6 +7398,7 @@ impl Traffic {
                     car.vehicle.set_engine_var(n, 1.0);
                 }
             }
+            car.siren = priority_warning;
             frames[i] = Some(AiFrame {
                 speed: car.state.speed,
                 odometer: car.state.odometer,
@@ -7436,16 +7449,7 @@ impl Traffic {
                 self.conditions.precip_rate
             );
         }
-        // Who can be seen: a car out of the view (and farther than the mirrors and the
-        // shadows reach) leaves its animations as they are and is not drawn at all.
-        if let Some(v) = self.viewer {
-            for c in &mut self.cars {
-                let p = c.vehicle.position;
-                let r = (c.state.front + c.state.rear).abs().max(4.0) as f64 + 2.0;
-                c.vehicle.ai_visuals =
-                    (p - v.pos).length() < UNSEEN_NEAR || v.frames(p, r);
-            }
-        }
+        self.mark_seen();
         let t_par = std::time::Instant::now();
         // The bodies and the scripts of the AI vehicles run in parallel: each car follows
         // its own way and its OMSI script is its own little machine reading only its own
@@ -8728,9 +8732,25 @@ impl Traffic {
         );
     }
 
+    /// Who can be seen: a car out of the view (and farther than the mirrors and the
+    /// shadows reach) leaves its animations as they are and is not drawn at all. (A LAN
+    /// client's copies of the host's cars as well: all of them were drawn, mesh by mesh,
+    /// and ran their scripts every frame, wherever they were.)
+    fn mark_seen(&mut self) {
+        if let Some(v) = self.viewer {
+            for c in &mut self.cars {
+                let p = c.vehicle.position;
+                let r = (c.state.front + c.state.rear).abs().max(4.0) as f64 + 2.0;
+                c.vehicle.ai_visuals =
+                    (p - v.pos).length() < UNSEEN_NEAR || v.frames(p, r);
+            }
+        }
+    }
+
     /// A client's frame: interpolate the host's light clocks, without re-evaluating its
     /// stop and jump points from the client's incomplete traffic requests.
     fn mirror_tick(&mut self, dt: f32) {
+        self.mark_seen();
         self.time += dt;
         self.day_time += dt as f64 * self.time_scale;
         self.last_dt = dt;
@@ -8834,6 +8854,7 @@ impl Traffic {
             event: None,
             give_way: 0.0,
             slow_lead: 0.0,
+            siren: false,
         });
         self.cars.len() - 1
     }

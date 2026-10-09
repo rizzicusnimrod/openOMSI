@@ -1,4 +1,4 @@
-//! Rain on the player's windscreen and the wipers that sweep it.
+//! Rain on the windscreen of the bus one rides in and the wipers that sweep it.
 //!
 //! OMSI's buses wear a film of water over the part of the windscreen the wipers reach
 //! (`[alphascale] Rain_Window_Wiped_Wetness`), and `wiper.osc` dries it by how far the
@@ -37,8 +37,10 @@ struct Blade {
 pub struct Wipers {
     /// The bus type the map was made for (its meshes).
     key: usize,
-    /// The map's rectangle on the glass in the bus's frame: x min, z min, x max, z max.
+    /// The map's rectangle on the glass in the bus's frame: x min, z min, x max, z max; and
+    /// where the glass lies along the bus (y min, y max).
     rect: [f32; 4],
+    depth: [f32; 2],
     blades: Vec<Blade>,
     wet: Vec<f32>,
     rgba: Vec<u8>,
@@ -79,6 +81,7 @@ impl Wipers {
         };
         // the film's extent on the glass, seen from in front
         let (mut lo, mut hi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+        let (mut y0, mut y1) = (f32::MAX, f32::MIN);
         for (i, m) in ty.meshes.iter().enumerate() {
             let t = v.mesh_transforms.get(i).copied().unwrap_or(glam::Mat4::IDENTITY);
             for &(first, count, slot) in &m.data.ranges {
@@ -90,6 +93,8 @@ impl Wipers {
                         let q = t.transform_point3(*p);
                         lo = lo.min(Vec2::new(q.x, q.z));
                         hi = hi.max(Vec2::new(q.x, q.z));
+                        y0 = y0.min(q.y);
+                        y1 = y1.max(q.y);
                     }
                 }
             }
@@ -112,6 +117,7 @@ impl Wipers {
         Some(Wipers {
             key: std::sync::Arc::as_ptr(&v.ty) as usize,
             rect: [lo.x - 0.05, lo.y - 0.05, hi.x + 0.05, hi.y + 0.05],
+            depth: [y0, y1],
             blades,
             wet: vec![1.0; MAP_W * MAP_H],
             rgba: vec![255; MAP_W * MAP_H * 4],
@@ -190,7 +196,7 @@ impl Wipers {
 
     /// The frame the map lies in, for the renderer.
     pub fn frame(&self, v: &VehicleInstance) -> omsi_render::WipeFrame {
-        omsi_render::WipeFrame { origin: v.position, rotation: Mat3::from_mat4(v.body_rotation()), rect: self.rect }
+        omsi_render::WipeFrame { origin: v.position, rotation: Mat3::from_mat4(v.body_rotation()), rect: self.rect, depth: self.depth }
     }
 }
 
@@ -223,7 +229,7 @@ mod tests {
     use super::*;
 
     fn map() -> Wipers {
-        Wipers { key: 0, rect: [-1.0, 1.0, 1.0, 2.0], blades: Vec::new(), wet: vec![1.0; MAP_W * MAP_H], rgba: vec![255; MAP_W * MAP_H * 4], debug_t: 0 }
+        Wipers { key: 0, rect: [-1.0, 1.0, 1.0, 2.0], depth: [5.0, 5.5], blades: Vec::new(), wet: vec![1.0; MAP_W * MAP_H], rgba: vec![255; MAP_W * MAP_H * 4], debug_t: 0 }
     }
 
     #[test]
@@ -268,25 +274,31 @@ mod tests {
 }
 
 impl crate::App {
-    /// Once a frame: the player's windscreen's wipe map (`Wipers`) - the rain gathered,
-    /// the blades' sweep cleared - handed to the renderer, and the frame it lies in. None
-    /// without a bus whose film the wipers sweep.
+    /// Once a frame: the wipe map (`Wipers`) of the windscreen of the bus the camera rides
+    /// in - the own, or another player's in LAN play, whose blades move as theirs do - the
+    /// rain gathered, the blades' sweep cleared, handed to the renderer, and the frame it lies
+    /// in. None without a bus whose film the wipers sweep.
     pub(crate) fn step_wipers(&mut self, dt: f32, rain: f32) -> Option<omsi_render::WipeFrame> {
-        let p = self.player.as_ref()?;
+        let (v, kmh) = match self.inside_remote.and_then(|id| self.remotes.remotes.get(&id)) {
+            Some(rv) => (rv.vehicle(), rv.last.speed_kmh),
+            None => {
+                let p = self.player.as_ref()?;
+                (&p.vehicle, p.vehicle.physics.velocity_kmh())
+            }
+        };
         // (only once a film of the bus took the map, see `World::wipe_texture`)
         let tex = (*self.world.as_ref()?.wipe_texture.lock())?;
-        if !self.wipers.as_ref().is_some_and(|w| w.fits(&p.vehicle)) {
-            self.wipers = Wipers::new(&p.vehicle);
+        if !self.wipers.as_ref().is_some_and(|w| w.fits(v)) {
+            self.wipers = Wipers::new(v);
         }
         let w = self.wipers.as_mut()?;
-        let kmh = p.vehicle.physics.velocity_kmh();
-        let pose = (p.vehicle.position, Mat3::from_mat4(p.vehicle.body_rotation()));
+        let pose = (v.position, Mat3::from_mat4(v.body_rotation()));
         let ahead: Vec<(DVec3, f32)> = self.traffic.as_ref().map(|t| t.cars.iter().map(|c| (c.vehicle.position, c.state.speed)).collect()).unwrap_or_default();
         let g = if self.paused { 0.0 } else { gather(rain, kmh, self.wetness, pose, ahead.into_iter(), dt) };
-        let rgba = w.step(&p.vehicle, g).to_vec();
+        let rgba = w.step(v, g).to_vec();
         if let (Some(r), Some(scene)) = (self.renderer.as_ref(), self.scene.as_ref()) {
             r.update_texture(scene, tex, &omsi_texture::Image { width: MAP_W as u32, height: MAP_H as u32, rgba, has_alpha: false });
         }
-        Some(w.frame(&p.vehicle))
+        Some(w.frame(v))
     }
 }

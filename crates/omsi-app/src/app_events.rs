@@ -644,13 +644,22 @@ impl ApplicationHandler for App {
                             ev.set_config(crate::events::Config::from_settings(&self.settings));
                             ev.update_route(self.duty.as_ref(), self.schedule.as_ref(), w, t);
                             let stops = crate::events::duty_stops(self.duty.as_ref());
+                            // (the host's director puts events on the road for every player; a
+                            // client's mirrors the host's)
+                            let others = crate::traffic_link::lan_outlines(&self.remotes);
+                            let remote = self.lan.as_ref().and_then(|l| l.traffic_event().cloned());
                             let cx = crate::events::Ctx {
                                 player: self.player.as_ref().map(|p| player_outline(p)),
+                                others: &others,
+                                remote: remote.as_ref(),
                                 stops: &stops,
                                 horn: self.player.as_ref().is_some_and(|p| crate::traffic_link::horn(&p.vehicle)),
                                 host: self.lan.as_ref().is_none_or(|l| l.role != omsi_net::Role::Client),
                             };
                             ev.tick(dt, t, w, r, scene, &cx);
+                            if let Some(l) = self.lan.as_mut().filter(|l| l.role == omsi_net::Role::Host) {
+                                l.share_traffic_event(ev.net_event(t));
+                            }
                         }
                         if let Some(w) = self.world.as_ref() {
                             w.set_switches(&t.switch_requests());
@@ -687,7 +696,12 @@ impl ApplicationHandler for App {
                         __t3.elapsed().as_secs_f64();
                     let __t4 = Instant::now();
                     t.camera = self.camera.as_ref().map(|c| c.position);
-                    t.sync(w, r, scene);
+                    // (a LAN client's cars are moved by `tick_lan`, later in the frame: they
+                    // are drawn from there, else the models were a frame behind their lamps,
+                    // whose coronas and beams then went a metre ahead of a passing car)
+                    if !t.is_mirror() {
+                        t.sync(w, r, scene);
+                    }
                     *self.profile.entry("traffic.sync").or_default() +=
                         __t4.elapsed().as_secs_f64();
                 }
@@ -1328,6 +1342,16 @@ impl ApplicationHandler for App {
                 // (a stage of its own: a joining player's bus is loaded here, and that frame
                 // was counted as the people's)
                 *self.profile.entry("lan").or_default() += __t.elapsed().as_secs_f64();
+                // the host's cars as `tick_lan` put them (see the traffic stage)
+                if let (Some(t), Some(w), Some(r), Some(scene)) =
+                    (self.traffic.as_mut(), self.world.as_ref(), self.renderer.as_ref(), self.scene.as_mut())
+                {
+                    if t.is_mirror() {
+                        let __t = Instant::now();
+                        t.sync(w, r, scene);
+                        *self.profile.entry("traffic.sync").or_default() += __t.elapsed().as_secs_f64();
+                    }
+                }
                 // the player on foot, and the other players walking about
                 self.tick_on_foot(if self.paused { 0.0 } else { dt });
                 self.sync_remote_walkers();
@@ -1935,6 +1959,14 @@ impl ApplicationHandler for App {
                         apply_weather(&mut p.vehicle, w, self.wetness);
                     }
                 }
+                // the other players' buses get the weather too: their own scripts wet their
+                // windows where their variables do not come over (another version of the bus,
+                // or a stand-in), and a passenger in one saw dry glass in the rain
+                if let Some(w) = &self.weather {
+                    for rv in self.remotes.remotes.values_mut() {
+                        apply_weather(rv.vehicle_mut(), w, self.wetness);
+                    }
+                }
                 let __t = Instant::now();
                 // the lamps' cones in fog and falling rain or snow, and new light pictures
                 if let Some(wt) = &self.weather {
@@ -2485,7 +2517,15 @@ impl ApplicationHandler for App {
                 lighting.puddle_parts = puddle_vehicle.into_iter().flat_map(|v| &v.trailers)
                     .filter_map(|t| t.ty.def.bounding_box.map(|bb| (t.position, t.heading, bb))).take(3).collect();
                 lighting.detail = self.settings.detail_textures;
-                lighting.glass_wind = self.player.as_ref().map(|p| crate::lights::vehicle_velocity(&p.vehicle)).unwrap_or_default();
+                // (the airstream over the glass of the bus one rides in: another player's at
+                // their speed)
+                lighting.glass_wind = match self.inside_remote.and_then(|id| self.remotes.remotes.get(&id)) {
+                    Some(rv) => {
+                        let h = rv.vehicle().heading.to_radians();
+                        glam::Vec3::new(h.sin() as f32, h.cos() as f32, 0.0) * rv.last.speed_kmh / 3.6
+                    }
+                    None => self.player.as_ref().map(|p| crate::lights::vehicle_velocity(&p.vehicle)).unwrap_or_default(),
+                };
                 // the wipers sweep the windscreen's water (`crate::wipers`)
                 lighting.wipe = self.step_wipers(dt, lighting.rain);
                 // an LED panel's dots burn this much above their own colour (16 levels,

@@ -1025,10 +1025,11 @@ impl Launcher {
         let disconnected = !dialog && self.state.disconnected.is_some();
         let crash = !dialog && !disconnected && self.state.crash.is_some();
         let reset = !dialog && !crash && !disconnected && self.pages.confirm_reset;
-        if self.browser.is_some() || dialog || crash || reset || disconnected {
+        let join_warning = !dialog && !crash && !disconnected && !reset && self.state.join_warning.is_some();
+        if self.browser.is_some() || dialog || crash || reset || disconnected || join_warning {
             self.pages.pads.cancel_feedback_test();
         }
-        let saved = (self.browser.is_some() || dialog || crash || reset || disconnected).then(|| {
+        let saved = (self.browser.is_some() || dialog || crash || reset || disconnected || join_warning).then(|| {
             let i = self.ui.input.clone();
             self.ui.input.mouse = Vec2::new(-1e4, -1e4);
             self.ui.input.pressed = false;
@@ -1088,6 +1089,8 @@ impl Launcher {
                 self.draw_crash_dialog();
             } else if reset {
                 pages::reset_dialog(self);
+            } else if join_warning {
+                pages::join_dialog(self);
             } else {
                 self.draw_browser();
             }

@@ -762,15 +762,22 @@ impl Camera {
     }
 }
 
-/// Where the wipe map of the player's windscreen lies (see `MaterialExtra::wiped`): the
-/// bus's origin and rotation (the frame its meshes are in: x right, y forward, z up) and
-/// the map's rectangle on the glass seen from in front (x min, z min, x max, z max).
+/// Where the wipe map of the windscreen of the bus the camera rides in lies (see
+/// `MaterialExtra::wiped`): the bus's origin and rotation (the frame its meshes are in: x
+/// right, y forward, z up), the map's rectangle on the glass seen from in front (x min, z min,
+/// x max, z max) and how far along the bus the glass lies (y min, y max) - a film elsewhere,
+/// of another bus of the type, keeps its script's value.
 #[derive(Debug, Clone, Copy)]
 pub struct WipeFrame {
     pub origin: DVec3,
     pub rotation: glam::Mat3,
     pub rect: [f32; 4],
+    pub depth: [f32; 2],
 }
+
+/// How far from the camera a wiped film is drawn while its script's value for it is 0 (the
+/// wipe map has its water): the film of the bus the camera rides in, not a traffic bus's.
+const WIPED_NEAR: f32 = 20.0;
 
 #[derive(Clone, Debug)]
 pub struct Lighting {
@@ -7573,9 +7580,10 @@ impl Renderer {
                 // place in the bus's frame)
                 let r = w.rotation;
                 let o = (w.origin - ro).as_vec3();
+                // (w: the glass's place along the bus, y min and max)
                 [
-                    r.x_axis.extend(0.0).to_array(),
-                    r.y_axis.extend(0.0).to_array(),
+                    r.x_axis.extend(w.depth[0]).to_array(),
+                    r.y_axis.extend(w.depth[1]).to_array(),
                     r.z_axis.extend(0.0).to_array(),
                     o.extend(0.0).to_array(),
                     [w.rect[0], w.rect[1], 1.0 / (w.rect[2] - w.rect[0]).max(1e-3), 1.0 / (w.rect[3] - w.rect[1]).max(1e-3)],
@@ -10065,7 +10073,10 @@ impl Renderer {
                         // three or four such screen-sized layers.
                         // (not the wipers' film: its water is the wipe map's, spot by spot -
                         // the script's one value for it goes to 0 while the wipers run)
-                        if mat.alpha == AlphaMode::Blend && mat.uniform.retro[2] < 0.5 && inst.slot_alpha.get(*slot as usize).is_some_and(|a| *a < 1.0 / 512.0) {
+                        // (and only the film of the bus the camera rides in: a traffic bus of
+                        // the same type shares its material)
+                        let wiped_here = mat.uniform.retro[2] >= 0.5 && ((inst.origin - ro).as_vec3() - cam_rel).length() < WIPED_NEAR;
+                        if mat.alpha == AlphaMode::Blend && !wiped_here && inst.slot_alpha.get(*slot as usize).is_some_and(|a| *a < 1.0 / 512.0) {
                             continue;
                         }
                         // Ground blends use the C++ handler's no-write composition;

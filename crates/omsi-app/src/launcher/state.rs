@@ -243,6 +243,10 @@ pub struct State {
     pub cmdline: String,
     pub join: (bool, String),
     pub join_checked: String,
+    /// Joining a host with a map or a bus it does not share with us: what is the matter,
+    /// asked before the game starts (`join_problems`); and the player said go ahead anyway.
+    pub join_warning: Option<Vec<String>>,
+    pub join_confirmed: bool,
     pub logs: std::collections::HashMap<u32, Vec<String>>,
     pub open_logs: std::collections::HashSet<u32>,
     pub stopping: std::collections::HashSet<u32>,
@@ -314,6 +318,8 @@ impl State {
             cmdline: String::new(),
             join: (true, String::new()),
             join_checked: "\u{0}".into(),
+            join_warning: None,
+            join_confirmed: false,
             logs: Default::default(),
             open_logs: Default::default(),
             stopping: Default::default(),
@@ -492,6 +498,44 @@ impl State {
         }
     }
 
+    /// What does not match when joining the host as it has told us (its status): its map not
+    /// installed here (it comes with the host's mods only when the host keeps it outside its
+    /// OMSI 2 folder - an add-on installed into OMSI 2 is not passed on), or our bus not
+    /// one the host has (the others see a stand-in). Empty when nothing is the matter, or
+    /// the host has not told (yet).
+    pub fn join_problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.choice.lan_mode != "join" {
+            return out;
+        }
+        let key = self.joined_server.clone().unwrap_or_else(|| self.choice.lan_addr.clone());
+        let Some(info) = self.server_info.get(&key).and_then(|x| x.1.as_ref().ok()) else {
+            return out;
+        };
+        // (a map from its `maps/` folder on, a bus from its `vehicles/` one: either slash,
+        // any case, wherever the content root is)
+        let from = |s: &str, folder: &str| {
+            let s = s.trim().replace('\\', "/").to_ascii_lowercase();
+            match s.rfind(folder) {
+                Some(k) => s[k..].to_string(),
+                None => s,
+            }
+        };
+        let theirs = from(&info.map, "maps/");
+        if theirs.starts_with("maps/") && !self.maps.is_empty() && !self.maps.iter().any(|m| from(&m.file, "maps/") == theirs) {
+            let name = theirs.split('/').nth(1).unwrap_or(&theirs).to_string();
+            out.push(format!("The host plays on {name}, which is not installed here. It is downloaded from the host only if the host keeps it outside its OMSI 2 folder; otherwise you drive alone, on your own map, and do not meet the others."));
+        }
+        if let Some(list) = self.host_vehicles() {
+            let mine = from(&self.choice.bus, "vehicles/");
+            if !mine.is_empty() && !list.iter().any(|v| from(v, "vehicles/") == mine) {
+                let bus = self.vehicles.iter().find(|v| from(&v.file, "vehicles/") == mine).map(|v| v.name.clone()).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| crate::lan::vehicle_file_label(&self.choice.bus));
+                out.push(format!("The host does not have your bus ({bus}). The others will see you in a stand-in bus - choose one of the host's buses to be seen as you are."));
+            }
+        }
+        out
+    }
+
     /// The buses the host or server offers (None: any, it has not said).
     pub fn host_vehicles(&self) -> Option<Vec<String>> {
         if self.choice.lan_mode != "join" {
@@ -607,6 +651,14 @@ impl State {
         if !omsi_cfg::missing_original_essentials(std::path::Path::new(&self.config.root)).is_empty() {
             self.set_status("A session needs the original OMSI 2: choose its folder under Setup first.", true);
             return;
+        }
+        // (joining with a map or a bus the host does not have: asked first, see `join_dialog`)
+        if !std::mem::take(&mut self.join_confirmed) {
+            let problems = self.join_problems();
+            if !problems.is_empty() {
+                self.join_warning = Some(problems);
+                return;
+            }
         }
         let d = self.duty();
         self.set_status("Starting the game…", false);

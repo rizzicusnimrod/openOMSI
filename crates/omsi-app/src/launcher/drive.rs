@@ -844,8 +844,10 @@ fn step_bus(l: &mut Launcher, r: Rect) {
     let allowed: Option<std::collections::HashSet<String>> = l.state.host_vehicles().map(|v| v.iter().map(|f| norm(f)).collect());
     if let Some(a) = allowed.as_ref() {
         if !a.contains(&norm(&l.state.choice.bus)) {
-            if let Some(first) = l.state.vehicles.iter().find(|v| a.contains(&norm(&v.file))).map(|v| v.file.clone()) {
+            if let Some((first, name)) = l.state.vehicles.iter().find(|v| a.contains(&norm(&v.file))).map(|v| (v.file.clone(), v.name.clone())) {
+                let was = l.state.vehicles.iter().find(|v| norm(&v.file) == norm(&l.state.choice.bus)).map(|v| v.name.clone()).unwrap_or_else(|| crate::lan::vehicle_file_label(&l.state.choice.bus));
                 l.state.select_bus(&first);
+                l.state.set_status(format!("The host does not have {was}: {name} chosen instead (only the host's buses are listed)"), false);
             }
         }
     }

@@ -732,6 +732,38 @@ impl App {
         }
     }
 
+    /// `OMSI_RIDE_REMOTE` (for testing a passenger's view in LAN play): up from the wheel and
+    /// inside another player's bus, by its first door, looking ahead - once.
+    fn ride_remote_for_testing(&mut self) {
+        if self.on_foot.as_ref().is_some_and(|f| f.inside.is_some() || f.seat.is_some() || f.transit.is_some()) {
+            return;
+        }
+        let Some(&id) = self.remotes.remotes.keys().next() else { return };
+        let bus = BusId::Ai(crate::humans::remote_bus_id(id));
+        let Some(h) = self.humans.as_ref() else { return };
+        let Some((door, _, _, _)) = h.cabin_doors(bus).into_iter().next() else { return };
+        // (in the aisle beside the door, facing the windscreen)
+        let inside = glam::Vec3::new(door.x * 0.3, door.y, door.z);
+        let Some((w, _)) = h.cabin_world(bus, inside) else { return };
+        let Some((ahead, _)) = h.cabin_world(bus, inside + glam::Vec3::Y) else { return };
+        let heading = (ahead.x - w.x).atan2(ahead.y - w.y).to_degrees();
+        if self.on_foot.is_none() {
+            if self.player.is_none() {
+                return;
+            }
+            self.get_up();
+        }
+        let Some(f) = self.on_foot.as_mut() else { return };
+        f.pos = w;
+        f.inside = Some((bus, inside));
+        f.vel = DVec2::ZERO;
+        f.heading = heading;
+        f.yaw = heading as f32;
+        f.settle = 0.0;
+        f.eye = None;
+        log::info!("OMSI_RIDE_REMOTE: inside player {id}'s bus at ({:.1}, {:.1})", w.x, w.y);
+    }
+
     /// The keys on foot (and Ctrl+Shift+G at the wheel); true when the key was taken.
     pub(crate) fn foot_key(&mut self, code: KeyCode, pressed: bool, repeat: bool, ctrl: bool, shift: bool) -> bool {
         if self.on_foot.is_none() {
@@ -855,6 +887,9 @@ impl App {
                 }
             }
             _ => {}
+        }
+        if omsi_cfg::env::var_os("OMSI_RIDE_REMOTE").is_some() {
+            self.ride_remote_for_testing();
         }
         let Some(mut f) = self.on_foot.take() else { return };
         let dt64 = dt as f64;

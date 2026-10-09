@@ -503,7 +503,16 @@ pub struct RemoteVehicle {
     synced: hashbrown::HashMap<u16, f32>,
     synced_strings: hashbrown::HashMap<u16, String>,
     smooth: hashbrown::HashSet<u16>,
+    /// Far from the camera (`REMOTE_FAR`): its scripts run in steps (`traffic::UNSEEN_STEP`),
+    /// these seconds owed since the last.
+    far: bool,
+    script_owed: f32,
 }
+
+/// Another player's bus farther than this from the camera (m) runs its scripts - all of a
+/// player's bus, a few hundred blocks - ten times a second, not every frame: its lamps,
+/// doors and wheels are not told apart from there.
+const REMOTE_FAR: f64 = 200.0;
 
 impl RemoteVehicle {
     /// What the player drives, as the players list names it: the vehicle's maker and type
@@ -608,6 +617,9 @@ pub enum WorldUpdate {
 #[derive(Default)]
 pub struct LanGame {
     pub remotes: hashbrown::HashMap<u32, RemoteVehicle>,
+    /// `OMSI_PROFILE`: the seconds the parts of `tick` took (the network and variables, the
+    /// host's world, the other players' buses, drawing them), added up until taken.
+    pub stage_secs: [f64; 4],
     pub chat: Chat,
     /// The shared world: the host's traffic and people (`lan_world`).
     pub world: crate::lan_world::LanWorld,
@@ -632,6 +644,10 @@ pub struct LanGame {
     /// tried: tried again only after a while (every frame, a server read a big add-on bus
     /// it could not load over and over and stood still for everybody).
     failed: hashbrown::HashMap<(u32, String), std::time::Instant>,
+    /// Their vehicle (bus file, paint) being read from disk in the background, by player:
+    /// read on the frame, it stood the game still for a quarter of a second and more
+    /// whenever somebody joined or changed buses.
+    loading: hashbrown::HashMap<u32, ((String, String), std::sync::mpsc::Receiver<Option<RemoteTypes>>)>,
     /// Our vehicle's variable table (by its program), for `omsi_net::vars`.
     my_vars: Option<(usize, Arc<VarTable>)>,
     vars_log: f32,
@@ -2514,7 +2530,7 @@ fn remote_bus_file(args: &Args, bus: &str) -> Result<PathBuf, String> {
 fn remote_type(
     args: &Args,
     pose: &Pose,
-    player: Option<&Player>,
+    ours: Option<Arc<omsi_sim::VehicleType>>,
 ) -> Option<(Arc<omsi_sim::VehicleType>, bool)> {
     let allowed = crate::server::SERVER_VEHICLES.get().filter(|l| !l.is_empty());
     let loaded = if allowed.is_none_or(|l| crate::server::allows(l, &pose.bus)) {
@@ -2526,8 +2542,8 @@ fn remote_type(
         Ok(t) => Some((Arc::new(t), false)),
         Err(e) => {
             log::warn!("LAN: player {} drives {:?}, which cannot be loaded here ({e}); showing a stand-in", pose.id, pose.bus);
-            if let Some(p) = player {
-                return Some((p.vehicle.ty.clone(), true));
+            if let Some(t) = ours {
+                return Some((t, true));
             }
             let first = allowed.and_then(|l| l.first())?;
             let path = remote_bus_file(args, first).ok()?;
@@ -2536,30 +2552,63 @@ fn remote_type(
     }
 }
 
+/// Another player's vehicle as read from disk (`load_remote`): its type, whether it stands
+/// in for theirs, and its coupled rear sections (with which way round each is).
+type RemoteTypes = (Arc<omsi_sim::VehicleType>, bool, Vec<(Arc<omsi_sim::VehicleType>, bool)>);
+
+/// Read the vehicle a remote pose names (`remote_type`; `ours` stands in for one not
+/// installed here) and its rear sections - the slow part, on a thread of its own.
+fn load_remote(args: &Args, pose: &Pose, ours: Option<Arc<omsi_sim::VehicleType>>) -> Option<RemoteTypes> {
+    let (ty, stand_in) = remote_type(args, pose, ours)?;
+    let mut rear = Vec::new();
+    let (mut lead, mut lead_rev) = (ty.clone(), false);
+    for _ in 0..8 {
+        let Some((path, rev)) = crate::spawn::next_coupled(&lead.def, lead_rev, true) else {
+            break;
+        };
+        match omsi_sim::VehicleType::load(&args.root, &path) {
+            Ok(t) => {
+                let t = Arc::new(t);
+                rear.push((t.clone(), rev));
+                lead = t;
+                lead_rev = rev;
+            }
+            Err(e) => {
+                log::warn!("LAN: rear section {}: {e}", path.display());
+                break;
+            }
+        }
+    }
+    Some((ty, stand_in, rear))
+}
+
+/// The paint scheme of `ty` a pose names (None: its default).
+fn paint_index(ty: &omsi_sim::VehicleType, paint: &str) -> Option<usize> {
+    if paint.is_empty() {
+        return None;
+    }
+    ty.paint_schemes.iter().position(|s| s.name.eq_ignore_ascii_case(paint))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn new_remote(
     game: &mut LanGame,
     args: &Args,
     pose: &Pose,
-    player: Option<&Player>,
+    loaded: RemoteTypes,
     world: &World,
     r: &Renderer,
     scene: &mut Scene,
     clock: Option<&omsi_sim::SimClock>,
 ) -> Option<RemoteVehicle> {
-    let (ty, stand_in) = remote_type(args, pose, player)?;
+    let (ty, stand_in, rear_types) = loaded;
+    let t_make = Instant::now();
     let mut host =
         omsi_sim::VehicleHost::new(clock.cloned().unwrap_or_else(|| crate::start_clock(args)));
     host.font_lib = Some(world.fonts.clone());
     let hof = crate::find_hof(args, world, &ty);
     host.hof = hof.clone();
-    let scheme = if pose.paint.is_empty() {
-        None
-    } else {
-        ty.paint_schemes
-            .iter()
-            .position(|s| s.name.eq_ignore_ascii_case(&pose.paint))
-    };
+    let scheme = paint_index(&ty, &pose.paint);
     host.paint_scheme = Some(scheme);
     let mut vehicle = omsi_sim::VehicleInstance::new(ty.clone(), host);
     vehicle.ground = None;
@@ -2571,37 +2620,24 @@ fn new_remote(
         });
     }
     vehicle.apply_paint_vars(scheme);
+    let t_setup = t_make.elapsed().as_secs_f64();
     let render = world.add_vehicle_shared(r, scene, &ty, scheme, None);
+    let t_upload = t_make.elapsed().as_secs_f64() - t_setup;
     // the coupled sections of an articulated bus
     let mut trailer_renders = Vec::new();
-    let mut lead = ty.clone();
-    let mut lead_rev = false;
-    for _ in 0..8 {
-        let Some((path, rev)) = crate::spawn::next_coupled(&lead.def, lead_rev, true) else {
-            break;
-        };
-        match omsi_sim::VehicleType::load(&args.root, &path) {
-            Ok(t) => {
-                let t = Arc::new(t);
-                trailer_renders.push(world.add_vehicle_shared(
-                    r,
-                    scene,
-                    &t,
-                    scheme.filter(|i| *i < t.paint_schemes.len()),
-                    Some(&render),
-                ));
-                vehicle.attach_trailer_ex(t.clone(), rev);
-                lead = t;
-                lead_rev = rev;
-            }
-            Err(e) => {
-                log::warn!("LAN: rear section {}: {e}", path.display());
-                break;
-            }
-        }
+    for (t, rev) in rear_types {
+        trailer_renders.push(world.add_vehicle_shared(
+            r,
+            scene,
+            &t,
+            scheme.filter(|i| *i < t.paint_schemes.len()),
+            Some(&render),
+        ));
+        vehicle.attach_trailer_ex(t, rev);
     }
     // (with its rear sections: theirs are in the table too)
     let table = sync_table(game, &vehicle);
+    log::info!("LAN: player {}'s bus made in {:.0} ms (instance {:.0}, models and textures {:.0})", pose.id, t_make.elapsed().as_secs_f64() * 1000.0, t_setup * 1000.0, t_upload * 1000.0);
     vehicle.position = DVec3::new(pose.x, pose.y, pose.z);
     vehicle.heading = pose.heading as f64;
     let rear: Vec<(DVec3, f64)> = pose
@@ -2664,6 +2700,8 @@ fn new_remote(
         synced: Default::default(),
         synced_strings: Default::default(),
         smooth: Default::default(),
+        far: false,
+        script_owed: 0.0,
     })
 }
 
@@ -3011,7 +3049,11 @@ fn drive_remote(rv: &mut RemoteVehicle, pose: &Pose, dt: f32, exact: bool) {
     };
     // and every other variable of theirs, as their scripts have it (`omsi_net::vars`)
     pinned.extend(rv.synced.iter().filter(|(id, _)| !rv.smooth.contains(*id)).map(|(id, v)| (*id as VarId, *v)));
-    rv.vehicle.update_ai_with(dt, &frame, &inputs, &pinned);
+    rv.script_owed += dt;
+    if !rv.far || rv.script_owed >= crate::traffic::UNSEEN_STEP {
+        let step = std::mem::take(&mut rv.script_owed);
+        rv.vehicle.update_ai_with(step, &frame, &inputs, &pinned);
+    }
     for (id, text) in &rv.synced_strings {
         if let Some(s) = rv.vehicle.state.str_vars.get_mut(*id as usize) {
             if s != text {
@@ -3243,8 +3285,11 @@ pub fn tick(
             lan.answer_joins();
         }
     }
+    let t_stage = std::time::Instant::now();
     let gone = lan.tick(dt, &mine);
     sync_vars(lan, game, player.as_deref(), dt);
+    game.stage_secs[0] += t_stage.elapsed().as_secs_f64();
+    let t_stage = std::time::Instant::now();
     game.world.tick(
         lan,
         dt,
@@ -3256,6 +3301,7 @@ pub fn tick(
         humans.as_deref_mut(),
         player.as_deref().map(|p| p.vehicle.position),
     );
+    game.stage_secs[1] += t_stage.elapsed().as_secs_f64();
     // the host's world: taken over at a late welcome, the clock kept in step
     if let (Role::Client, Some(clock)) = (lan.role, frame.clock) {
         if lan.welcomes != game.adopted && lan.welcome.is_some() {
@@ -3348,6 +3394,7 @@ pub fn tick(
         return updates;
     };
     for id in gone {
+        game.loading.remove(&id);
         if let Some(rv) = game.remotes.remove(&id) {
             log::info!("LAN: no longer drawing player {id} '{}'", rv.name);
             release(r, scene, w, frame.audio, rv);
@@ -3367,10 +3414,12 @@ pub fn tick(
         .filter(|id| !known.contains(id))
         .collect();
     for id in stale {
+        game.loading.remove(&id);
         if let Some(rv) = game.remotes.remove(&id) {
             release(r, scene, w, frame.audio, rv);
         }
     }
+    let t_stage = std::time::Instant::now();
     let poses: Vec<Pose> = lan
         .peers()
         .filter(|p| p.has_pose && p.has_info && p.pose.has_vehicle())
@@ -3394,20 +3443,50 @@ pub fn tick(
             if game.failed.get(&key).is_some_and(|t| t.elapsed().as_secs_f32() < 30.0) {
                 continue;
             }
-            let Some(rv) = new_remote(
-                game,
-                args,
-                &pose,
-                player.as_deref(),
-                w,
-                r,
-                scene,
-                frame.clock,
-            ) else {
+            // read from disk on a thread of its own, drawn once it is there
+            let made_as = (pose.bus.clone(), pose.paint.clone());
+            if game.loading.get(&pose.id).is_none_or(|(m, _)| *m != made_as) {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (a, p, ours) = (args.clone(), pose.clone(), player.as_deref().map(|p| p.vehicle.ty.clone()));
+                // (its models and pictures made ready for the GPU there too: uploaded on the
+                // frame, they were half a second of standing still)
+                let prefetch = w.vehicle_prefetch(r);
+                std::thread::spawn(move || {
+                    let got = load_remote(&a, &p, ours);
+                    if let Some((ty, _, rear)) = got.as_ref() {
+                        let scheme = paint_index(ty, &p.paint);
+                        prefetch.prefetch(ty, scheme);
+                        for (t, _) in rear {
+                            prefetch.prefetch(t, scheme.filter(|i| *i < t.paint_schemes.len()));
+                        }
+                    }
+                    let _ = tx.send(got);
+                });
+                game.loading.insert(pose.id, (made_as, rx));
+                continue;
+            }
+            let got = match game.loading.get(&pose.id).map(|(_, rx)| rx.try_recv()) {
+                Some(Ok(got)) => got,
+                Some(Err(std::sync::mpsc::TryRecvError::Empty)) => continue,
+                _ => None,
+            };
+            game.loading.remove(&pose.id);
+            let Some(rv) = got.and_then(|loaded| new_remote(game, args, &pose, loaded, w, r, scene, frame.clock)) else {
                 game.failed.insert(key, std::time::Instant::now());
                 continue;
             };
             game.failed.remove(&key);
+            // (their bus is not installed here: they are shown in ours - said once, and the
+            // host tells the player too, who may change to a bus the host has)
+            if rv.stand_in {
+                let who = if pose.name.is_empty() { format!("player {}", pose.id) } else { pose.name.clone() };
+                let bus = vehicle_file_label(&pose.bus);
+                log::info!("LAN: {who} drives {bus}, which is not installed here: shown in a stand-in bus");
+                game.chat.push(format!("* {who} drives {bus}, which is not installed here: shown in a stand-in bus"));
+                if lan.role == Role::Host {
+                    let _ = lan.say_to(pose.id, "Host", &format!("The host does not have your bus ({bus}): the others see a stand-in. Swap to a bus the host has."));
+                }
+            }
             game.remotes.insert(pose.id, rv);
         }
         let Some(rv) = game.remotes.get_mut(&pose.id) else {
@@ -3439,6 +3518,7 @@ pub fn tick(
             );
             rv.shown = want;
         }
+        rv.far = frame.listener.is_some_and(|l| (rv.vehicle.position - l).length() > REMOTE_FAR) && frame.inside_of != Some(pose.id);
         // between their states as they were sent (older games: gliding towards the newest)
         if let Some(peer) = lan.peers().find(|p| p.pose.id == pose.id) {
             rv.take_samples(&peer.history);
@@ -3466,6 +3546,8 @@ pub fn tick(
         let inside = frame.inside_of == Some(pose.id);
         sound_remote(rv, frame.audio, frame.listener, frame.muffled, inside);
     }
+    game.stage_secs[2] += t_stage.elapsed().as_secs_f64();
+    let t_stage = std::time::Instant::now();
     // draw them like AI traffic
     for (id, rv) in game.remotes.iter_mut() {
         if !rv.driver_tried && !rv.stand_in {
@@ -3490,6 +3572,7 @@ pub fn tick(
         }
         crate::player::sync_vehicle_transforms(r, scene, &mut rv.vehicle, &mut rv.render, &mut rv.trailer_renders, inside);
     }
+    game.stage_secs[3] += t_stage.elapsed().as_secs_f64();
     debug_log(lan, game, dt, frame);
     updates
 }

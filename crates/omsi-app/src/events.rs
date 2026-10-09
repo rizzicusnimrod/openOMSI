@@ -30,8 +30,16 @@
 //! traffic can see past it. An emergency vehicle comes up from behind along the road the
 //! bus came by, its way laid to the bus and on past it. An event the bus did not come to is
 //! followed by another a minute or two later. The car is an ordinary random car of the map standing for a while
-//! (`traffic::Halt`): in a LAN session the host's director alone runs, and the clients see
-//! the car, its hazard lights too, as they see the rest of the host's traffic.
+//! (`traffic::Halt`).
+//!
+//! In a LAN session the host's director alone runs, for every player: each event is put on
+//! the road for one of the buses (the host's own or a client's, by lot), ahead of it on the
+//! road straight on (a client's duty is its own: no car in its stop), where none of the
+//! players sees it appear - out of the host's sight, and far from or well behind every
+//! other bus. The clients see the car as they see the rest of the host's traffic (its
+//! hazard lights, an ambulance's blue lights and siren too); the host tells them which
+//! event it is (`omsi_net::world::TrafficEvent`), and their own director mirrors it: the
+//! badge on their maps, the warning triangle set up where the host's stands.
 //!
 //! `OMSI_EVENT=breakdown|delivery|stop|emergency|slow|learner` starts that event at once
 //! (once), whatever the settings say; `OMSI_DEBUG_EVENTS` logs the event's car once a second;
@@ -145,6 +153,18 @@ impl Kind {
         }
     }
 
+    /// Its name in the LAN message (`omsi_net::world::EVENT_KINDS`, read back by `parse`).
+    fn code(self) -> &'static str {
+        match self {
+            Kind::Breakdown => "breakdown",
+            Kind::Delivery => "delivery",
+            Kind::Stop => "stop",
+            Kind::Emergency => "emergency",
+            Kind::Slow => "slow",
+            Kind::Learner => "learner",
+        }
+    }
+
     fn parse(s: &str) -> Option<Kind> {
         match s.trim().to_ascii_lowercase().as_str() {
             "breakdown" => Some(Kind::Breakdown),
@@ -210,6 +230,11 @@ pub(crate) fn every_minutes(level: &str) -> Option<f32> {
 pub(crate) struct Ctx<'a> {
     /// The player's bus.
     pub player: Option<PlayerBox>,
+    /// The other players' buses in a LAN session (the host's director: their session ids
+    /// and boxes) - an event may be put on the road for any of them.
+    pub others: &'a [(u32, PlayerBox)],
+    /// The host's event as it last told it (a client's director mirrors it).
+    pub remote: Option<&'a omsi_net::world::TrafficEvent>,
     /// The duty's stops from the next one on: the stop's object and where it is.
     pub stops: &'a [(i64, DVec3)],
     /// The bus's horn sounds.
@@ -223,6 +248,9 @@ pub(crate) struct Ctx<'a> {
 struct Active {
     kind: Kind,
     car: u64,
+    /// The player it was put on the road for: None this game's own bus, else a LAN
+    /// player's session id.
+    target: Option<u32>,
     /// The traffic's time when it began (s).
     started: f32,
     /// Its time has been set from the bus coming up to it (a delivery, a car in a stop).
@@ -262,8 +290,12 @@ pub(crate) struct Events {
     fail_logged: f32,
     /// The kind of the last event: the next is seldom the same.
     last_kind: Option<Kind>,
-    /// Objects the event set up (a breakdown's warning triangle) and where, taken away with it.
-    props: Vec<(crate::scene::TileGpu, DVec3)>,
+    /// Objects the event set up (a breakdown's warning triangle), where and which way they
+    /// face (deg), taken away with it.
+    props: Vec<(crate::scene::TileGpu, DVec3, f64)>,
+    /// A LAN client: the host's event as mirrored here, and the object place it was told.
+    mirrored: Option<omsi_net::world::TrafficEvent>,
+    mirrored_prop: Option<[f64; 4]>,
 }
 
 impl Events {
@@ -293,6 +325,8 @@ impl Events {
             fail_logged: f32::MIN,
             last_kind: None,
             props: Vec::new(),
+            mirrored: None,
+            mirrored_prop: None,
         })
     }
 
@@ -358,15 +392,27 @@ impl Events {
     /// Once a frame, after the traffic's step.
     pub(crate) fn tick(&mut self, dt: f32, t: &mut Traffic, w: &World, r: &Renderer, scene: &mut Scene, cx: &Ctx) {
         if !cx.host {
+            self.mirror(w, r, scene, cx.remote);
             return;
         }
-        let Some(player) = cx.player else { return };
         if let Some(a) = self.active.take() {
-            match self.follow(a, dt, t, w, cx, player) {
+            // (the bus it is for: this game's own, or a LAN player's - gone, it ends)
+            let bus = match a.target {
+                None => cx.player,
+                Some(id) => cx.others.iter().find(|o| o.0 == id).map(|o| o.1),
+            };
+            let next = match bus {
+                Some(bus) => self.follow(a, dt, t, w, cx, bus),
+                None => {
+                    self.player_left(&a, t, w, cx);
+                    None
+                }
+            };
+            match next {
                 Some(a) => self.active = Some(a),
                 None => {
                     // (what it set up goes with it)
-                    for (g, _) in self.props.drain(..) {
+                    for (g, ..) in self.props.drain(..) {
                         w.remove_helper_object(r, scene, g);
                     }
                     let every = self.cfg.every_min.unwrap_or(8.0) * 60.0;
@@ -379,7 +425,14 @@ impl Events {
         if !due || t.loading_phase() {
             return;
         }
-        match self.start(t, w, r, scene, cx, player) {
+        // whose bus it is for: by lot among the players (a forced one: this game's own)
+        let mut buses: Vec<(Option<u32>, PlayerBox)> = cx.player.map(|p| (None, p)).into_iter().chain(cx.others.iter().map(|o| (Some(o.0), o.1))).collect();
+        if buses.is_empty() {
+            return;
+        }
+        let k = if self.forced.is_some() && cx.player.is_some() { 0 } else { ((self.unit() * buses.len() as f32) as usize).min(buses.len() - 1) };
+        let (target, player) = buses.swap_remove(k);
+        match self.start(t, w, r, scene, cx, target, player) {
             Some(a) => {
                 self.forced = None;
                 self.last_kind = Some(a.kind);
@@ -390,8 +443,11 @@ impl Events {
     }
 
     /// Put an event on the road: the forced one, or one that fits the time and the place.
-    fn start(&mut self, t: &mut Traffic, w: &World, r: &Renderer, scene: &mut Scene, cx: &Ctx, player: PlayerBox) -> Option<Active> {
+    #[allow(clippy::too_many_arguments)]
+    fn start(&mut self, t: &mut Traffic, w: &World, r: &Renderer, scene: &mut Scene, cx: &Ctx, target: Option<u32>, player: PlayerBox) -> Option<Active> {
         let (centre, heading, ..) = player;
+        // (this game's own bus has its duty: its route, its stops; a LAN player's is its own)
+        let own = target.is_none();
         let hour = (t.day_time / 3600.0).rem_euclid(24.0);
         let kinds: Vec<Kind> = match self.forced {
             Some(k) => vec![k],
@@ -403,7 +459,7 @@ impl Events {
                 if self.cfg.delivery && delivery_hours(t.working_day(), t.weekday, hour) {
                     k.push((Kind::Delivery, 1.2));
                 }
-                if self.cfg.stop && (7.0..20.0).contains(&hour) && !cx.stops.is_empty() {
+                if self.cfg.stop && own && (7.0..20.0).contains(&hour) && !cx.stops.is_empty() {
                     k.push((Kind::Stop, 1.0));
                 }
                 // (an emergency vehicle catches up with a bus that drives)
@@ -438,8 +494,9 @@ impl Events {
         // (the road ahead: none where the bus stands off the road - a depot, a car park; a car
         // in a stop goes by the duty's route then)
         let under = crate::demo::lane_under(&t.net, centre, heading);
+        let route = if own { self.route.clone() } else { Vec::new() };
         let (ahead, branch) = match under {
-            Some((lane, s)) => road_ahead(&t.net, lane, s, &self.route, AHEAD_MAX + CLEAR_AROUND + 10.0),
+            Some((lane, s)) => road_ahead(&t.net, lane, s, &route, AHEAD_MAX + CLEAR_AROUND + 10.0),
             None => (Vec::new(), 0.0),
         };
         // (no further than where the bus may turn off: that far it surely comes)
@@ -468,7 +525,7 @@ impl Events {
                     let first = self.between(0.0, AHEAD_MAX - AHEAD_MIN);
                     for k in 0..4 {
                         let offset = first + k as f32 * 170.0;
-                        let Some((l, s)) = self.place_on_road(t, w, &ahead, kind, offset, reach).or_else(|| self.place_on_road(t, w, &ahead, kind, offset, f32::MAX)) else { break };
+                        let Some((l, s)) = self.place_on_road(t, w, &ahead, kind, offset, reach, cx.others).or_else(|| self.place_on_road(t, w, &ahead, kind, offset, f32::MAX, cx.others)) else { break };
                         let (lat, names, tonnes, until) = match kind {
                             Kind::Breakdown => (LAT_BREAKDOWN, &BREAKDOWN_CARS[..], 2.0, day_time + 1800.0),
                             _ => (LAT_DELIVERY, &DELIVERY_VANS[..], 7.5, day_time + 1200.0),
@@ -480,7 +537,7 @@ impl Events {
                     }
                     got
                 }
-                Kind::Stop => self.place_in_stop(t, w, &ahead, cx, centre).and_then(|(l, s, stop)| {
+                Kind::Stop if own => self.place_in_stop(t, w, &ahead, cx, centre).and_then(|(l, s, stop)| {
                     t.spawn_event_car(w, r, scene, l, s, LAT_STOP * side, &STOP_CARS, 2.0, true, day_time + 1800.0).map(|id| (id, Some(stop), l, s))
                 }),
                 Kind::Slow | Kind::Learner if !ahead.is_empty() => {
@@ -488,7 +545,7 @@ impl Events {
                     let first = self.between(0.0, MOVING_AHEAD.1 - MOVING_AHEAD.0);
                     for k in 0..4 {
                         let offset = first + k as f32 * 130.0;
-                        let Some((l, s)) = self.place_moving(t, w, &ahead, kind, offset, reach).or_else(|| self.place_moving(t, w, &ahead, kind, offset, f32::MAX)) else { break };
+                        let Some((l, s)) = self.place_moving(t, w, &ahead, kind, offset, reach, cx.others).or_else(|| self.place_moving(t, w, &ahead, kind, offset, f32::MAX, cx.others)) else { break };
                         let limit = t.net.lanes[l].speed_limit_kmh.max(20.0);
                         let (names, role, kmh) = match kind {
                             Kind::Slow => (&SLOW_LORRIES[..], EventRole::Slow, 25.0),
@@ -503,7 +560,7 @@ impl Events {
                 }
                 Kind::Emergency => {
                     // (a few places back along the road, as a car may be passing the first)
-                    let places = under.map(|(lane, s)| self.place_behind(t, w, lane, s, centre)).unwrap_or_default();
+                    let places = under.map(|(lane, s)| self.place_behind(t, w, lane, s, centre, cx.others)).unwrap_or_default();
                     let ty = if places.is_empty() { None } else { t.event_type(AMBULANCE) };
                     let mut got = None;
                     for (l, s, mut way) in places.into_iter().take(4) {
@@ -522,11 +579,11 @@ impl Events {
             };
             if let Some((id, stop, l, s)) = placed {
                 let p = t.net.lanes[l].at(s).0;
-                log::info!("traffic event: a {} {:.0} m from the bus at ({:.0}, {:.0}), car {id} on lane {l} at {s:.0} m", kind.name(), (p - centre).truncate().length(), p.x, p.y);
+                log::info!("traffic event: a {} {:.0} m from {} at ({:.0}, {:.0}), car {id} on lane {l} at {s:.0} m", kind.name(), (p - centre).truncate().length(), target.map(|id| format!("player {id}'s bus")).unwrap_or_else(|| "the bus".into()), p.x, p.y);
                 if kind == Kind::Breakdown {
                     self.set_up_triangle(t, w, r, scene, l, s, side);
                 }
-                return Some(Active { kind, car: id, started: t.time, timed: false, near: false, stop, honked: false, closest: f64::MAX, followed: 0.0, pulled_over: 0 });
+                return Some(Active { kind, car: id, target, started: t.time, timed: false, near: false, stop, honked: false, closest: f64::MAX, followed: 0.0, pulled_over: 0 });
             }
             log::debug!("traffic events: no place for a {} this time", kind.name());
         }
@@ -546,7 +603,8 @@ impl Events {
 
     /// A place on the road ahead for a breakdown or a delivery: `AHEAD_MIN` to `AHEAD_MAX`
     /// m on, tried from `offset` on round, the first that fits (`road_fits`).
-    fn place_on_road(&self, t: &Traffic, w: &World, ahead: &[(usize, f32)], kind: Kind, offset: f32, reach: f32) -> Option<(usize, f32)> {
+    #[allow(clippy::too_many_arguments)]
+    fn place_on_road(&self, t: &Traffic, w: &World, ahead: &[(usize, f32)], kind: Kind, offset: f32, reach: f32, others: &[(u32, PlayerBox)]) -> Option<(usize, f32)> {
         // (`OMSI_EVENT_NEAR=1`: a forced event 95 - 140 m ahead, in plain sight, for looking at
         // it from the bus)
         let near = self.forced.is_some() && omsi_cfg::env::var_os("OMSI_EVENT_NEAR").is_some();
@@ -577,7 +635,7 @@ impl Events {
                 why[3] += 1;
                 continue;
             }
-            if !near && !unseen(t, w, lane.at(s).0) {
+            if !near && !unseen(t, w, lane.at(s).0, others) {
                 why[4] += 1;
                 continue;
             }
@@ -591,7 +649,8 @@ impl Events {
 
     /// A place on the road ahead for a slow lorry (out of town) or a learner (in town):
     /// `MOVING_AHEAD` m on, tried from `offset` on round, the first away from junctions.
-    fn place_moving(&self, t: &Traffic, w: &World, ahead: &[(usize, f32)], kind: Kind, offset: f32, reach: f32) -> Option<(usize, f32)> {
+    #[allow(clippy::too_many_arguments)]
+    fn place_moving(&self, t: &Traffic, w: &World, ahead: &[(usize, f32)], kind: Kind, offset: f32, reach: f32, others: &[(u32, PlayerBox)]) -> Option<(usize, f32)> {
         let span = MOVING_AHEAD.1 - MOVING_AHEAD.0;
         let mut k = 0.0;
         let mut why = [0u32; 4];
@@ -613,7 +672,7 @@ impl Events {
                 why[2] += 1;
                 continue;
             }
-            if !unseen(t, w, lane.at(s).0) {
+            if !unseen(t, w, lane.at(s).0, others) {
                 why[3] += 1;
                 continue;
             }
@@ -628,7 +687,7 @@ impl Events {
     /// Places on the road behind the bus for an emergency vehicle, nearest first: `BEHIND` m
     /// back along the road (through the lane leading in most nearly straight on), out of
     /// sight, not in a junction or at a traffic light; with the lanes from there to the bus's.
-    fn place_behind(&self, t: &Traffic, w: &World, lane: usize, s: f32, centre: DVec3) -> Vec<(usize, f32, Vec<usize>)> {
+    fn place_behind(&self, t: &Traffic, w: &World, lane: usize, s: f32, centre: DVec3, others: &[(u32, PlayerBox)]) -> Vec<(usize, f32, Vec<usize>)> {
         let mut out = Vec::new();
         let debug = omsi_cfg::env::var_os("OMSI_DEBUG_EVENTS").is_some();
         let mut d = BEHIND.0;
@@ -649,12 +708,12 @@ impl Events {
             }
             let p = ln.at(s2).0;
             let off = (p - centre).truncate().length();
-            if off > 250.0 && t.may_appear(w, p) {
+            if off > 250.0 && out_of_sight(t, w, p, others) {
                 out.push((l, s2, way));
                 continue;
             }
             if debug {
-                log::info!("  behind the bus {:.0} m: {off:.0} m off, in sight {}", d - 30.0, !t.may_appear(w, p));
+                log::info!("  behind the bus {:.0} m: {off:.0} m off, in sight {}", d - 30.0, !out_of_sight(t, w, p, others));
             }
         }
         out
@@ -697,7 +756,7 @@ impl Events {
                 }
                 continue;
             };
-            if !t.may_appear(w, t.net.lanes[l].at(s).0) {
+            if !out_of_sight(t, w, t.net.lanes[l].at(s).0, cx.others) {
                 if debug {
                     log::info!("  stop {id}: in sight");
                 }
@@ -739,7 +798,7 @@ impl Events {
         match a.kind {
             Kind::Breakdown => {
                 // passed and out of sight: it has been seen to (and drives off, out of sight)
-                if a.near && behind_bus && t.may_appear(w, p) && self.props.iter().all(|(_, q)| t.may_appear(w, *q)) {
+                if a.near && behind_bus && out_of_sight(t, w, p, cx.others) && self.props.iter().all(|(_, q, _)| out_of_sight(t, w, *q, cx.others)) {
                     end_at = Some(now);
                     gone = true;
                     why = "passed";
@@ -758,13 +817,13 @@ impl Events {
                     end_at = Some(now + self.between(180.0, 420.0) as f64);
                     why = "the bus comes up";
                 }
-                if a.stop.is_some_and(|s| !cx.stops.iter().any(|x| x.0 == s)) {
+                if a.target.is_none() && a.stop.is_some_and(|s| !cx.stops.iter().any(|x| x.0 == s)) {
                     // the stop served: the driver comes back
                     end_at = Some(now + self.between(6.0, 14.0) as f64);
                     a.stop = None;
                     why = "the stop served";
                 }
-                if cx.horn && dist < 70.0 && !a.honked {
+                if a.target.is_none() && cx.horn && dist < 70.0 && !a.honked {
                     a.honked = true;
                     end_at = Some(now + self.between(8.0, 15.0) as f64);
                     why = "honked at";
@@ -825,7 +884,7 @@ impl Events {
         let hr = (h as f64).to_radians();
         let at = q + DVec3::new(hr.cos(), -hr.sin(), 0.0) * (TRIANGLE_LAT * side) as f64;
         match w.add_helper_object(r, scene, &sco, at, h as f64, &[]) {
-            Some(g) => self.props.push((g, at)),
+            Some(g) => self.props.push((g, at, h as f64)),
             None => log::warn!("traffic events: the warning triangle could not be set up ({sco})"),
         }
     }
@@ -833,9 +892,24 @@ impl Events {
     /// The event on the road now as the maps show it (`navigator::NavEvent`): where its car
     /// is, its icon and its name.
     pub(crate) fn markers(&self, t: &Traffic) -> Vec<crate::navigator::NavEvent> {
-        let Some(a) = self.active.as_ref() else { return Vec::new() };
-        let Some(car) = t.cars.iter().find(|c| c.id == a.car) else { return Vec::new() };
-        let (icon, name) = match a.kind {
+        // (a LAN client: the host's, as mirrored)
+        let (kind, car) = match (self.active.as_ref(), self.mirrored.as_ref()) {
+            (Some(a), _) => (a.kind, a.car),
+            (None, Some(m)) => match Kind::parse(&m.kind) {
+                Some(k) => (k, m.car as u64),
+                None => return Vec::new(),
+            },
+            (None, None) => return Vec::new(),
+        };
+        // (a client too far off to have the car: where the host last said it was)
+        let position = match t.cars.iter().find(|c| c.id == car) {
+            Some(c) => c.vehicle.position,
+            None => match self.mirrored.as_ref().and_then(|m| m.at) {
+                Some([x, y]) if self.active.is_none() => DVec3::new(x, y, 0.0),
+                _ => return Vec::new(),
+            },
+        };
+        let (icon, name) = match kind {
             Kind::Breakdown => ("warning", "Breakdown"),
             Kind::Delivery => ("inventory_2", "Delivery"),
             Kind::Stop => ("local_parking", "Car in the bus stop"),
@@ -843,7 +917,63 @@ impl Events {
             Kind::Slow => ("lorry", "Slow lorry"),
             Kind::Learner => ("learner", "Learner driver"),
         };
-        vec![crate::navigator::NavEvent { position: car.vehicle.position, icon, name: omsi_ui::tr(name).into_owned(), emergency: a.kind == Kind::Emergency }]
+        vec![crate::navigator::NavEvent { position, icon, name: omsi_ui::tr(name).into_owned(), emergency: kind == Kind::Emergency }]
+    }
+
+    /// The event on the road now as the clients of a LAN session are told it (host).
+    pub(crate) fn net_event(&self, t: &Traffic) -> Option<omsi_net::world::TrafficEvent> {
+        let a = self.active.as_ref()?;
+        let at = t.cars.iter().find(|c| c.id == a.car).map(|c| [c.vehicle.position.x, c.vehicle.position.y]);
+        Some(omsi_net::world::TrafficEvent {
+            at,
+            kind: a.kind.code().into(),
+            car: a.car.min(omsi_net::world::MAX_ID as u64) as u32,
+            player: a.target.unwrap_or(0),
+            prop: self.props.first().map(|(_, p, h)| [p.x, p.y, p.z, *h]),
+        })
+    }
+
+    /// A LAN client: the host's event as it was told (`remote`) - its warning triangle set
+    /// up here where the host's stands (and taken away with it); the maps show its badge
+    /// (`markers`).
+    fn mirror(&mut self, w: &World, r: &Renderer, scene: &mut Scene, remote: Option<&omsi_net::world::TrafficEvent>) {
+        let want = remote.and_then(|e| e.prop);
+        if want != self.mirrored_prop {
+            for (g, ..) in self.props.drain(..) {
+                w.remove_helper_object(r, scene, g);
+            }
+            if let (Some([x, y, z, h]), Some(sco)) = (want, want.and_then(|_| triangle_sco())) {
+                let at = DVec3::new(x, y, z);
+                match w.add_helper_object(r, scene, &sco, at, h, &[]) {
+                    Some(g) => self.props.push((g, at, h)),
+                    None => log::warn!("traffic events: the host's warning triangle could not be set up here ({sco})"),
+                }
+            }
+            self.mirrored_prop = want;
+        }
+        if remote.map(|e| (&e.kind, e.car)) != self.mirrored.as_ref().map(|e| (&e.kind, e.car)) {
+            match remote {
+                Some(e) => log::info!("traffic event (the host's): a {} for player {}, car {}", e.kind, e.player, e.car),
+                None if self.mirrored.is_some() => log::info!("traffic event (the host's): over"),
+                None => {}
+            }
+        }
+        self.mirrored = remote.cloned();
+    }
+
+    /// The LAN player an event was for has left the session: it ends at once (a car that
+    /// stood drives off, or goes where nobody sees it).
+    fn player_left(&mut self, a: &Active, t: &mut Traffic, w: &World, cx: &Ctx) {
+        log::info!("traffic event: the {} is over (its player left)", a.kind.name());
+        let now = t.day_time;
+        let hidden = t.cars.iter().find(|c| c.id == a.car).is_some_and(|c| out_of_sight(t, w, c.vehicle.position, cx.others));
+        if let Some(c) = t.cars.iter_mut().find(|c| c.id == a.car) {
+            if let Some(h) = c.halt.as_mut() {
+                h.until = h.until.min(now);
+                c.gone |= hidden;
+            }
+            c.event = None;
+        }
     }
 
     /// Keep a moving event going: an emergency vehicle until it is well past the bus, a slow
@@ -1076,10 +1206,24 @@ fn leads_away(net: &Network, n: usize, o: usize) -> bool {
     turn_deg(heading_on(n), heading_on(o)).abs() > 30.0
 }
 
-/// May a car appear at `p` without the player seeing it happen: out of sight
-/// (`Traffic::may_appear`), or so far off that it is a few pixels in the picture.
-fn unseen(t: &Traffic, w: &World, p: DVec3) -> bool {
-    t.viewer.is_some_and(|v| (p - v.pos).length() > UNSEEN_BEYOND) || t.may_appear(w, p)
+/// May a car appear at `p` without anybody seeing it happen: out of this game's sight
+/// (`Traffic::may_appear`) or so far off that it is a few pixels in the picture, and out of
+/// every other LAN player's (`unseen_by`).
+fn unseen(t: &Traffic, w: &World, p: DVec3, others: &[(u32, PlayerBox)]) -> bool {
+    (t.viewer.is_some_and(|v| (p - v.pos).length() > UNSEEN_BEYOND) || t.may_appear(w, p)) && others.iter().all(|o| unseen_by(&o.1, p))
+}
+
+/// Out of this game's sight (`Traffic::may_appear`) and of every other LAN player's.
+fn out_of_sight(t: &Traffic, w: &World, p: DVec3, others: &[(u32, PlayerBox)]) -> bool {
+    t.may_appear(w, p) && others.iter().all(|o| unseen_by(&o.1, p))
+}
+
+/// Is `p` out of sight of a LAN player in bus `b`, whose camera this game does not know:
+/// further off than `UNSEEN_BEYOND`, or more than 120 m off well behind the bus.
+fn unseen_by(b: &PlayerBox, p: DVec3) -> bool {
+    let rel = (p - b.0).truncate();
+    let d = rel.length();
+    d > UNSEEN_BEYOND || (d > 120.0 && rel.dot(dir(b.1)) < -0.5 * d)
 }
 
 fn turn_deg(a: f32, b: f32) -> f32 {
@@ -1129,6 +1273,26 @@ mod tests {
         assert_eq!(turn_deg(350.0, 10.0), 20.0);
         assert_eq!(turn_deg(10.0, 350.0), -20.0);
         assert_eq!(turn_deg(90.0, 90.0), 0.0);
+    }
+
+    #[test]
+    fn another_players_bus_sees_ahead_and_not_far_behind() {
+        // a bus at the origin facing north
+        let bus: PlayerBox = (DVec3::ZERO, 0.0, 6.0, 1.25, 10.0);
+        assert!(!unseen_by(&bus, DVec3::new(0.0, 300.0, 0.0)));
+        assert!(unseen_by(&bus, DVec3::new(0.0, 700.0, 0.0)));
+        assert!(unseen_by(&bus, DVec3::new(10.0, -200.0, 0.0)));
+        assert!(!unseen_by(&bus, DVec3::new(0.0, -60.0, 0.0)));
+        // beside it is in sight
+        assert!(!unseen_by(&bus, DVec3::new(300.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn the_kinds_go_by_their_lan_names() {
+        for k in [Kind::Breakdown, Kind::Delivery, Kind::Stop, Kind::Emergency, Kind::Slow, Kind::Learner] {
+            assert_eq!(Kind::parse(k.code()), Some(k));
+            assert!(omsi_net::world::EVENT_KINDS.contains(&k.code()));
+        }
     }
 
     #[test]
