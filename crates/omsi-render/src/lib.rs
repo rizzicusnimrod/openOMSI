@@ -862,6 +862,10 @@ pub struct Lighting {
     /// chain has run them together, and what shimmer is left is a fraction of a
     /// full-resolution sample's; 4 is near the calm of the full chain.
     pub led_mips: f32,
+    /// How bright the night looks against the picture's own (1; the settings' 10 .. 200 %):
+    /// the enhanced picture's exposure by night is taken that much up or down, less and less
+    /// through the dusk and not at all by day (`night_exposure_weight`).
+    pub night_brightness: f32,
     /// The player's vehicle's velocity (m/s, world): at speed the airstream drives the drops
     /// on its glass up the windscreen and back along the side windows.
     pub glass_wind: Vec3,
@@ -944,6 +948,7 @@ impl Default for Lighting {
             envir_tint: [Vec3::ONE; 3],
             led_glow: 1.5,
             led_mips: 1.3,
+            night_brightness: 1.0,
             glass_wind: Vec3::ZERO,
             moon_dir: Vec3::new(0.0, -0.5, -0.866),
             moon_illum: 0.0,
@@ -7443,7 +7448,11 @@ impl Renderer {
         };
         let full = atmosphere::exposure_for(st.e_sun + e_rest).max(1e-6).ln();
         let shaded = atmosphere::exposure_for(st.e_sun * cloud_t + e_rest).max(1e-6).ln();
-        let target = full + (shaded - full) * CLOUD_SHADE_ADAPT;
+        let mut target = full + (shaded - full) * CLOUD_SHADE_ADAPT;
+        // the player's night brightness (`Lighting::night_brightness`), by the natural light:
+        // the street lamps and the headlights the eye adapts to do not take it away
+        let natural = st.e_sun + (st.e_rest - st.e_artificial).max(0.0);
+        target += lighting.night_brightness.clamp(0.05, 4.0).ln() * night_exposure_weight(natural);
         let log_exposure = match self.exposure {
             // (the eye takes to brighter light within a second, to the dark over several:
             // the cones' light adaptation is fast, their dark adaptation slow)
@@ -12121,6 +12130,15 @@ fn lamp_sky_glow(scene: &Scene, cam_rel: Vec3) -> f32 {
     sum / SKY_GLOW_REF
 }
 
+/// How much of the night brightness setting the exposure takes (`Lighting::night_brightness`)
+/// in this natural light (irradiance, 1 = 10 000 lux): all of it under 10 lux (deep dusk,
+/// the night), none over 1000 (the sun just set and brighter), in between by the light's
+/// logarithm.
+fn night_exposure_weight(e: f32) -> f32 {
+    let lux = (e * 10_000.0).max(1e-6);
+    1.0 - atmosphere::smoothstep(1.0, 3.0, lux.log10())
+}
+
 /// The light of the lamps and the headlights on the ground the camera looks at (irradiance,
 /// 1 = 10 000 lux): the mean over a dozen points from 5 to 30 m ahead and to either side,
 /// each lit as the enhanced pass lights it (a street lamp down and out, a headlamp ahead
@@ -15485,6 +15503,56 @@ mod tests {
         assert_eq!(distances.len(), 2);
         assert_eq!(distances[&origin_key(a)], 3.0);
         assert_eq!(distances[&origin_key(c)], 5.0);
+    }
+
+    #[test]
+    fn the_night_brightness_setting_leaves_the_day_alone() {
+        use super::night_exposure_weight as w;
+        assert_eq!(w(10.0), 0.0); // a sunny day
+        assert_eq!(w(0.1), 0.0); // 1000 lux, the sun at the horizon
+        assert!((w(0.01) - 0.5).abs() < 1e-3); // 100 lux, dusk
+        assert_eq!(w(0.001), 1.0); // 10 lux
+        assert_eq!(w(3e-5), 1.0); // a full moon
+        assert_eq!(w(0.0), 1.0);
+    }
+
+    #[test]
+    fn a_street_lamp_keeps_its_shadow_map_until_a_clearly_stronger_one_comes() {
+        use super::{hold_lamp_slots, LampSlot, LAMP_SHADOWS};
+        use glam::DVec3;
+        let lamp = |x: f64| DVec3::new(x, 0.0, 8.0);
+        let mut slots: [Option<LampSlot>; LAMP_SHADOWS] = Default::default();
+        // the first frame: the best four, shown at once
+        let chosen: Vec<(f32, DVec3)> = (0..6).map(|k| (10.0 - k as f32, lamp(k as f64 * 30.0))).collect();
+        let held = hold_lamp_slots(&mut slots, &chosen, 0.016);
+        assert_eq!(held.len(), 4);
+        assert!(held.iter().all(|&(c, fade)| c < 4 && fade == 1.0));
+        // a fifth lamp scoring a shade over the weakest holder: nothing changes, frame after
+        // frame, as the scores see-saw
+        for k in 0..20 {
+            let wobble = if k % 2 == 0 { 7.2 } else { 6.9 };
+            let chosen = vec![(10.0, lamp(0.0)), (9.0, lamp(30.0)), (8.0, lamp(60.0)), (wobble, lamp(120.0)), (7.0, lamp(90.0))];
+            let held = hold_lamp_slots(&mut slots, &chosen, 0.016);
+            assert_eq!(held.len(), 4);
+            assert!(held.iter().all(|&(c, fade)| chosen[c].1 != lamp(120.0) && fade == 1.0), "{held:?}");
+        }
+        // a clearly stronger one: the weakest fades out, then the new one fades in
+        let chosen = vec![(20.0, lamp(150.0)), (10.0, lamp(0.0)), (9.0, lamp(30.0)), (8.0, lamp(60.0)), (7.0, lamp(90.0))];
+        hold_lamp_slots(&mut slots, &chosen, 0.1);
+        let held = hold_lamp_slots(&mut slots, &chosen, 0.1);
+        let fade_of = |held: &[(usize, f32)], at: DVec3| held.iter().find(|h| chosen[h.0].1 == at).map(|h| h.1);
+        assert!(fade_of(&held, lamp(90.0)).is_some_and(|f| f < 1.0));
+        assert_eq!(fade_of(&held, lamp(150.0)), None);
+        let mut held = held;
+        for _ in 0..10 {
+            held = hold_lamp_slots(&mut slots, &chosen, 0.1);
+        }
+        assert_eq!(fade_of(&held, lamp(90.0)), None);
+        assert!(fade_of(&held, lamp(150.0)).is_some_and(|f| f > 0.0 && f <= 1.0));
+        // a jump: all four new, at once
+        let chosen: Vec<(f32, DVec3)> = (0..4).map(|k| (5.0, lamp(5000.0 + k as f64 * 30.0))).collect();
+        let held = hold_lamp_slots(&mut slots, &chosen, 0.016);
+        assert!(held.len() == 4 && held.iter().all(|h| h.1 == 1.0));
     }
 
     /// Every shader module parses and validates as the device will see it, translates to

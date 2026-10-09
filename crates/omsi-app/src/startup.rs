@@ -398,6 +398,8 @@ pub(crate) static ENHANCED_PLUS: std::sync::atomic::AtomicBool = std::sync::atom
 /// Vanilla graphics: the picture as OMSI 2 draws it (no Vanilla+ extras, see
 /// `omsi_render::Lighting::classic`).
 pub(crate) static CLASSIC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The night's brightness in per cent (`Settings::night_brightness`), for `weather_lighting`.
+pub(crate) static NIGHT_BRIGHTNESS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
 /// Volume of the AI vehicles and of the scenery's own sounds (OMSI's `sound_ai` and
 /// `sound_scenery`), as the bits of an f32.
 pub(crate) static SOUND_AI: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);

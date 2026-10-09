@@ -469,6 +469,17 @@ pub(crate) fn weather_lighting(
     let mut lighting = lights::lighting_from(daylight, w.fog.0);
     lighting.enhanced = ENHANCED.load(std::sync::atomic::Ordering::Relaxed);
     lighting.classic = CLASSIC.load(std::sync::atomic::Ordering::Relaxed);
+    // the player's night brightness (`Settings::night_brightness`): the enhanced picture's
+    // exposure takes it; the plain shading's night light is scaled by it, more as it gets
+    // darker
+    lighting.night_brightness = crate::startup::NIGHT_BRIGHTNESS.load(std::sync::atomic::Ordering::Relaxed).clamp(10, 200) as f32 / 100.0;
+    if !lighting.enhanced && lighting.night_brightness != 1.0 {
+        let k = 1.0 + (lighting.night_brightness - 1.0) * lighting.night.clamp(0.0, 1.0);
+        lighting.secondary *= k;
+        lighting.ambient *= k;
+        lighting.sky_color *= k;
+        lighting.fog_color *= k;
+    }
     let (density, offset) = clouds_of(w, cloud_drift);
     lighting.cloud_density = density;
     lighting.cloud_offset = offset;

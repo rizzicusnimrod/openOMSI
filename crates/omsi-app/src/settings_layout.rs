@@ -232,6 +232,7 @@ pub const OPTIONS: &[PageDef] = &[
                 it("sel anisotropy", "Texture filtering", "Keeps roads and walls sharp at a slant"),
             ]),
             sec("Lighting and shadows", &[
+                it("night_brightness", "Night brightness", "How bright nights look: lower is darker, 100% as it comes"),
                 it("shadows", "Sun shadows", "Objects cast shadows in the sunlight"),
                 it("sel shadow_size", "Shadow quality", "Sharper shadows cost more"),
                 it("sel shadow_casters", "What casts shadows", ""),

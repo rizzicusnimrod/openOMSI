@@ -582,6 +582,13 @@ fn graphics_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, cols: [Rect; 2]) ->
             *dirty = 0.3;
         }
     }
+    // (how bright the night looks, in per cent of the picture's own: some find it too well
+    // lit away from the bus's headlights)
+    let mut night = get(s, "night_brightness").as_f64().unwrap_or(100.0) as f32;
+    if ui.slider("s-night", c.row(), &mut night, 10.0, 200.0, 5.0, "Night brightness", &|v| format!("{}%", v.round() as i64)) {
+        s["night_brightness"] = json!(((night / 5.0).round() * 5.0).clamp(10.0, 200.0) as i64);
+        *dirty = 0.3;
+    }
     // (the models' `[isshadow]` blob is what OMSI draws under a vehicle in every graphics
     // mode, the vanilla one included, so its switch is not part of the extras above)
     toggle_setting(ui, s, dirty, c.row(), "OMSI's shadow meshes (under vehicles)", "shadow_blobs");
@@ -2661,7 +2668,7 @@ mod settings_tests {
     fn by_tab() -> Vec<Vec<&'static str>> {
         let mut graphics = vec![
             "s-gp-sel", "s-gp-load", "s-gp-del", "s-gp-name", "s-gp-save",
-            "s-preset", "s-graphics", "s-msaa", "s-scale", "s-af", "s-shadow", "set-ssao", "set-shadows", "s-casters", "set-detail_textures", "s-led", "s-led-mip", "set-shadow_blobs", "set-reflections", "set-clouds",
+            "s-preset", "s-graphics", "s-msaa", "s-scale", "s-af", "s-shadow", "set-ssao", "set-shadows", "s-casters", "set-detail_textures", "s-led", "s-led-mip", "s-night", "set-shadow_blobs", "set-reflections", "set-clouds",
             "set-fullscreen", "s-res", "set-vsync", "s-fps", "s-view", "s-maxobj", "s-minobj", "s-mirror", "s-mirror-refresh", "s-texmem", "set-texture_compression",
         ];
         if !cfg!(target_os = "macos") {

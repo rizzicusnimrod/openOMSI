@@ -1110,6 +1110,7 @@ fn steps_of(verb: &str) -> Option<Vec<f32>> {
         "pax" => PAX.to_vec(),
         "volume" => VOLUME.to_vec(),
         "led_glow" => (0..16).map(|v| v as f32).collect(),
+        "night_brightness" => (2..=40).map(|v| v as f32 * 5.0).collect(),
         "led_mips" => (0..=80).map(|v| v as f32 * 0.05).collect(),
         "ui_scale" => (10..=40).map(|v| v as f32 * 0.05).collect(),
         "chat_size" => (5..=30).map(|v| v as f32 * 0.1).collect(),
@@ -1250,6 +1251,7 @@ fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
         "pax" => s.pax_density,
         "volume" => s.volume,
         "led_glow" => s.led_glow as f32,
+        "night_brightness" => s.night_brightness as f32,
         "led_mips" => s.led_mips,
         "ctrl_deadzone" => s.ctrl_deadzone,
         "pedal_t" => s.pedal_throttle,
@@ -1335,6 +1337,11 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
         "led_glow" => {
             app.settings.led_glow = v.round() as _;
             Some(("led_glow", app.settings.led_glow.to_string()))
+        }
+        "night_brightness" => {
+            app.settings.night_brightness = v.round().clamp(10.0, 200.0) as u8;
+            crate::startup::NIGHT_BRIGHTNESS.store(app.settings.night_brightness as u32, std::sync::atomic::Ordering::Relaxed);
+            Some(("night_brightness", app.settings.night_brightness.to_string()))
         }
         "led_mips" => {
             app.settings.led_mips = v.clamp(0.0, 4.0);
@@ -2370,6 +2377,7 @@ fn reload_settings(app: &mut App) {
 fn sync_live(app: &mut App) {
     let s = &app.settings;
     crate::startup::SOUND_AI.store(s.vol_ai.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    crate::startup::NIGHT_BRIGHTNESS.store(s.night_brightness as u32, std::sync::atomic::Ordering::Relaxed);
     omsi_sim::particles::set_vehicle_amount(s.exhaust);
     crate::startup::SOUND_SCENERY.store(s.vol_scenery.to_bits(), std::sync::atomic::Ordering::Relaxed);
     omsi_audio::DOPPLER.store(s.doppler, std::sync::atomic::Ordering::Relaxed);
@@ -2434,6 +2442,7 @@ fn options_pages(app: &App) -> Vec<Page> {
         switch_row(app, "ssao", "Ambient occlusion", later).filter(|_| !app.settings.ray_tracing()),
         pick("shadow_casters", "Shadows cast by", later),
         switch_row(app, "detail_textures", "Detail texturing up close", "The ground and large walls get fine grain when close"),
+        slider_row(app, "night_brightness", "Night brightness", "How bright nights look: lower is darker, 100% as it comes", &|v| format!("{}%", v as i64)),
         slider_row(app, "led_glow", "LED glow", "How strongly the dots of LED destination displays glow", &|v| format!("{}/15", v as i64)),
         slider_row(app, "led_mips", "LED mask mipmaps", "Keep the mip chain of the LED masks (smoother from a distance).", &|v| format!("{v:.2}")),
         switch_row(app, "reflections", "Reflection maps (paint, chrome, glass)", later).filter(|_| !app.settings.ray_tracing()),

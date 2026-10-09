@@ -224,6 +224,7 @@ pub(crate) fn launcher_statics() {
     let s = settings::Settings::load();
     ENHANCED.store(s.enhanced || omsi_cfg::env::var_os("OMSI_ENHANCED").is_some(), std::sync::atomic::Ordering::Relaxed);
     CLASSIC.store(s.classic(), std::sync::atomic::Ordering::Relaxed);
+    NIGHT_BRIGHTNESS.store(s.night_brightness as u32, std::sync::atomic::Ordering::Relaxed);
     CLOUDS.store(s.clouds && omsi_cfg::env::var_os("OMSI_NO_CLOUDS").is_none(), std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -371,6 +372,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
     );
     CLOUDS.store(settings.clouds && omsi_cfg::env::var_os("OMSI_NO_CLOUDS").is_none(), std::sync::atomic::Ordering::Relaxed);
     SOUND_AI.store(settings.vol_ai.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    NIGHT_BRIGHTNESS.store(settings.night_brightness as u32, std::sync::atomic::Ordering::Relaxed);
     omsi_sim::particles::set_vehicle_amount(settings.exhaust);
     crate::ui::CLASSIC_SETTINGS.store(settings.classic_ui, std::sync::atomic::Ordering::Relaxed);
     SOUND_SCENERY.store(settings.vol_scenery.to_bits(), std::sync::atomic::Ordering::Relaxed);
