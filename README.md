@@ -45,7 +45,13 @@ calendar, force feedback that feels like a bus, a photo mode and a new-look inte
 
 * `TH_Wald-traffic-addon.zip` - Thüringer Wald traffic by the hour, weekday and school holidays
   (1995-2003). It replaces `maps\TH_Wald\unsched_trafficdens.txt` and `Holidays*.txt`, so back
-  those up first if you want to go back.
+  those up first if you want to go back. It also adds the line **Multiplayer**
+  (`TTData\Multiplayer.ttl`): four tours for playing together, each on its own route, every two
+  hours from 4:00 to 24:00. MP 1 (731 Wurzbach), MP 2 (732/739 Bad Lemnitz, Lichtenhain) and MP 3
+  (735 Altenfeld) leave Lichtentanne ZOB together at every even hour, from stands A, B and C;
+  MP 4 (750 Rennsteigbus) leaves Wurzbach Markt at the same time. Start the session at an even
+  hour (for example 7:58), and each player picks one MP tour with the automatic start place. No AI
+  bus drives these tours.
 * `Budapest181-traffic-addon.zip` - Budapest 181 traffic by the hour, weekday and school holidays.
 
 **Updates:** this version does not update itself (the official openOMSI updater is switched off

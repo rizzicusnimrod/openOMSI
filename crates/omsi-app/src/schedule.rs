@@ -2046,6 +2046,10 @@ impl Schedule {
         day_time: f64,
         onto: Option<usize>,
     ) -> Placed {
+        // (a tour for the players alone - a map's multiplayer timetable - has no AI bus)
+        if players_only(&self.departures[i].ai_group) {
+            return Placed::Drop;
+        }
         let profile = omsi_cfg::env::var_os("OMSI_PROFILE").is_some();
         let t_spawn = std::time::Instant::now();
         let trip = &self.data.trips[self.departures[i].trip];
@@ -4273,6 +4277,13 @@ fn norm_vehicle_path(p: &str) -> String {
 /// The tour mask bits `clock`'s date selects: (the weekday's or public holiday's, the school
 /// holidays' or school days'). the original: bit 8 = runs in the school holidays,
 /// bit 9 = runs on school days.
+/// A tour whose AI group is `Players only` (TH_Wald's `Multiplayer.ttl`) is there to be
+/// driven by the players: no AI bus takes it when nobody does. (OMSI 2, which knows no such
+/// group, leaves it to the players as well.)
+fn players_only(group: &str) -> bool {
+    group.trim().eq_ignore_ascii_case("players only")
+}
+
 fn day_bits(calendar: &omsi_map::Calendar, clock: &omsi_sim::SimClock) -> (i32, i32) {
     let date = clock.date_code();
     let day_bit = if calendar.is_holiday(date) { 1 << 7 } else { 1 << clock.weekday() };
