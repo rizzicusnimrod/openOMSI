@@ -45,8 +45,11 @@ fn headlamp(t: vec3<f32>, dir: vec3<f32>, mode: f32) -> f32 {
     // fog lit it into a column of light over the lamp seen from behind)
     let glare = 0.015 / (1.0 + pow(max(v - cut, 0.0) / 4.0, 2.0));
     let edge = glare + 0.985 * smoothstep(-soft, soft, cut - v);
+    // (under the hot spot it falls off steeply: a reflector keeps the foreground some tenths
+    // of the hot spot or less, else the road a few metres ahead, nearest the lamp, was the
+    // brightest of the beam and the light seemed to lie on the ground at the bumper)
     let under = -0.57 - v;
-    let vert = mix(0.45, 1.0, smoothstep(-0.35, 0.0, under)) / (1.0 + pow(max(under - 0.6, 0.0) / 1.4, 1.6));
+    let vert = mix(0.45, 1.0, smoothstep(-0.35, 0.0, under)) / (1.0 + pow(max(under - 0.6, 0.0) / 0.8, 2.5));
     // (across: the hot spot's core, and a flood that widens the nearer the road - the
     // foreground is lit over the lane and the verges, the distance in a narrow band)
     let hk = (h - 1.5) / 7.0;

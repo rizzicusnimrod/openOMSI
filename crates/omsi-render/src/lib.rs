@@ -12222,7 +12222,7 @@ fn headlamp_profile(t: Vec3, dir: Vec3, mode: f32) -> f32 {
     let glare = 0.015 / (1.0 + ((v - cut).max(0.0) / 4.0).powi(2));
     let edge = glare + 0.985 * atmosphere::smoothstep(-soft, soft, cut - v);
     let under = -0.57 - v;
-    let vert = (0.45 + 0.55 * atmosphere::smoothstep(-0.35, 0.0, under)) / (1.0 + ((under - 0.6).max(0.0) / 1.4).powf(1.6));
+    let vert = (0.45 + 0.55 * atmosphere::smoothstep(-0.35, 0.0, under)) / (1.0 + ((under - 0.6).max(0.0) / 0.8).powf(2.5));
     let hk = (h - 1.5) / 7.0;
     let wide = 0.25 + 0.45 * atmosphere::smoothstep(1.0, 6.0, under);
     let across = (1.0 - wide) * (-hk * hk).exp() + wide * (-(h * h) / 1225.0).exp();
@@ -13758,6 +13758,8 @@ mod tests {
         assert!(headlamp_profile(at(6.0, -0.27), level, 1.0) > 0.3);
         assert!(headlamp_profile(at(3.0, 3.0), level, 1.0) < 0.02);
         assert!(headlamp_profile(at(0.0, -8.0), level, 1.0) < 0.2 * hot);
+        // (the road a few metres ahead, nearest the lamp, no brighter lit than the hot spot's)
+        assert!(headlamp_profile(at(0.0, -5.0), level, 1.0) < 0.05 * hot);
         // over the cut-off a lens's glare near the horizon, none up in the sky (a column of
         // light over the lamp in the rain)
         assert!(headlamp_profile(at(-4.0, 1.0), level, 1.0) > 0.002);

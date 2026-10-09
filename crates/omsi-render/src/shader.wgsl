@@ -1117,7 +1117,11 @@ fn point_lights(p: vec3<f32>, n: vec3<f32>, map_k: f32) -> vec3<f32> {
             let att = min(1.0, (r0 * r0) / max(dist * dist, 0.01)) * clamp(1.0 - dist / l.pos.w, 0.0, 1.0) * 3.75;
             let ndl = max(dot(n, d / max(dist, 0.01)), 0.15);
             var k = select(map_k, 1.0, l.dir.x > 0.5 && l.dir.w < -1.5);
-            if (l.dir.w >= -1.5) {
+            if (l.extra.z != 0.0) {
+                // a headlamp's beam along the road (lights.rs `push_spot`): the enhanced
+                // picture's profile (lamp_air.wgsl `headlamp`) under the classic falloff
+                k = headlamp(-d / max(dist, 0.01), l.dir.xyz, l.extra.z);
+            } else if (l.dir.w >= -1.5) {
                 // a spot (a vehicle's [spotlight], as Direct3D lights with it): full inside
                 // the inner cone, fading to nothing at the outer one; nothing behind it
                 let c = dot(-d / max(dist, 0.01), l.dir.xyz);

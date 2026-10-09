@@ -22,6 +22,11 @@ const FULL_BEAM_RANGE: f32 = 300.0;
 /// at 7 m; this gives 20, 12 and 5 there. (At 1 it was 60, 40 and 15.)
 const VANILLA_HEADLIGHT_INTENSITY: f32 = 0.2;
 
+/// A headlamp's beam in the classic picture (`push_spot`): its strength at the hot spot and
+/// its reach for a stock low beam (m, see `spot_reach`; the full beam goes further).
+const VANILLA_BEAM_INTENSITY: f32 = 4.0;
+const VANILLA_BEAM_REACH: f32 = 70.0;
+
 /// Lighting parameters for the renderer from the daylight model.
 pub fn lighting_from(d: &Daylight, fog_range: f32) -> Lighting {
     // fog density from the weather's visibility range (an object at `range` is ~90% fogged)
@@ -335,18 +340,54 @@ fn beam_level(body: glam::Mat4, dir: Vec3) -> Vec3 {
 fn push_spot(lights: &mut Vec<PointLight>, at: DVec3, d: Vec3, level: Vec3, vals: &[f32; 12], share: f32, night: f32) {
     // vanilla: the spot, lit as the classic picture lights a lamp, only inside
     // its cone (three point lights along its axis stood in for it before: they
-    // shone every way, on the bus's own body and saloon)
-    lights.push(PointLight {
-        position: at,
-        radius: spot_reach(vals[9], 45.0),
-        color: spot_color(vals),
-        intensity: VANILLA_HEADLIGHT_INTENSITY * share * (0.3 + 0.7 * night),
-        direction: d,
-        cone: spot_cone(vals),
-        mode: LightMode::Vanilla,
-        ..Default::default()
+    // shone every way, on the bus's own body and saloon). A headlamp throws the
+    // enhanced picture's beam along the road (shader.wgsl `point_lights`): aimed as
+    // declared, the stock buses' 17 deg down, it lit a patch under the bus's nose that
+    // nobody in the cab saw.
+    let beam = beam_of(d, level, vals);
+    lights.push(if beam != 0.0 {
+        PointLight {
+            position: at,
+            radius: spot_reach(vals[9], VANILLA_BEAM_REACH),
+            color: spot_color(vals),
+            intensity: VANILLA_BEAM_INTENSITY * share * (0.3 + 0.7 * night),
+            direction: level,
+            cone: spot_cone(vals),
+            beam,
+            mode: LightMode::Vanilla,
+            ..Default::default()
+        }
+    } else {
+        PointLight {
+            position: at,
+            radius: spot_reach(vals[9], 45.0),
+            color: spot_color(vals),
+            intensity: VANILLA_HEADLIGHT_INTENSITY * share * (0.3 + 0.7 * night),
+            direction: d,
+            cone: spot_cone(vals),
+            mode: LightMode::Vanilla,
+            ..Default::default()
+        }
     });
     lights.push(enhanced_spot(at, d, level, vals, share));
+}
+
+/// What kind of beam a `[spotlight]` along `d` (its horizon `level`, see `beam_level`)
+/// throws: 0 none, a lamp pointing steeply down (a `[spotlight_2]` over a door) keeps its
+/// cone; else as `PointLight::beam` - a low beam below the full beam's range, its cut-off
+/// rising towards the kerb, which is on the left where the map drives on the left; a quarter
+/// more in the magnitude for a halogen lamp's softer cut-off (lamp_air.wgsl `headlamp`).
+fn beam_of(d: Vec3, level: Vec3, vals: &[f32; 12]) -> f32 {
+    let soft = if halogen() { 0.25 } else { 0.0 };
+    if d.normalize_or_zero().z.abs() >= 0.5 || level == Vec3::ZERO {
+        0.0
+    } else if vals[9] >= FULL_BEAM_RANGE {
+        -1.0 - soft
+    } else if crate::humans::LEFT_HAND.load(std::sync::atomic::Ordering::Relaxed) {
+        2.0 + soft
+    } else {
+        1.0 + soft
+    }
 }
 
 fn spot_color(vals: &[f32; 12]) -> [f32; 3] {
@@ -364,21 +405,7 @@ fn spot_cone(vals: &[f32; 12]) -> [f32; 2] {
 /// The enhanced picture's light of a headlamp (see `push_spot`): falling off with the
 /// square of the distance from a one-metre core.
 fn enhanced_spot(at: DVec3, d: Vec3, level: Vec3, vals: &[f32; 12], share: f32) -> PointLight {
-    // (a lamp pointing steeply down - a `[spotlight_2]` over a door - keeps its cone: the
-    // road lamp's profile is for one aimed along the road; a low beam's cut-off rises
-    // towards the kerb, which is on the left where the map drives on the left)
-    // (a halogen lamp: a quarter more in the beam's magnitude, its reflector's softer
-    // cut-off, see lamp_air.wgsl `headlamp`)
-    let soft = if halogen() { 0.25 } else { 0.0 };
-    let beam = if d.normalize_or_zero().z.abs() >= 0.5 || level == Vec3::ZERO {
-        0.0
-    } else if vals[9] >= FULL_BEAM_RANGE {
-        -1.0 - soft
-    } else if crate::humans::LEFT_HAND.load(std::sync::atomic::Ordering::Relaxed) {
-        2.0 + soft
-    } else {
-        1.0 + soft
-    };
+    let beam = beam_of(d, level, vals);
     let mut color = spot_color(vals);
     if halogen() {
         color = [color[0] * HALOGEN_TINT[0], color[1] * HALOGEN_TINT[1], color[2] * HALOGEN_TINT[2]];
