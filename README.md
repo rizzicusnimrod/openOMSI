@@ -54,7 +54,10 @@ calendar, force feedback that feels like a bus, a photo mode and a new-look inte
   session twenty minutes before an even hour (for example 7:40) with the host on MP 1-4, and each
   player picks one MP tour with the automatic start place: MP 1-4 begin at 8:00, MP 5 at 7:45 in
   Wurzbach, MP 6, 7 and 8 at 8:00-8:02 in Lichtenhain, Altenfeld and Bad Lemnitz. No AI bus
-  drives these tours.
+  drives these tours. The line **Multiplayer 735** (`TTData\Multiplayer 735.ttl`) puts three
+  players on line 735 together, a bus every 20 minutes between Lichtentanne ZOB and Altenfeld:
+  started at 8:00 (host on bus 1), bus 1 leaves ZOB at 8:05, bus 3 Altenfeld at 8:15, bus 2 ZOB
+  at 8:25, and every hour after that. Don't mix it with MP 3/7 in one session (the same stops).
 * `Budapest181-traffic-addon.zip` - Budapest 181 traffic by the hour, weekday and school holidays.
 
 **Updates:** this version does not update itself (the official openOMSI updater is switched off
