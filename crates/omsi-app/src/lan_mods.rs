@@ -1,6 +1,15 @@
 //! The host's mods for the players who join: whatever of the host's session is not stock
 //! OMSI 2 content - its map, the bus it drives, the objects, splines, AI vehicles and people
 //! the map uses, and the mod fonts - goes to every player who joins, for the session only.
+//! So does every player's own bus: a player offers it to the host (`OFFER`), the host keeps
+//! it for the session and lists it as a bus set beside its own files, and the others fetch
+//! it from there - when they join, or later, once a player shows up in a bus they lack.
+//! Nothing comes without the player saying yes (`player_says_yes`).
+//!
+//! What is content of the OMSI 2 installation never goes: the stock files everybody has,
+//! and the paid add-ons Steam installs there, which only their buyers may have. A mod
+//! installed into the OMSI 2 folder that is free to pass on goes when its folder is in the
+//! player's share list (`~/.openomsi/lan-share.cfg`, see `shared_anyway`).
 //!
 //! The host serves the list of those files and the files themselves over TCP, on the same
 //! port number as its LAN session (UDP). It serves nothing but the files of that list, by
@@ -63,6 +72,69 @@ pub struct Manifest {
     pub map: String,
     pub bus: String,
     pub entries: Vec<Entry>,
+    /// The players' buses the host passes on (its own among them): which of `entries`
+    /// each one needs. (An older host sends none.)
+    #[serde(default)]
+    pub buses: Vec<BusSet>,
+}
+
+/// A bus a host passes on: its file (`bus_path`) and its files' numbers in the list.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct BusSet {
+    pub bus: String,
+    pub files: Vec<usize>,
+}
+
+/// What a player offers the host: its bus, its name, and the files the bus brings.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct Offer {
+    bus: String,
+    #[serde(default)]
+    name: String,
+    entries: Vec<Entry>,
+}
+
+/// The most one player's bus may bring, and all of them together on a host.
+const MAX_BUS_FILES: usize = 20_000;
+const MAX_BUS_BYTES: u64 = 4 << 30;
+const MAX_OFFERED: u64 = 12 << 30;
+
+/// A vehicle file as the bus sets name it: from its `Vehicles/` folder on (a content root
+/// of its own or an archive in front of it differs from machine to machine).
+pub fn bus_path(bus: &str) -> String {
+    let b = bus.trim().replace('\\', "/");
+    match b.to_ascii_lowercase().find("vehicles/") {
+        Some(k) => b[k..].to_string(),
+        None => b,
+    }
+}
+
+/// `bus_path`, to compare.
+pub fn bus_key(bus: &str) -> String {
+    bus_path(bus).to_lowercase()
+}
+
+/// No window to ask in (a dedicated server, an offscreen game): the answer is yes.
+static HEADLESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn note_headless(args: &Args) {
+    if args.server.is_some() || args.offscreen.is_some() {
+        HEADLESS.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Ask the player whether a download may come (a message box over the game).
+/// `OMSI_LAN_MODS=yes` / `no` answers for them; a game without a window takes it.
+pub fn player_says_yes(question: &str) -> bool {
+    match omsi_cfg::env::var("OMSI_LAN_MODS").map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Ok("yes" | "1" | "y") => return true,
+        Ok("no" | "0" | "n") => return false,
+        _ => {}
+    }
+    if HEADLESS.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    crate::startup::ask_yes_no("openOMSI multiplayer", question)
 }
 
 // -------------------------------------------------------------------------------------
@@ -133,6 +205,48 @@ fn is_original(r: &Path, original: &Path) -> bool {
     r == original
 }
 
+/// The share list: folders inside the OMSI 2 installation that are passed on anyway, one
+/// relative folder a line (`Vehicles/MAN_NL202`, `Sceneryobjects/TC_Objects`). Only for mods
+/// that are free to pass on: a paid add-on listed there would go to players who never
+/// bought it. Written with that explanation the first time it is looked for.
+const SHARE_LIST: &str = "lan-share.cfg";
+const SHARE_LIST_TEXT: &str = "# openOMSI multiplayer: folders inside the OMSI 2 folder that may be passed on to the\r\n# other players of a session, one a line (e.g. Vehicles/MAN_NL202). Content of the OMSI 2\r\n# folder is never passed on otherwise: it holds the stock files everybody has and the paid\r\n# add-ons only their buyers may have. List here only mods that are free to pass on.\r\n";
+
+fn share_list() -> &'static Vec<String> {
+    static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let Some(path) = sandbox_base().map(|b| b.with_file_name(SHARE_LIST)) else { return Vec::new() };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => {
+                let _ = std::fs::write(&path, SHARE_LIST_TEXT);
+                String::new()
+            }
+        };
+        let list: Vec<String> = text
+            .lines()
+            .map(|l| l.trim().replace('\\', "/").trim_matches('/').to_lowercase())
+            .filter(|l| !l.is_empty() && !l.starts_with('#') && refuse_path(&format!("{l}/x.cfg")).is_none())
+            .collect();
+        if !list.is_empty() {
+            log::info!("LAN mods: passed on from the OMSI 2 folder too: {}", list.join(", "));
+        }
+        list
+    })
+}
+
+/// Whether `rel` (a content-relative path) lies in a folder of the share list.
+fn shared_anyway(rel: &str) -> bool {
+    let l = rel.replace('\\', "/").to_lowercase();
+    share_list().iter().any(|p| l == *p || l.starts_with(&format!("{p}/")))
+}
+
+/// Whether `rel`, found in content root `root`, stays at home: the OMSI 2 installation's,
+/// unless the share list names its folder.
+fn excluded(root: &Path, original: &Path, rel: &str) -> bool {
+    is_original(root, original) && !shared_anyway(rel)
+}
+
 /// The files the host's session uses that are not stock content, with where each is read
 /// from (a folder or a mounted archive).
 fn collect(args: &Args) -> (Manifest, Vec<PathBuf>) {
@@ -165,7 +279,7 @@ fn collect(args: &Args) -> (Manifest, Vec<PathBuf>) {
         let comps = omsi_cfg::windows_components(rel);
         let mut seen: HashSet<String> = HashSet::new();
         for r in roots {
-            if is_original(&r, original) {
+            if excluded(&r, original, rel) {
                 continue;
             }
             let dir = comps.iter().fold(r.clone(), |p, c| p.join(c));
@@ -189,7 +303,7 @@ fn collect(args: &Args) -> (Manifest, Vec<PathBuf>) {
                         continue;
                     }
                     if let Some((root, path)) = omsi_cfg::find_in_roots(&child) {
-                        if is_original(&root, original) {
+                        if excluded(&root, original, &child) {
                             continue;
                         }
                         let lower = name.to_lowercase();
@@ -233,7 +347,7 @@ fn collect(args: &Args) -> (Manifest, Vec<PathBuf>) {
     if let Some(w) = args.weather.as_deref() {
         let w = norm(w);
         if let Some((root, path)) = omsi_cfg::find_in_roots(&w) {
-            if root != original {
+            if !excluded(&root, &original, &w) {
                 files.insert(w.to_lowercase(), (w, path));
             }
         }
@@ -242,7 +356,7 @@ fn collect(args: &Args) -> (Manifest, Vec<PathBuf>) {
     // the map's tiles and lists, and every text file of what they bring: the objects,
     // splines, vehicles and people they name, with the folders those name in turn
     let mut map_texts: Vec<(String, PathBuf)> = Vec::new();
-    for r in omsi_cfg::content_roots() {
+    for r in omsi_cfg::content_roots().into_iter().filter(|_| !map_dir.is_empty()) {
         let comps = omsi_cfg::windows_components(&map_dir);
         let dir = comps.iter().fold(r.clone(), |p, c| p.join(c));
         for (name, is_dir) in omsi_cfg::vfs::list_dir(&dir).unwrap_or_default() {
@@ -301,7 +415,7 @@ fn collect(args: &Args) -> (Manifest, Vec<PathBuf>) {
                         continue;
                     }
                     let Some((root, _)) = omsi_cfg::find_in_roots(&c) else { continue };
-                    if is_original(&root, &original) {
+                    if excluded(&root, &original, &c) {
                         break;
                     }
                     let folder = if is_ref { owner_folder(&c) } else { c.rsplit_once('/').map(|(d, _)| d.to_string()) };
@@ -324,7 +438,7 @@ fn collect(args: &Args) -> (Manifest, Vec<PathBuf>) {
     // the mod fonts those text textures use (OMSI reads the `.oft` files of `Fonts` itself,
     // not its sub-folders): each `.oft` with a `[newfont]` of a name in use, and its bitmaps
     for r in omsi_cfg::content_roots() {
-        if is_original(&r, &original) {
+        if is_original(&r, &original) && !share_list().iter().any(|p| p.starts_with("fonts")) {
             continue;
         }
         let Some(dir) = omsi_cfg::find_in_roots("Fonts").filter(|(root, _)| *root == r).map(|(_, p)| p).or_else(|| Some(r.join("Fonts"))) else { continue };
@@ -352,7 +466,7 @@ fn collect(args: &Args) -> (Manifest, Vec<PathBuf>) {
             for f in std::iter::once(n.clone()).chain(bitmaps) {
                 let rel = format!("Fonts/{f}");
                 if let Some((root, path)) = omsi_cfg::find_in_roots(&rel) {
-                    if !is_original(&root, &original) {
+                    if !excluded(&root, &original, &rel) {
                         files.insert(rel.to_lowercase(), (rel, path));
                     }
                 }
@@ -373,16 +487,89 @@ fn collect(args: &Args) -> (Manifest, Vec<PathBuf>) {
         entries.push(Entry { path: rel, size: data.len() as u64, sha256: sha256_of(&data) });
         sources.push(path);
     }
+    let what = if args.map.is_empty() { format!("the bus {}", args.bus.as_deref().unwrap_or("")) } else { "this session".to_string() };
     log::info!(
-        "LAN mods: {} files ({:.1} MB) of this session are not stock content and go to joining players (listed in {:.1} s)",
+        "LAN mods: {} files ({:.1} MB) of {what} are not stock content and go to the other players (listed in {:.1} s)",
         entries.len(),
         total as f64 / 1e6,
         t0.elapsed().as_secs_f64()
     );
     (
-        Manifest { map: args.map.replace('\\', "/"), bus: args.bus.clone().unwrap_or_default().replace('\\', "/"), entries },
+        Manifest { map: args.map.replace('\\', "/"), bus: args.bus.clone().unwrap_or_default().replace('\\', "/"), entries, buses: Vec::new() },
         sources,
     )
+}
+
+/// The files a bus brings that are not stock content: its folder and what its files name
+/// (sounds, shared scripts, fonts), as `collect` finds them for a session's bus.
+fn collect_bus(args: &Args, bus: &str) -> (Vec<Entry>, Vec<PathBuf>) {
+    let mut only_bus = args.clone();
+    only_bus.map = String::new();
+    only_bus.weather = None;
+    only_bus.bus = Some(bus_path(bus));
+    let (m, sources) = collect(&only_bus);
+    (m.entries, sources)
+}
+
+/// Put the bus set `bus` (its files and where each is read) into the list a host serves:
+/// a file listed already in the same version is named again, one listed in another version
+/// is left out (the host's stays), the rest are added at the end (the numbers the players
+/// fetch by never change). Returns how many files the set has.
+fn append_bus_set(m: &mut Manifest, sources: &mut Vec<PathBuf>, bus: &str, entries: Vec<Entry>, srcs: Vec<PathBuf>) -> usize {
+    let mut at: HashMap<String, usize> = m.entries.iter().enumerate().map(|(k, e)| (e.path.to_lowercase(), k)).collect();
+    let mut files = Vec::with_capacity(entries.len());
+    for (e, src) in entries.into_iter().zip(srcs) {
+        match at.get(&e.path.to_lowercase()) {
+            Some(&k) if m.entries[k].sha256 == e.sha256 => files.push(k),
+            Some(_) => {}
+            None => {
+                at.insert(e.path.to_lowercase(), m.entries.len());
+                files.push(m.entries.len());
+                m.entries.push(e);
+                sources.push(src);
+            }
+        }
+    }
+    let n = files.len();
+    let key = bus_key(bus);
+    m.buses.retain(|b| bus_key(&b.bus) != key);
+    m.buses.push(BusSet { bus: bus_path(bus), files });
+    n
+}
+
+/// The list the host serves now (`serve`; None before it is made).
+static HOST_LIST: std::sync::OnceLock<Arc<Mutex<Option<Arc<(Manifest, Vec<PathBuf>)>>>>> = std::sync::OnceLock::new();
+
+/// The buses (`bus_key`) a player offered and the host took since it was last asked: their
+/// stand-ins can go (`lan`).
+static ARRIVED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub fn take_arrived() -> Vec<String> {
+    std::mem::take(&mut *ARRIVED.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// The host's own bus (at the start and whenever it changes buses) goes into its list as a
+/// bus set, for the players who see it after they joined.
+pub fn share_own_bus(args: &Args, bus: &str) {
+    let Some(list) = HOST_LIST.get().cloned() else { return };
+    let (args, bus) = (args.clone(), bus_path(bus));
+    std::thread::spawn(move || {
+        let (entries, srcs) = collect_bus(&args, &bus);
+        // (the session's list may still be being made)
+        let t0 = Instant::now();
+        while list.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+            if t0.elapsed() > Duration::from_secs(600) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let mut g = list.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(cur) = g.clone() else { return };
+        let (mut m, mut s) = (*cur).clone();
+        let n = append_bus_set(&mut m, &mut s, &bus, entries, srcs);
+        *g = Some(Arc::new((m, s)));
+        log::info!("LAN mods: the host's bus {bus} goes to the players who lack it ({n} files)");
+    });
 }
 
 /// Serve the session's mods on TCP `port` (a thread; the list is made in the background).
@@ -397,7 +584,10 @@ pub fn serve(port: u16, session: u64, args: &Args) {
             return;
         }
     };
-    let ready: Arc<Mutex<Option<Arc<(Manifest, Vec<PathBuf>)>>>> = Arc::new(Mutex::new(None));
+    note_headless(args);
+    let ready = HOST_LIST.get_or_init(|| Arc::new(Mutex::new(None))).clone();
+    *ready.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    let original = args.root.clone();
     {
         let ready = ready.clone();
         let args = args.clone();
@@ -422,10 +612,10 @@ pub fn serve(port: u16, session: u64, args: &Args) {
                     continue;
                 }
                 open.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let (ready, held) = (ready.clone(), open.clone());
+                let (ready, held, original) = (ready.clone(), open.clone(), original.clone());
                 let spawned = std::thread::Builder::new().name("lan-mods-conn".into()).spawn(move || {
                     let peer = stream.peer_addr().ok();
-                    if let Err(e) = handle(stream, session, &ready) {
+                    if let Err(e) = handle(stream, session, &ready, &original) {
                         log::info!("LAN mods: connection from {peer:?} ended: {e}");
                     }
                     held.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -452,7 +642,7 @@ fn read_line_limited(input: &mut BufReader<TcpStream>, line: &mut String) -> std
     Ok(n)
 }
 
-fn handle(stream: TcpStream, session: u64, ready: &Mutex<Option<Arc<(Manifest, Vec<PathBuf>)>>>) -> std::io::Result<()> {
+fn handle(stream: TcpStream, session: u64, ready: &Mutex<Option<Arc<(Manifest, Vec<PathBuf>)>>>, original: &Path) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(120)))?;
     stream.set_nodelay(true).ok();
     let mut out = stream.try_clone()?;
@@ -520,10 +710,234 @@ fn handle(stream: TcpStream, session: u64, ready: &Mutex<Option<Arc<(Manifest, V
                     }
                 }
             }
+            // the buses the host passes on, by name (asked every few seconds by a player who
+            // waits for one: the whole list is megabytes on a big map)
+            ["BUSES"] => {
+                let names: Vec<&str> = manifest.buses.iter().map(|b| b.bus.as_str()).collect();
+                let body = serde_json::to_vec(&names).unwrap_or_default();
+                writeln!(out, "OK {}", body.len())?;
+                out.write_all(&body)?;
+            }
+            // a player's bus for the others: the list of its files, the numbers of those the
+            // host wants sent, then those
+            ["OFFER", len] => {
+                let Some(len) = len.parse::<u64>().ok().filter(|l| *l <= 64 << 20) else {
+                    writeln!(out, "ERR too large")?;
+                    return Ok(());
+                };
+                let mut body = vec![0u8; len as usize];
+                input.read_exact(&mut body)?;
+                match receive_offer(&body, &mut out, &mut input, ready, original) {
+                    Ok(Some((bus, n))) => {
+                        log::info!("LAN mods: a player's bus {bus} goes to the others ({n} files)");
+                        ARRIVED.lock().unwrap_or_else(|e| e.into_inner()).push(bus_key(&bus));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        log::info!("LAN mods: an offered bus was not taken: {e}");
+                        return Ok(());
+                    }
+                }
+            }
             ["BYE"] | [] => return Ok(()),
             _ => writeln!(out, "ERR what")?,
         }
     }
+}
+
+/// The bus offers the host answered this session (`bus_key` -> yes or no): asked once.
+static ANSWERS: Mutex<Option<HashMap<String, bool>>> = Mutex::new(None);
+/// What players' buses brought the host this session (bytes).
+static OFFERED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Is the file at `p` the one `e` names (size, then SHA-256)?
+fn same_file(p: &Path, e: &Entry) -> bool {
+    if omsi_cfg::vfs::archive_of(p).is_none() && std::fs::metadata(p).map(|m| m.len() != e.size).unwrap_or(true) {
+        return false;
+    }
+    omsi_cfg::vfs::read(p).map(|d| d.len() as u64 == e.size && sha256_of(&d) == e.sha256).unwrap_or(false)
+}
+
+/// A player's bus offered to the host (`OFFER`): what of it the host takes - asked first,
+/// every file checked by name, size and SHA-256 and kept in the host's session folder (for
+/// this session only), nothing that is a program, nothing the host has in another version
+/// (its own stays) - and the bus set it is listed as. Returns (the bus, its files) when
+/// it was taken.
+fn receive_offer(body: &[u8], out: &mut TcpStream, input: &mut BufReader<TcpStream>, ready: &Mutex<Option<Arc<(Manifest, Vec<PathBuf>)>>>, original: &Path) -> std::io::Result<Option<(String, usize)>> {
+    let bad = |m: &str| std::io::Error::other(m.to_string());
+    let offer: Offer = serde_json::from_slice(body).map_err(|e| bad(&format!("bad offer: {e}")))?;
+    let bus = bus_path(&offer.bus);
+    let total: u64 = offer.entries.iter().map(|e| e.size).sum();
+    let ok = |e: &Entry| refuse_path(&e.path).is_none() && e.size <= MAX_FILE && e.sha256.len() == 64 && e.sha256.bytes().all(|b| b.is_ascii_hexdigit());
+    if refuse_path(&bus).is_some() || offer.entries.len() > MAX_BUS_FILES || total > MAX_BUS_BYTES || !offer.entries.iter().all(ok) {
+        writeln!(out, "ERR refused")?;
+        return Ok(None);
+    }
+    // (a server takes only the buses it offers)
+    if let Some(l) = crate::server::SERVER_VEHICLES.get().filter(|l| !l.is_empty()) {
+        if !crate::server::allows(l, &bus) {
+            writeln!(out, "ERR the server does not offer this bus")?;
+            return Ok(None);
+        }
+    }
+    let Some(current) = ready.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+        writeln!(out, "ERR the host has no list")?;
+        return Ok(None);
+    };
+    let listed: HashMap<String, usize> = current.0.entries.iter().enumerate().map(|(k, e)| (e.path.to_lowercase(), k)).collect();
+    let dir = sandbox_base().ok_or_else(|| bad("no home folder"))?.join(std::process::id().to_string());
+    // what the host has: listed already, or a mod of its own, in the same version (served
+    // from where it is); in another version: left out, the host's stays. The OMSI 2
+    // folder's own is not passed on from there: that one comes from the player.
+    let mut keep: Vec<(Entry, Option<PathBuf>)> = Vec::new();
+    let mut want: Vec<(usize, usize)> = Vec::new();
+    for (i, e) in offer.entries.into_iter().enumerate() {
+        if let Some(&k) = listed.get(&e.path.to_lowercase()) {
+            if current.0.entries[k].sha256 == e.sha256 {
+                keep.push((e, Some(current.1[k].clone())));
+            }
+            continue;
+        }
+        if let Some((root, p)) = omsi_cfg::find_in_roots(&e.path) {
+            if !same_file(&p, &e) {
+                continue;
+            }
+            if !excluded(&root, original, &e.path) {
+                keep.push((e, Some(p)));
+                continue;
+            }
+        }
+        want.push((i, keep.len()));
+        keep.push((e, None));
+    }
+    let wanted: u64 = want.iter().map(|&(_, k)| keep[k].0.size).sum();
+    if wanted > 0 {
+        if OFFERED.load(std::sync::atomic::Ordering::Relaxed) + wanted > MAX_OFFERED {
+            writeln!(out, "ERR the host has taken all the players' buses it takes")?;
+            return Ok(None);
+        }
+        let key = bus_key(&bus);
+        let said = ANSWERS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).get(&key).copied();
+        let yes = said.unwrap_or_else(|| {
+            let who: String = offer.name.chars().filter(|c| !c.is_control()).take(32).collect();
+            let who = if who.trim().is_empty() { "A player".to_string() } else { who };
+            let label = bus.rsplit('/').next().unwrap_or(&bus).to_string();
+            let yes = player_says_yes(&format!(
+                "{who} drives {label}, which is not installed here.\n\nDownload it from them for this session ({} files, {:.0} MB), so that you and the other players see their bus?\n\nEvery file is checked; no programs are taken.",
+                want.len(),
+                wanted as f64 / 1e6
+            ));
+            ANSWERS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(key, yes);
+            yes
+        });
+        if !yes {
+            writeln!(out, "ERR the host said no to it")?;
+            return Ok(None);
+        }
+    }
+    let list = serde_json::to_vec(&want.iter().map(|w| w.0).collect::<Vec<usize>>()).unwrap_or_default();
+    writeln!(out, "OK {}", list.len())?;
+    out.write_all(&list)?;
+    // the files, in that order: "FILE <n> <len>" and the bytes
+    for &(i, k) in &want {
+        let mut line = String::new();
+        read_line_limited(input, &mut line)?;
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let (Some(&"FILE"), Some(n), Some(len)) = (parts.first(), parts.get(1).and_then(|n| n.parse::<usize>().ok()), parts.get(2).and_then(|l| l.parse::<u64>().ok())) else {
+            return Err(bad("expected a file"));
+        };
+        let e = &keep[k].0;
+        if n != i || len != e.size {
+            return Err(bad("not the file asked for"));
+        }
+        let mut data = vec![0u8; len as usize];
+        input.read_exact(&mut data)?;
+        if sha256_of(&data) != e.sha256 || looks_executable(&data[..data.len().min(8)]) {
+            return Err(bad("a file is not what the offer said"));
+        }
+        let target = e.path.split('/').fold(dir.clone(), |p, c| p.join(c));
+        if !target.starts_with(&dir) {
+            return Err(bad("outside"));
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&target, &data)?;
+        OFFERED.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
+        keep[k].1 = Some(target);
+    }
+    writeln!(out, "OK")?;
+    // the host's session folder is content of its own now (it draws the player's bus
+    // too), and goes when the session ends
+    if !want.is_empty() {
+        omsi_cfg::mark_sandbox(dir.clone());
+        omsi_cfg::add_content_root_first(dir.clone());
+        SANDBOX.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert(dir);
+    }
+    let (entries, srcs): (Vec<Entry>, Vec<PathBuf>) = keep.into_iter().filter_map(|(e, p)| p.map(|p| (e, p))).unzip();
+    let mut g = ready.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(cur) = g.clone() else { return Ok(None) };
+    let (mut m, mut s) = (*cur).clone();
+    let n = append_bus_set(&mut m, &mut s, &bus, entries, srcs);
+    *g = Some(Arc::new((m, s)));
+    Ok(Some((bus, n)))
+}
+
+/// Whether the host passes on `bus` (a player offered it to the host, or it is the host's).
+pub fn host_has_bus(host: SocketAddr, session: u64, bus: &str) -> Result<bool, String> {
+    let (mut out, mut input) = open(host, session)?;
+    writeln!(out, "BUSES").map_err(|e| e.to_string())?;
+    let len = read_reply(&mut input)?.ok_or("no list")?;
+    if len > 16 << 20 {
+        return Err("the list is too large".into());
+    }
+    let mut body = vec![0u8; len as usize];
+    input.read_exact(&mut body).map_err(|e| e.to_string())?;
+    let _ = writeln!(out, "BYE");
+    let names: Vec<String> = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+    let key = bus_key(bus);
+    Ok(names.iter().any(|n| bus_key(n) == key))
+}
+
+/// Offer our bus to the host (a player who joined, and one who changed buses): what the
+/// host lacks of it and takes is sent. Returns (files sent, bytes).
+pub fn offer_bus(args: &Args, host: SocketAddr, session: u64, bus: &str, name: &str) -> Result<(usize, u64), String> {
+    if omsi_cfg::env::var_os("OMSI_NO_LAN_MODS").is_some() {
+        return Err("switched off (OMSI_NO_LAN_MODS)".into());
+    }
+    note_headless(args);
+    // (one with nothing to pass on - all of it stock, or of the OMSI 2 folder - is offered
+    // too: the others stop waiting for it)
+    let (entries, sources) = collect_bus(args, bus);
+    let body = serde_json::to_vec(&Offer { bus: bus_path(bus), name: name.to_string(), entries: entries.clone() }).map_err(|e| e.to_string())?;
+    let (mut out, mut input) = open(host, session)?;
+    writeln!(out, "OFFER {}", body.len()).map_err(|e| e.to_string())?;
+    out.write_all(&body).map_err(|e| e.to_string())?;
+    // (the host may be asked first)
+    input.get_ref().set_read_timeout(Some(Duration::from_secs(900))).ok();
+    let len = read_reply(&mut input)?.ok_or("no answer")?;
+    input.get_ref().set_read_timeout(Some(Duration::from_secs(25))).ok();
+    if len > 16 << 20 {
+        return Err("the answer is too large".into());
+    }
+    let mut list = vec![0u8; len as usize];
+    input.read_exact(&mut list).map_err(|e| e.to_string())?;
+    let want: Vec<usize> = serde_json::from_slice(&list).map_err(|e| e.to_string())?;
+    let (mut n, mut bytes) = (0usize, 0u64);
+    for k in want {
+        let (Some(e), Some(src)) = (entries.get(k), sources.get(k)) else { return Err("the host asked for a file not offered".into()) };
+        let data = omsi_cfg::vfs::read(src).map_err(|x| format!("{}: {x}", e.path))?;
+        if data.len() as u64 != e.size {
+            return Err(format!("{} changed meanwhile", e.path));
+        }
+        writeln!(out, "FILE {k} {}", data.len()).map_err(|x| x.to_string())?;
+        out.write_all(&data).map_err(|x| x.to_string())?;
+        n += 1;
+        bytes += e.size;
+    }
+    read_reply(&mut input)?;
+    let _ = writeln!(out, "BYE");
+    Ok((n, bytes))
 }
 
 // -------------------------------------------------------------------------------------
@@ -605,6 +1019,10 @@ pub struct Report {
     pub bytes: u64,
     pub had: usize,
     pub refused: Vec<String>,
+    /// The player said no to the download: nothing was fetched.
+    pub declined: bool,
+    /// The bus asked for is not (yet) among the host's bus sets.
+    pub absent: bool,
 }
 
 fn read_reply(input: &mut BufReader<TcpStream>) -> Result<Option<u64>, String> {
@@ -673,10 +1091,15 @@ fn place(stored: &Path, target: &Path) -> std::io::Result<()> {
     std::fs::hard_link(stored, target).or_else(|_| std::fs::copy(stored, target).map(|_| ()))
 }
 
-pub fn fetch(args: &mut Args, host: SocketAddr, session: u64, progress: &mut dyn FnMut(u64, u64, &str)) -> Result<Report, String> {
+///
+/// `only_bus`: just that bus's set of the host's list (a player seen in a bus we lack),
+/// else all of it (a join). `ask` is asked (files, bytes) before anything is fetched - not
+/// when everything is here already.
+pub fn fetch(args: &mut Args, host: SocketAddr, session: u64, only_bus: Option<&str>, ask: &mut dyn FnMut(usize, u64) -> bool, progress: &mut dyn FnMut(u64, u64, &str)) -> Result<Report, String> {
     if omsi_cfg::env::var_os("OMSI_NO_LAN_MODS").is_some() {
         return Err("switched off (OMSI_NO_LAN_MODS)".into());
     }
+    note_headless(args);
     let (mut out, mut input) = open(host, session)?;
     writeln!(out, "LIST").map_err(|e| e.to_string())?;
     let len = read_reply(&mut input)?.ok_or("no list")?;
@@ -705,6 +1128,16 @@ pub fn fetch(args: &mut Args, host: SocketAddr, session: u64, progress: &mut dyn
             continue;
         }
         todo.push(k);
+    }
+    // (one bus's set alone)
+    if let Some(bus) = only_bus {
+        let key = bus_key(bus);
+        let Some(set) = manifest.buses.iter().find(|b| bus_key(&b.bus) == key) else {
+            report.absent = true;
+            return Ok(report);
+        };
+        let wanted: HashSet<usize> = set.files.iter().copied().collect();
+        todo.retain(|k| wanted.contains(k));
     }
     // which of them this machine has already: the sizes first, the hashes remembered by
     // size and time (hashing every local file again took two minutes on each join, long
@@ -763,6 +1196,17 @@ pub fn fetch(args: &mut Args, host: SocketAddr, session: u64, progress: &mut dyn
         total += e.size;
     }
     save_hash_cache(&cache);
+    // the player says whether it comes at all (and the host is called again afterwards: a
+    // question left open for minutes outlasted the connection)
+    if total > 0 {
+        if !ask(todo.len(), total) {
+            log::info!("LAN mods: {} files ({:.1} MB) not fetched: the player said no", todo.len(), total as f64 / 1e6);
+            report.declined = true;
+            return Ok(report);
+        }
+        let _ = writeln!(out, "BYE");
+        (out, input) = open(host, session)?;
+    }
     if total > MAX_TOTAL {
         return Err(format!("the host's mods are {:.1} GB, more than a session takes ({:.0} GB)", total as f64 / 1e9, MAX_TOTAL as f64 / 1e9));
     }
@@ -867,8 +1311,8 @@ pub fn fetch(args: &mut Args, host: SocketAddr, session: u64, progress: &mut dyn
     // plugins
     omsi_cfg::mark_sandbox(dir.clone());
     omsi_cfg::add_content_root_first(dir.clone());
-    // the host's map (now that we have it)
-    let map_ok = refuse_path(&manifest.map).is_none() && omsi_cfg::find_in_roots(&manifest.map).is_some();
+    // the host's map (now that we have it; not for a bus fetched during the session)
+    let map_ok = only_bus.is_none() && refuse_path(&manifest.map).is_none() && omsi_cfg::find_in_roots(&manifest.map).is_some();
     if map_ok && !manifest.map.is_empty() && !manifest.map.eq_ignore_ascii_case(&args.map.replace('\\', "/")) {
         log::info!("LAN mods: the session is on the host's map {}", manifest.map);
         args.map = manifest.map.clone();
@@ -909,6 +1353,30 @@ mod tests {
         ] {
             assert!(refuse_path(bad).is_some(), "{bad} should be refused");
         }
+    }
+
+    #[test]
+    fn buses_are_named_from_their_vehicles_folder() {
+        assert_eq!(bus_path("Vehicles\\MAN_NL202\\MAN_NL202.bus"), "Vehicles/MAN_NL202/MAN_NL202.bus");
+        assert_eq!(bus_path("Archives/pack.zip/Vehicles/X/x.bus"), "Vehicles/X/x.bus");
+        assert_eq!(bus_key("vehicles/x/X.BUS"), bus_key("Vehicles\\X\\x.bus"));
+    }
+
+    #[test]
+    fn a_bus_set_keeps_the_numbers() {
+        let e = |p: &str, h: char| Entry { path: p.into(), size: 1, sha256: h.to_string().repeat(64) };
+        let mut m = Manifest { entries: vec![e("maps/a/global.cfg", 'a'), e("Vehicles/X/x.bus", 'b')], ..Default::default() };
+        let mut s = vec![PathBuf::from("1"), PathBuf::from("2")];
+        let n = append_bus_set(&mut m, &mut s, "Vehicles/X/x.bus", vec![e("Vehicles/X/x.bus", 'b'), e("Vehicles/X/y.cfg", 'c'), e("maps/a/global.cfg", 'd')], vec![PathBuf::from("3"), PathBuf::from("4"), PathBuf::from("5")]);
+        // the same file named again, a new one added, one in another version left out
+        assert_eq!(n, 2);
+        assert_eq!(m.buses[0].files, vec![1, 2]);
+        assert_eq!(m.entries.len(), 3);
+        assert_eq!(s, vec![PathBuf::from("1"), PathBuf::from("2"), PathBuf::from("4")]);
+        // offered again: replaced, not doubled
+        append_bus_set(&mut m, &mut s, "vehicles/x/X.bus", vec![e("Vehicles/X/x.bus", 'b')], vec![PathBuf::from("3")]);
+        assert_eq!(m.buses.len(), 1);
+        assert_eq!(m.buses[0].files, vec![1]);
     }
 
     #[test]

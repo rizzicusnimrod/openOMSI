@@ -348,6 +348,35 @@ pub(crate) fn fatal_message(text: &str) {
     }
 }
 
+/// Ask the player a yes/no question from any thread, over the game's window (a message box
+/// on top of it). No answer to be had (the dialog cannot open) is a no.
+pub(crate) fn ask_yes_no(title: &str, text: &str) -> bool {
+    #[cfg(windows)]
+    {
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, IDYES, MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO};
+        let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+        let (t, c) = (wide(text), wide(title));
+        unsafe { MessageBoxW(None, PCWSTR(t.as_ptr()), PCWSTR(c.as_ptr()), MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND) == IDYES }
+    }
+    // (a phone has no dialog of this kind: it takes it, as before there was a question)
+    #[cfg(target_os = "android")]
+    {
+        let _ = (title, text);
+        true
+    }
+    #[cfg(all(not(windows), not(target_os = "android")))]
+    {
+        rfd::MessageDialog::new()
+            .set_title(title)
+            .set_description(text)
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .set_level(rfd::MessageLevel::Info)
+            .show()
+            == rfd::MessageDialogResult::Yes
+    }
+}
+
 /// The commit this binary was built from (see `build.rs`), so a log or a screenshot says
 /// which version is running.
 pub const BUILD: &str = env!("OMSI_BUILD");

@@ -40,7 +40,6 @@ impl UpdateWatch {
         let enabled = on("update_check", true)
             && omsi_cfg::env::var_os("OMSI_NO_UPDATE").is_none()
             && !updater::is_test_build(updater::current_version())
-            && !updater::is_custom_build(updater::current_version())
             && updater::asset_name(updater::current_version()).is_some()
             && installable;
         UpdateWatch {

@@ -1,4 +1,4 @@
-//! Updates from the project's GitHub releases (github.com/openOMSI-Project/openOMSI).
+//! Updates from the fork's GitHub releases (github.com/rizzicusnimrod/openOMSI).
 //!
 //! Every push to main publishes a release `v<MAJOR.MINOR.COMMIT>` with one archive per
 //! platform (see .github/workflows/release.yml). The launcher asks the GitHub API for the
@@ -34,6 +34,8 @@
 //! `OMSI_NO_UPDATE=1` switches the check off. A development build (run from a cargo `target`
 //! folder) checks, but never replaces itself. A pull request's test build (a version such as
 //! `0.1.1313-pr1192`) is never offered a release: it would replace the build being tested.
+//! A build of the custom fork (`0.2.54-custom`) takes the fork's own releases only, and a
+//! build of the project none of them.
 
 // (a phone installs through the system: the unpacking and swapping below are the computers')
 #![cfg_attr(target_os = "android", allow(dead_code))]
@@ -42,10 +44,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// The project on GitHub.
-pub const REPO: &str = "openOMSI-Project/openOMSI";
-pub const REPO_URL: &str = "https://github.com/openOMSI-Project/openOMSI";
-const LATEST_API: &str = "https://api.github.com/repos/openOMSI-Project/openOMSI/releases/latest";
+/// The custom fork on GitHub, whose releases these builds update from.
+pub const REPO: &str = "rizzicusnimrod/openOMSI";
+pub const REPO_URL: &str = "https://github.com/rizzicusnimrod/openOMSI";
+const LATEST_API: &str = "https://api.github.com/repos/rizzicusnimrod/openOMSI/releases/latest";
 
 /// A release newer than this build, with the file for this platform.
 #[derive(Clone, Debug, PartialEq)]
@@ -229,9 +231,15 @@ pub fn is_test_build(version: &str) -> bool {
     version.contains("-pr")
 }
 
-/// A build of the `custom` fork (`build.rs` marks it): no release replaces it.
+/// A build of the `custom` fork (`build.rs` marks it): only the fork's releases replace it.
 pub fn is_custom_build(version: &str) -> bool {
     version.contains("-custom")
+}
+
+/// Whether a release of `version` may replace a build of `current`: the fork's for the
+/// fork's builds, the project's for the project's.
+fn same_line(version: &str, current: &str) -> bool {
+    is_custom_build(version) == is_custom_build(current)
 }
 
 /// Whether `candidate` is a newer version than `current`.
@@ -358,7 +366,7 @@ fn latest_from_site() -> anyhow::Result<Option<Release>> {
         anyhow::bail!("github.com named no release ({})", r.get_url());
     }
     let version = tag.trim_start_matches(['v', 'V']).to_string();
-    if is_test_build(current_version()) || is_custom_build(current_version()) || !newer(&version, current_version()) {
+    if is_test_build(current_version()) || !same_line(&version, current_version()) || !newer(&version, current_version()) {
         return Ok(None);
     }
     let Some(name) = asset_name(&version) else { return Ok(None) };
@@ -380,8 +388,8 @@ fn parse_release(v: &serde_json::Value, current: &str) -> anyhow::Result<Option<
         log::info!("update check: {current} is a pull request's test build, {version} is not offered");
         return Ok(None);
     }
-    if is_custom_build(current) {
-        log::info!("update check: {current} is a custom build, {version} is not offered");
+    if !same_line(&version, current) {
+        log::info!("update check: {version} is not a release for {current} (the fork's builds take the fork's)");
         return Ok(None);
     }
     if v["draft"].as_bool() == Some(true) || v["prerelease"].as_bool() == Some(true) || !newer(&version, current) {
@@ -901,9 +909,16 @@ mod tests {
         // a pull request's test build keeps itself, however new the release
         assert!(parse_release(&v, "0.1.7-pr12").unwrap().is_none());
         assert!(is_test_build("0.1.1313-pr1192") && !is_test_build("0.1.1313"));
-        // and so does a build of the custom fork
+        // a build of the custom fork takes the fork's releases only, and the project's
+        // builds none of the fork's
         assert!(parse_release(&v, "0.1.7-custom").unwrap().is_none());
         assert!(is_custom_build("0.1.3-custom") && !is_custom_build("0.1.1313"));
+        let mut c = v.clone();
+        c["tag_name"] = serde_json::json!("v0.2.55-custom");
+        c["assets"][1]["name"] = serde_json::json!(asset_name("0.2.55-custom").unwrap());
+        assert_eq!(parse_release(&c, "0.2.54-custom").unwrap().map(|r| r.version), Some("0.2.55-custom".to_string()));
+        assert!(parse_release(&c, "0.2.55-custom").unwrap().is_none());
+        assert!(parse_release(&c, "0.1.7").unwrap().is_none());
     }
 
     /// A server on this computer that cuts the first answer off half way (as a connection

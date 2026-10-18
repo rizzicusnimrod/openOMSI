@@ -60,9 +60,10 @@ calendar, force feedback that feels like a bus, a photo mode and a new-look inte
   at 8:25, and every hour after that. Don't mix it with MP 3/7 in one session (the same stops).
 * `Budapest181-traffic-addon.zip` - Budapest 181 traffic by the hour, weekday and school holidays.
 
-**Updates:** this version does not update itself (the official openOMSI updater is switched off
-so it can't replace it with the plain version). Check
-[Releases](https://github.com/rizzicusnimrod/openOMSI/releases/latest) for new versions.
+**Updates:** the launcher looks for new versions of this fork on
+[Releases](https://github.com/rizzicusnimrod/openOMSI/releases/latest) and asks before it
+installs one (**Update now** / **Not now**); your mods and settings stay. It never takes the
+plain openOMSI's releases. *Settings → Install updates without asking* skips the question.
 
 **Multiplayer:** everyone in a LAN session should run the same version from here.
 
@@ -129,6 +130,14 @@ so it can't replace it with the plain version). Check
 * The other players' buses complete: their displays, script screens and every script variable.
 * The host's AI traffic as its drivers show it, gliding smoothly along its curves.
 * AI drivers react to every player's high beams, not just the host's.
+* **Content for everyone, when you say yes:** joining asks whether to download what the host's
+  session uses that you lack (its map, the players' buses, their objects and sounds). A player
+  in a bus you don't have is shown in a stand-in, and you're asked whether to download that bus;
+  the host is asked too when a player brings a bus it lacks, and passes it on to the others.
+  Files are checked and nothing that runs code is taken.
+* Nothing of the OMSI 2 folder is ever passed on (it holds the paid add-ons). A free mod you
+  installed into it can be shared by listing its folder in `C:\Users\<you>\.openomsi\lan-share.cfg`,
+  one a line (e.g. `Vehicles/MAN_NL202`).
 
 
 ## Photo mode keys
@@ -152,8 +161,8 @@ so it can't replace it with the plain version). Check
   API → DirectX 12.
 * **Stuck at a bridge or an invisible wall** on a mod map: Esc → Options → *Collisions with
   objects*.
-* **Multiplayer: you don't meet the others** - everyone needs the host's map and the same
-  version of this game.
+* **Multiplayer: you don't meet the others** - everyone needs the host's map (say yes when
+  joining asks to download it) and the same version of this game.
 * **Anything else:** the logs are in `C:\Users\<you>\.openomsi` (`game.log` for the last game).
   Send me that file with what happened.
 

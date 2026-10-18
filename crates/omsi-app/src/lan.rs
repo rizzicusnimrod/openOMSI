@@ -655,6 +655,126 @@ pub struct LanGame {
     /// came: (their table, floats, strings), taken over once it is - the joining player's
     /// displays stood blank until the key frame came round again.
     pending_vars: hashbrown::HashMap<u32, (u32, hashbrown::HashMap<u16, f32>, hashbrown::HashMap<u16, String>)>,
+    /// The bus we last offered the host (a joining player) or listed for the others (the
+    /// host), as our pose names it (`offer_my_bus`).
+    offered: String,
+    /// The other players' buses we lack, fetched from the host (`fetch_their_buses`), by
+    /// `lan_mods::bus_key`.
+    bus_fetch: hashbrown::HashMap<String, BusFetch>,
+}
+
+/// Another player's bus fetched from the host during the session.
+struct BusFetch {
+    /// The download under way: its outcome comes here.
+    running: Option<std::sync::mpsc::Receiver<Result<crate::lan_mods::Report, String>>>,
+    /// When to try again (the host had no such bus yet, or the download broke).
+    retry: Instant,
+    tries: u32,
+    /// Nothing more to do: it came, the player said no, or it was given up.
+    done: bool,
+}
+
+/// Our bus for the others, at the start and whenever we change buses: a joining player
+/// offers it to the host, the host lists it for the players (`lan_mods`).
+fn offer_my_bus(lan: &LanSession, game: &mut LanGame, args: &Args, bus: &str) {
+    if bus.is_empty() || crate::lan_mods::bus_key(bus) == crate::lan_mods::bus_key(&game.offered) {
+        return;
+    }
+    match lan.role {
+        Role::Host => {
+            game.offered = bus.to_string();
+            crate::lan_mods::share_own_bus(args, bus);
+        }
+        Role::Client => {
+            // (offered once the host's mods are found)
+            let Some(host) = *MODS_HOST.lock().unwrap_or_else(|e| e.into_inner()) else {
+                find_mods_host(lan);
+                return;
+            };
+            game.offered = bus.to_string();
+            let (a, b, session, name) = (args.clone(), bus.to_string(), lan.session, player_name(args));
+            std::thread::spawn(move || match crate::lan_mods::offer_bus(&a, host, session, &b, &name) {
+                Ok((0, _)) => log::info!("LAN mods: the host has what our bus {b} brings"),
+                Ok((n, bytes)) => log::info!("LAN mods: our bus {b} went to the host for the others ({n} files, {:.1} MB)", bytes as f64 / 1e6),
+                Err(e) => log::info!("LAN mods: our bus {b} did not go to the host: {e}"),
+            });
+        }
+    }
+}
+
+/// A player in a bus we lack is drawn in a stand-in: a joining player fetches that bus from
+/// the host once the host has it - when the player says yes - one bus at a time. Returns
+/// the buses (`bus_key`) that came: their stand-ins are made again.
+fn fetch_their_buses(lan: &LanSession, game: &mut LanGame, args: &Args) -> Vec<String> {
+    let mut arrived = Vec::new();
+    let mut said = Vec::new();
+    for (key, f) in game.bus_fetch.iter_mut() {
+        let Some(rx) = f.running.as_ref() else { continue };
+        let outcome = match rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => continue,
+            Ok(o) => o,
+            Err(_) => Err("the download stopped".to_string()),
+        };
+        f.running = None;
+        f.tries += 1;
+        match outcome {
+            Ok(r) if r.declined => f.done = true,
+            Ok(r) if r.absent => f.retry = Instant::now() + Duration::from_secs(15),
+            Ok(r) => {
+                f.done = true;
+                if r.fetched > 0 {
+                    said.push(format!("* {} came from the host ({} files, {:.0} MB)", vehicle_file_label(key), r.fetched, r.bytes as f64 / 1e6));
+                }
+                if r.fetched > 0 || r.had > 0 {
+                    arrived.push(key.clone());
+                }
+            }
+            Err(e) => {
+                log::info!("LAN mods: {key}: {e}");
+                f.tries += 7;
+                f.retry = Instant::now() + Duration::from_secs(60);
+            }
+        }
+        // (about ten minutes of waiting for a player's bus to reach the host)
+        if f.tries >= 40 {
+            f.done = true;
+        }
+    }
+    for s in said {
+        game.chat.push(s);
+    }
+    if lan.role != Role::Client || game.bus_fetch.values().any(|f| f.running.is_some()) {
+        return arrived;
+    }
+    let Some(host) = *MODS_HOST.lock().unwrap_or_else(|e| e.into_inner()) else { return arrived };
+    let now = Instant::now();
+    let next = game.remotes.values().filter(|rv| rv.stand_in).find_map(|rv| {
+        let key = crate::lan_mods::bus_key(&rv.made_as.0);
+        game.bus_fetch.get(&key).is_none_or(|f| !f.done && now >= f.retry).then(|| (key, rv.made_as.0.clone(), rv.name.clone()))
+    });
+    let Some((key, bus, who)) = next else { return arrived };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (mut a, session) = (args.clone(), lan.session);
+    std::thread::spawn(move || {
+        let r = (|| {
+            if !crate::lan_mods::host_has_bus(host, session, &bus)? {
+                return Ok(crate::lan_mods::Report { absent: true, ..Default::default() });
+            }
+            let label = vehicle_file_label(&bus);
+            let who = if who.trim().is_empty() { "A player".to_string() } else { who };
+            let mut ask = |files: usize, bytes: u64| {
+                crate::lan_mods::player_says_yes(&format!(
+                    "{who} drives {label}, which is not installed here: you see them in a stand-in bus.\n\nDownload {label} from the host for this session ({files} files, {:.0} MB)? Every file is checked; no programs are taken.",
+                    bytes as f64 / 1e6
+                ))
+            };
+            crate::lan_mods::fetch(&mut a, host, session, Some(&bus), &mut ask, &mut |_, _, _| {})
+        })();
+        let _ = tx.send(r);
+    });
+    let f = game.bus_fetch.entry(key).or_insert(BusFetch { running: None, retry: now, tries: 0, done: false });
+    f.running = Some(rx);
+    arrived
 }
 
 /// What the frame knows that LAN play needs.
@@ -1212,9 +1332,51 @@ pub fn turned_away(lan: &LanSession) -> Option<String> {
     Some(why)
 }
 
+/// Where the host's mods are reached (`mods_address`), for what is fetched or offered
+/// during the session.
+static MODS_HOST: std::sync::Mutex<Option<std::net::SocketAddr>> = std::sync::Mutex::new(None);
+
+/// Where the host (at `host`, the session's address) serves its mods: its own TCP port, or
+/// - when that is out of reach (a router forwards the UDP session only, or we came in over
+/// a WebSocket) - through its tunnel. None: no way to them. Takes a few seconds at most.
+fn mods_address(mut host: std::net::SocketAddr, session: u64) -> Option<std::net::SocketAddr> {
+    let joined_url = WS_PATH.lock().ok().and_then(|w| w.as_ref().and_then(|w| w.url.clone()));
+    let direct = joined_url.is_none() && std::net::TcpStream::connect_timeout(&host, Duration::from_secs(3)).is_ok();
+    if !direct {
+        let base = joined_url.or_else(|| omsi_net::bridge::lookup_tunnel(session).and_then(|u| omsi_net::ws::ws_url(&u)));
+        let tcp_url = base.map(|b| format!("{}/tcp", b.strip_suffix("/ws").unwrap_or(&b)))?;
+        match omsi_net::ws::tcp_forward(&tcp_url) {
+            Ok(local) => {
+                log::info!("LAN mods: the host's TCP port is out of reach; through {tcp_url}");
+                host = local;
+            }
+            Err(e) => log::warn!("LAN mods: {e}"),
+        }
+    }
+    *MODS_HOST.lock().unwrap_or_else(|e| e.into_inner()) = Some(host);
+    Some(host)
+}
+
+/// A joining game whose host answered only after the join (its world took long to load):
+/// where its mods are reached is found out now, on a thread of its own (once), for the
+/// buses offered and fetched during the session.
+fn find_mods_host(lan: &LanSession) {
+    static LOOKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some(host) = lan.host.filter(|_| lan.role == Role::Client && lan.welcome.is_some()) else { return };
+    if LOOKING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let session = lan.session;
+    std::thread::spawn(move || {
+        if mods_address(host, session).is_none() {
+            log::info!("LAN mods: the host's mods cannot be reached (no buses are offered or fetched)");
+        }
+    });
+}
+
 /// The host's mods (see `lan_mods`): the host serves them on its session's port number
-/// (TCP), a joining player fetches what it lacks before its world is made, and says how
-/// far it has got in the status the launcher shows.
+/// (TCP), a joining player fetches what it lacks before its world is made - when the player
+/// says yes to it - and says how far it has got in the status the launcher shows.
 pub fn share_mods(args: &mut Args, lan: &mut LanSession) {
     match lan.role {
         Role::Host => {
@@ -1223,7 +1385,7 @@ pub fn share_mods(args: &mut Args, lan: &mut LanSession) {
             }
         }
         Role::Client => {
-            let Some(mut host) = lan.host.filter(|_| lan.welcome.is_some()) else {
+            let Some(host) = lan.host.filter(|_| lan.welcome.is_some()) else {
                 log::info!("LAN mods: no host to ask yet (its mods are not fetched)");
                 return;
             };
@@ -1234,33 +1396,25 @@ pub fn share_mods(args: &mut Args, lan: &mut LanSession) {
             };
             note(lan, "Host's mods: looking what is needed…".into());
             let session = lan.session;
-            // the host's TCP port is not always reachable (a router forwards the UDP session
-            // only, or we came in over a WebSocket): the files go through its tunnel then
-            let joined_url = WS_PATH.lock().ok().and_then(|w| w.as_ref().and_then(|w| w.url.clone()));
-            let direct = joined_url.is_none() && std::net::TcpStream::connect_timeout(&host, Duration::from_secs(3)).is_ok();
-            if !direct {
-                let base = joined_url.or_else(|| omsi_net::bridge::lookup_tunnel(session).and_then(|u| omsi_net::ws::ws_url(&u)));
-                match base.map(|b| format!("{}/tcp", b.strip_suffix("/ws").unwrap_or(&b))) {
-                    Some(tcp_url) => match omsi_net::ws::tcp_forward(&tcp_url) {
-                        Ok(local) => {
-                            log::info!("LAN mods: the host's TCP port is out of reach; through {tcp_url}");
-                            host = local;
-                        }
-                        Err(e) => log::warn!("LAN mods: {e}"),
-                    },
-                    None => {
-                        note(lan, "Host's mods could not be downloaded; playing with what is installed here".into());
-                        return;
-                    }
-                }
-            }
+            let Some(host) = mods_address(host, session) else {
+                note(lan, "Host's mods could not be downloaded; playing with what is installed here".into());
+                return;
+            };
             // (in the background: the session is kept alive meanwhile - a join held for
             // minutes was dropped by the host and came in later without the mods)
             let (tx, rx) = std::sync::mpsc::channel::<String>();
             let mut fargs = args.clone();
+            let asking = tx.clone();
             let worker = std::thread::spawn(move || {
                 let mut last = Instant::now() - Duration::from_secs(1);
-                let r = crate::lan_mods::fetch(&mut fargs, host, session, &mut |done, total, file| {
+                let mut ask = |files: usize, bytes: u64| {
+                    let _ = asking.send("Host's mods: waiting for your answer…".into());
+                    crate::lan_mods::player_says_yes(&format!(
+                        "The host's session uses {files} files ({:.0} MB) that are not installed here: its map, the players' buses and what they use.\n\nDownload them, so that you see what the others see? Every file is checked, no programs are taken, and they are kept for the next time.\n\nWithout them you may see stand-in buses, or not meet the others at all.",
+                        bytes as f64 / 1e6
+                    ))
+                };
+                let r = crate::lan_mods::fetch(&mut fargs, host, session, None, &mut ask, &mut |done, total, file| {
                     if last.elapsed() > Duration::from_millis(500) {
                         last = Instant::now();
                         let pct = if total > 0 { done * 100 / total } else { 100 };
@@ -1281,6 +1435,9 @@ pub fn share_mods(args: &mut Args, lan: &mut LanSession) {
             let (result, map) = worker.join().unwrap_or_else(|_| (Err("the download stopped".into()), args.map.clone()));
             args.map = map;
             match result {
+                Ok(r) if r.declined => {
+                    note(lan, "Host's mods: not downloaded (you said no); you may see stand-in buses, or not meet the others".into());
+                }
                 Ok(r) => {
                     let text = if r.fetched > 0 {
                         format!("Host's mods: {} files ({:.0} MB) fetched (kept for the next join)", r.fetched, r.bytes as f64 / 1e6)
@@ -3304,6 +3461,7 @@ pub fn tick(
     let t_stage = std::time::Instant::now();
     let gone = lan.tick(dt, &mine);
     sync_vars(lan, game, player.as_deref(), dt);
+    offer_my_bus(lan, game, args, &mine.bus);
     game.stage_secs[0] += t_stage.elapsed().as_secs_f64();
     let t_stage = std::time::Instant::now();
     game.world.tick(
@@ -3409,6 +3567,25 @@ pub fn tick(
     let (Some(w), Some(r), Some(scene)) = (world, renderer, scene) else {
         return updates;
     };
+    // the buses of other players that came (from the host; to the host, from them): their
+    // stand-ins are made again, now in their own bus
+    let mut arrived = fetch_their_buses(lan, game, args);
+    arrived.extend(crate::lan_mods::take_arrived());
+    if !arrived.is_empty() {
+        let redo: Vec<u32> = game
+            .remotes
+            .iter()
+            .filter(|(_, rv)| rv.stand_in && arrived.contains(&crate::lan_mods::bus_key(&rv.made_as.0)))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in redo {
+            if let Some(rv) = game.remotes.remove(&id) {
+                log::info!("LAN: {} is drawn in their own bus now", rv.name);
+                release(r, scene, w, frame.audio, rv);
+            }
+        }
+        game.failed.retain(|(_, b), _| !arrived.contains(&crate::lan_mods::bus_key(b)));
+    }
     for id in gone {
         game.loading.remove(&id);
         if let Some(rv) = game.remotes.remove(&id) {
@@ -3500,7 +3677,7 @@ pub fn tick(
                 log::info!("LAN: {who} drives {bus}, which is not installed here: shown in a stand-in bus");
                 game.chat.push(format!("* {who} drives {bus}, which is not installed here: shown in a stand-in bus"));
                 if lan.role == Role::Host {
-                    let _ = lan.say_to(pose.id, "Host", &format!("The host does not have your bus ({bus}): the others see a stand-in. Swap to a bus the host has."));
+                    let _ = lan.say_to(pose.id, "Host", &format!("The host does not have your bus ({bus}) yet: the others see a stand-in until it has come from you (when the host says yes to it; a bus of the OMSI 2 folder is never passed on)."));
                 }
             }
             game.remotes.insert(pose.id, rv);
