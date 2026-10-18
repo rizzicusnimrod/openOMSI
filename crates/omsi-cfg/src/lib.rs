@@ -328,6 +328,15 @@ impl<'a> CfgReader<'a> {
         parse_f32(self.line())
     }
 
+    /// The next line as a number if it is one - not blank, not a keyword, not text - else
+    /// `None` with nothing read: an optional value after a block's fixed ones.
+    pub fn opt_f32(&mut self) -> Option<f32> {
+        let l = self.file.lines.get(self.pos)?.trim();
+        let v = l.replace(',', ".").parse::<f32>().ok().filter(|v| v.is_finite())?;
+        self.pos += 1;
+        Some(v)
+    }
+
     pub fn i32(&mut self) -> i32 {
         parse_i32(self.line())
     }

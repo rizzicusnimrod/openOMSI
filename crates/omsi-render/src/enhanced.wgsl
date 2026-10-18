@@ -165,16 +165,48 @@ struct Surface {
     albedo: vec3<f32>,
     f0: vec3<f32>,
     rough: f32,
+    // how wet a road it is (0 dry .. 1): the lamps' sheen on it runs out into streaks
+    wet: f32,
 };
+
+// A wet road's sheen of a lamp: the water film over the asphalt's grain is a mirror of
+// many small facets tilted every way, and seen low along the road those that send a lamp's
+// light to the eye lie in a long strip from under the lamp towards the viewer - the streak
+// a street lamp or a car's lights draw on wet asphalt, long and narrow. Anisotropic GGX
+// (Burley 2012): narrow across the line of sight (`WET_ACROSS`), long along it (`WET_ALONG`).
+const WET_ACROSS: f32 = 0.06;
+const WET_ALONG: f32 = 0.42;
+fn wet_streak(n: vec3<f32>, v: vec3<f32>, ld: vec3<f32>, nl: f32, nv: f32, f0: vec3<f32>) -> vec3<f32> {
+    let along = v - n * dot(v, n);
+    let la = length(along);
+    if (la < 1e-4) {
+        return vec3<f32>(0.0);
+    }
+    let y = along / la;
+    let x = cross(y, n);
+    let h = normalize(ld + v);
+    let hx = dot(h, x) / WET_ACROSS;
+    let hy = dot(h, y) / WET_ALONG;
+    let hz = dot(h, n);
+    let q = hx * hx + hy * hy + hz * hz;
+    let d = 1.0 / (PI * WET_ACROSS * WET_ALONG * q * q);
+    return d * v_smith(nv, nl, WET_ALONG) * f_schlick(f0, dot(v, h));
+}
 
 // How much of street lamp `li` reaches the point (1 for a lamp without a shadow map): its
 // map is one of the tiles under the far shadow map (lib.rs `LampShadow`), looking down from
 // the lamp's head; a few taps of it soften the edge, as the lamp's glowing bowl does.
 fn lamp_shadow_at(li: u32, p: vec3<f32>, n: vec3<f32>, thin: bool) -> f32 {
+    // (a map's lights: the first's index, and over 65536 how many after it share it - a
+    // vehicle's headlamps, lib.rs `LampShadow::lights_code`)
     var k = 4u;
     for (var j = 0u; j < 4u; j = j + 1u) {
-        if (camera.lamp_shadow[j] >= 0.0 && u32(camera.lamp_shadow[j]) == li) {
-            k = j;
+        if (camera.lamp_shadow[j] >= 0.0) {
+            let code = u32(camera.lamp_shadow[j]);
+            let first = code & 0xffffu;
+            if (li >= first && li < first + max(code >> 16u, 1u)) {
+                k = j;
+            }
         }
     }
     if (k > 3u) {
@@ -384,7 +416,10 @@ fn lamp_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, sf: Surface, thin: bool,
             continue;
         }
         let h = normalize(ld + v);
-        let spec = d_ggx(max(dot(n, h), 0.0), a) * v_smith(nv, nl, a) * f_schlick(sf.f0, dot(v, h));
+        var spec = d_ggx(max(dot(n, h), 0.0), a) * v_smith(nv, nl, a) * f_schlick(sf.f0, dot(v, h));
+        if (sf.wet > 0.0) {
+            spec = mix(spec, wet_streak(n, v, ld, nl, nv, sf.f0), sf.wet);
+        }
         sum = sum + irr * nl * (sf.albedo / PI + spec);
     }
     // What the lit ground throws back up: a diffuse reflector of the street's albedo (asphalt
@@ -491,6 +526,20 @@ fn display_level(t: vec3<f32>) -> vec3<f32> {
     return x + 0.04 * smoothstep(vec3<f32>(0.0), vec3<f32>(0.08), x);
 }
 
+// Whether `world` lies in the cab of the vehicle the camera is in (the player's own, or the
+// other player's bus one rides in): its own lights are the ones `cab_light` dims.
+fn in_own_cab(world: vec3<f32>) -> bool {
+    return inside_vehicle(camera.cam_pos.xyz) * near_player_vehicle(world) > 0.5;
+}
+
+// The most a light of the cab one sits in is drawn at, in the emission's terms (0.8 =
+// a self-lit surface's daylight level): the night's instrument dimming, the metering's lift
+// undone (`enh.led.z`, lib.rs `cab_dimmer`; a screen of the cab is shown at `enh.led.w`
+// instead of `enh.exposure.y`).
+fn cab_light() -> f32 {
+    return 0.8 * enh.led.z;
+}
+
 // The water on the windscreen where the wipers sweep, at `world`: the wipe map (in the
 // film's light map's place, see `MaterialExtra::wiped`) seen from in front of the bus - each
 // texel how much rain has gathered there since a blade last passed. -1 for a film that is not
@@ -504,6 +553,68 @@ fn wiped_wetness(world: vec3<f32>) -> f32 {
         return -1.0;
     }
     return textureSampleLevel(t_light, s_diffuse, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).r;
+}
+
+// A wet windscreen smears the bright lights seen through it: the film the blades leave and
+// the fine scratches they draw in it, along their arcs, spread a lamp's light across them -
+// into streaks running out from the wipers' pivots, below the glass (on the screen a fan
+// of nearly upright streaks through every headlight and street lamp). The light over the
+// display's white of the clean picture behind (`t_env`, as `rain_behind` reads it, exposed
+// already) gathered along that streak through this spot; `k` how much the glass smears.
+const SMEAR: f32 = 0.35;
+const SMEAR_LENGTH: f32 = 0.14;
+fn windscreen_smear(world: vec3<f32>, k: f32) -> vec3<f32> {
+    if (k <= 0.0 || camera.flags.z > -0.5) {
+        return vec3<f32>(0.0);
+    }
+    let c = camera.view_proj * vec4<f32>(world, 1.0);
+    if (c.w <= 0.05) {
+        return vec3<f32>(0.0);
+    }
+    let uv = vec2<f32>(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);
+    let dir = normalize(uv - vec2<f32>(0.5, 1.6));
+    var sum = vec3<f32>(0.0);
+    var wsum = 0.0;
+    for (var i = -6; i <= 6; i = i + 1) {
+        let t = f32(i) / 6.0;
+        let at = uv + dir * t * SMEAR_LENGTH;
+        let w = exp(-abs(t) * 3.0);
+        let s = textureSampleLevel(t_env, s_diffuse, clamp(at, vec2<f32>(0.001), vec2<f32>(0.999)), 0.0).rgb;
+        sum = sum + max(finite_or(s, vec3<f32>(0.0)) - vec3<f32>(1.0), vec3<f32>(0.0)) * w;
+        wsum = wsum + w;
+    }
+    return min(sum / wsum, vec3<f32>(200.0)) * SMEAR * k;
+}
+
+// The saloon in the panes of the bus one sits in (`enh.saloon`): at night the glass mirrors
+// the lit saloon behind the driver - a veil of its lit ceiling and seats over the dark road
+// seen through the windscreen - and each lamp a bright patch where it lies in the mirror
+// (a tube or a bulb a degree or two across). Fresnel's share of a pane's: 4 % straight on,
+// more along the side windows. `SALOON_VEIL` the luminance of what a lamp lights round it
+// (its ceiling, the seats; a broad lobe `SALOON_AROUND` round it in the mirror) and
+// `SALOON_LAMP` the lamp's own, per unit of its strength (both 1 = 10 000 cd/m2),
+// `SALOON_SPREAD` the lamp's size in the mirror (1 - cos).
+const SALOON_VEIL: f32 = 0.00004;
+const SALOON_AROUND: f32 = 0.12;
+const SALOON_LAMP: f32 = 0.006;
+const SALOON_SPREAD: f32 = 0.0003;
+fn saloon_reflection(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
+    let total = enh.saloon[0].w;
+    if (total <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let r = reflect(-v, n);
+    let f = 0.04 + 0.96 * pow(1.0 - clamp(abs(dot(n, v)), 0.0, 1.0), 5.0);
+    var sum = 0.0;
+    for (var k = 1; k < 9; k = k + 1) {
+        let l = enh.saloon[k];
+        if (l.w <= 0.0) {
+            break;
+        }
+        let c = 1.0 - dot(r, normalize(l.xyz - p));
+        sum = sum + l.w * (SALOON_VEIL * exp(-c / SALOON_AROUND) + SALOON_LAMP * exp(-c / SALOON_SPREAD));
+    }
+    return enh.saloon[0].rgb * sum * f;
 }
 
 fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bool, eye: vec3<f32>) -> vec4<f32> {
@@ -534,7 +645,19 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
         // windows peppered black. Drops smaller than a pixel give way to the mist now
         // (`rain_dome`), and the rest fade out over the first fifteen metres.
         let near = 1.0 - smoothstep(5.0, 15.0, length(v));
-        return vec4<f32>(d.rgb * enh.exposure.x * aer.a, d.a * near);
+        // (from the cab: the lights seen through it smeared, most just after a blade has
+        // passed and left its film, less as the drops gather again)
+        var smear = vec3<f32>(0.0);
+        if (in_cab) {
+            smear = windscreen_smear(in.world, clamp(in.params.x, 0.0, 1.0) * (1.0 - 0.5 * clamp(wet, 0.0, 1.0)));
+        }
+        let alpha = d.a * near;
+        if (all(smear <= vec3<f32>(0.0))) {
+            return vec4<f32>(d.rgb * enh.exposure.x * aer.a, alpha);
+        }
+        // (added over the picture behind under the plain alpha blend: at a sliver of cover)
+        let a_out = max(alpha, 0.02);
+        return vec4<f32>((d.rgb * enh.exposure.x * aer.a * alpha + smear) / a_out, a_out);
     }
     // --- the surface's texture and alpha, exactly as the vanilla pass reads them
     let terrain = material.extra.x > 0.5;
@@ -641,7 +764,11 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
         // A mirror (params.y 0.9) is no display: its picture is the street drawn a moment
         // ago, dark at night. Brightened like a display by the metering (up to 1.6 in the
         // dark) it showed a street far brighter than the one through the windscreen.
-        let lift = select(enh.exposure.y, min(enh.exposure.y, 1.0), material.params.y < 0.95);
+        var lift = select(enh.exposure.y, min(enh.exposure.y, 1.0), material.params.y < 0.95);
+        // (a screen in the cab one sits in dims itself at night: `cab_light`)
+        if (material.params.y >= 0.95 && in_own_cab(in.world)) {
+            lift = enh.led.w;
+        }
         let c = display_level(t) * lift;
         return vec4<f32>(c * aer.a + aer.rgb * pre, alpha);
     }
@@ -878,6 +1005,8 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
     ambient_albedo = ambient_albedo * (1.0 - metal);
     sf.f0 = f0;
     sf.rough = rough;
+    // (a puddle is a mirror of its own: the streaks are the wet asphalt's)
+    sf.wet = wet_road * (1.0 - puddle);
     let nv = clamp(dot(n, v), 1e-4, 1.0);
     // --- the sun
     let s = camera.sun_dir.xyz;
@@ -1107,7 +1236,12 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
     let cabin_light = interior_lamps(in.world, n, in.params2.z);
     let cabin = sf.albedo * cabin_light * mix(1.0, ao, 0.85);
     var rgb = (direct + ambient + lamps) * pre + cabin;
-    var emit = tex.rgb * material.emissive.rgb * max(enh.exposure.z * 2.0, 0.8);
+    // The cab one sits in: its own lights - tell-tales, lit switches, instruments, screens -
+    // at most as bright as `cab_light` lets them at night (lib.rs `cab_dimmer`). Over the dark
+    // cab they burned like lamps.
+    let own_cab = in_own_cab(in.world);
+    let cab_cap = select(1e6, cab_light(), own_cab);
+    var emit = tex.rgb * material.emissive.rgb * min(max(enh.exposure.z * 2.0, 0.8), cab_cap);
     // (the tile light map on the splines and [LightMapMapping] objects is the vanilla
     // path's: here the map's lamps light them, tinted from that map, as they light every
     // other surface - added on top it lit the roads twice, with a hard edge where a road
@@ -1133,7 +1267,7 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
             // (a window lit from inside shows some 80 cd/m² - a room's 300 lux off its
             // walls and through a curtain - an illuminated sign more: over the dark street
             // round it, well over the screen's white, and the eye's glare blooms round it)
-            emit = emit + nm * select(enh.exposure.z * 3.6, max(enh.exposure.z * 2.0, 0.8), switched);
+            emit = emit + nm * min(select(enh.exposure.z * 3.6, max(enh.exposure.z * 2.0, 0.8), switched), cab_cap);
         }
     }
     if (material.params2.x > 0.5 && !terrain) {
@@ -1147,7 +1281,7 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
         let left = (vec3<f32>(1.0) - clamp(cabin_light, vec3<f32>(0.0), vec3<f32>(1.0))) * (0.12 + 0.88 * night);
         let w = lm * left * clamp(in.params2.x, 0.0, 1.0);
         if (material.emissive.w < -1.5) {
-            emit = emit + tex.rgb * w * max(enh.exposure.z * 2.0, 0.6);
+            emit = emit + tex.rgb * w * min(max(enh.exposure.z * 2.0, 0.6), cab_cap);
         } else {
             // ... and as there it lifts the surface to its texture's own colour at the
             // most, shown as a display is (see the unlit path): taken as a light of the
@@ -1155,7 +1289,8 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
             // it shows at night) went past the tone curve's knee and bleached its colours -
             // the Procity's red and blue gauges pink and lavender (#827). (An LED panel's
             // light map stays as it was: its dots are meant to burn above their colour.)
-            emit = emit + max(display_level(tex.rgb) * enh.exposure.y - rgb, vec3<f32>(0.0)) * w;
+            let shown_at = select(enh.exposure.y, enh.led.w, own_cab);
+            emit = emit + max(display_level(tex.rgb) * shown_at - rgb, vec3<f32>(0.0)) * w;
         }
     }
     if (material.emissive.w < -1.5) {
@@ -1168,10 +1303,10 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
         // white light map's, so it goes out with that map's variable (the busbar, the
         // lights) as the Omsi.exe stage does.
         let lm_gate = select(1.0, clamp(in.params2.x, 0.0, 1.0), material.params2.x > 0.5);
-        emit = emit + tex.rgb * enh.led.x * alpha * lm_gate * max(enh.exposure.z * 2.0, 0.8);
+        emit = emit + tex.rgb * enh.led.x * alpha * lm_gate * min(max(enh.exposure.z * 2.0, 0.8), cab_cap);
     } else if (material.emissive.w < -0.5) {
         // a display's text (see MaterialExtra::display)
-        emit = emit + tex.rgb * 0.35 * max(enh.exposure.z * 2.0, 0.8);
+        emit = emit + tex.rgb * 0.35 * min(max(enh.exposure.z * 2.0, 0.8), cab_cap);
     }
     rgb = rgb + emit;
     if (material.retro.y > 0.5) {
@@ -1217,7 +1352,9 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
         // cab's wall, #861) shows no reflection; made up to a quarter opaque by it, the
         // whole rectangle of the sticker mirrored the sky
         let cover = smoothstep(0.0, 0.05, alpha);
-        let refl_rgb = reflection * pre * cover;
+        // (and from inside the bus one sits in, its own lit saloon)
+        let saloon = select(vec3<f32>(0.0), saloon_reflection(in.world, n, v), own_pane > 0.5 && !capture);
+        let refl_rgb = (reflection + saloon) * pre * cover;
         let rl = dot(refl_rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
         // (a pane passes most light: a reflection making it up to 60 % opaque laid a grey
         // veil over the destination display behind the windscreen and the saloon)

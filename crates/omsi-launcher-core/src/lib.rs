@@ -273,6 +273,13 @@ pub fn content_dir() -> Option<PathBuf> {
         }
     };
     let _ = omsi_cfg::ensure_content_layout(&dir);
+    // (this fork's weather presets, once a run: the weather list is read from there)
+    static PRESETS: std::sync::Once = std::sync::Once::new();
+    PRESETS.call_once(|| {
+        if let Err(e) = omsi_content::weather::install_presets(&dir) {
+            eprintln!("weather presets: {e}");
+        }
+    });
     register_roots(&dir);
     Some(dir)
 }
@@ -1039,7 +1046,8 @@ pub fn list_weather() -> Result<Vec<WeatherInfo>> {
     let mut out = Vec::new();
     let mut keys = Vec::new();
     let lang = content_language();
-    let mut files: Vec<PathBuf> = merged_entries("Weather").into_iter().filter(|p| p.extension().map(|e| e.eq_ignore_ascii_case("owt")).unwrap_or(false)).collect();
+    // (this fork's presets only, `omsi_content::weather::is_preset`)
+    let mut files: Vec<PathBuf> = merged_entries("Weather").into_iter().filter(|p| p.extension().map(|e| e.eq_ignore_ascii_case("owt")).unwrap_or(false) && omsi_content::weather::is_preset(&p.to_string_lossy())).collect();
     files.sort();
     for f in files {
         // the description in the settings' language lives in `<name>_ENG.dsc`
@@ -1955,8 +1963,10 @@ pub fn settings_from_text(text: Option<&str>) -> Value {
             }
             "version" => version = val.parse::<i64>().unwrap_or(0),
             // the random cars' drivers (the custom fork's options): `ai_drivers` and
-            // `ai_drivers.<name>`, kept as they are written (the game reads them)
-            k if k == "ai_drivers" || k.starts_with("ai_drivers.") => v[k] = json!(val),
+            // `ai_drivers.<name>`, and the game's own options no page here has (the
+            // cinematic camera, the dashcam, the autopilot), kept as they are written (the
+            // game reads them)
+            k if game_own_key(k) => v[k] = json!(val),
             _ => {}
         }
     }
@@ -2109,6 +2119,14 @@ pub fn apply_graphics_profile(profile: &Value, settings: &mut Value) {
             settings[k] = x.clone();
         }
     }
+}
+
+/// A setting only the game's own menu sets, written as the menu left it: the random cars'
+/// drivers (`ai_drivers`, `ai_drivers.<name>`), the cinematic camera, the dashcam and the
+/// autopilot. (Without a line of its own here a value the menu changed was lost: the old
+/// file's line was kept instead.)
+fn game_own_key(k: &str) -> bool {
+    k == "ai_drivers" || ["ai_drivers.", "cinematic_", "dashcam_", "autopilot_"].iter().any(|p| k.starts_with(p))
 }
 
 /// The `settings.cfg` text for the page's values `v`; the lines of the `old` file that the
@@ -2297,7 +2315,7 @@ pub fn settings_to_text(v: &Value, old: Option<&str>) -> String {
     text.push_str(&format!("triple_left_angle_deg={}\ntriple_right_angle_deg={}\ntriple_eye_height_mm={}\n", f("triple_left_angle_deg", 45.0).clamp(0.0, 90.0), f("triple_right_angle_deg", 45.0).clamp(0.0, 90.0), f("triple_eye_height_mm", 0.0).clamp(-500.0, 500.0)));
     // the drivers' settings the options changed (see `settings_from_text`)
     if let Some(m) = v.as_object() {
-        let mut keys: Vec<&String> = m.keys().filter(|k| *k == "ai_drivers" || k.starts_with("ai_drivers.")).collect();
+        let mut keys: Vec<&String> = m.keys().filter(|k| game_own_key(k)).collect();
         keys.sort();
         for k in keys {
             let val = match &m[k.as_str()] {
@@ -2848,6 +2866,29 @@ mod tests {
         }
         let back = settings_from_text(Some(&text));
         assert_eq!(back["ai_drivers.always_on"], json!("35"));
+    }
+
+    #[test]
+    fn the_cameras_and_the_autopilots_settings_survive_a_save() {
+        // set in the game's menu (numbers, switches), over a file that had older values
+        let old = "cinematic_look=1
+dashcam_stamp=1
+autopilot_max_kmh=80
+";
+        let mut v = settings_from_text(Some(old));
+        v["cinematic_look"] = json!(4);
+        v["cinematic_letterbox"] = json!(2.39);
+        v["dashcam_stamp"] = json!(false);
+        v["autopilot_max_kmh"] = json!(65);
+        let text = settings_to_text(&v, Some(old));
+        for line in ["cinematic_look=4", "cinematic_letterbox=2.39", "dashcam_stamp=0", "autopilot_max_kmh=65"] {
+            assert_eq!(text.lines().filter(|l| *l == line).count(), 1, "{line} in
+{text}");
+        }
+        assert!(!text.lines().any(|l| l == "cinematic_look=1"), "{text}");
+        // and the launcher's own save of the file keeps them as they are
+        let again = settings_to_text(&settings_from_text(Some(&text)), Some(&text));
+        assert!(again.lines().any(|l| l == "cinematic_look=4") && again.lines().any(|l| l == "dashcam_stamp=0"), "{again}");
     }
 
     #[test]

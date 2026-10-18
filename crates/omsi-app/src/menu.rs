@@ -92,7 +92,7 @@ impl Menu {
         }
         let mut weathers = vec![("default".to_string(), String::new())];
         if let Ok(rd) = std::fs::read_dir(root.join("Weather")) {
-            let mut files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().map(|e| e.eq_ignore_ascii_case("owt")).unwrap_or(false)).collect();
+            let mut files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().map(|e| e.eq_ignore_ascii_case("owt")).unwrap_or(false) && omsi_content::weather::is_preset(&p.to_string_lossy())).collect();
             files.sort();
             for f in files {
                 let name = f.file_stem().unwrap().to_string_lossy().trim_start_matches('#').to_string();

@@ -51,6 +51,15 @@ const WANT_AGAIN: f32 = 0.8;
 
 type Key = (bool, u32);
 
+/// Where a player is, for what the host keeps and sends round them: on foot - walking, or
+/// riding in another player's bus - where the walker is, else at their bus.
+fn view_center(pose: &omsi_net::Pose) -> DVec3 {
+    match &pose.walker {
+        Some(w) if w.x.is_finite() && w.y.is_finite() && w.z.is_finite() => DVec3::new(w.x, w.y, w.z),
+        _ => DVec3::new(pose.x, pose.y, pose.z),
+    }
+}
+
 /// What the host has sent one client.
 #[derive(Default)]
 struct View {
@@ -635,8 +644,18 @@ impl LanWorld {
         mut humans: Option<&mut Humans>,
         me: Option<DVec3>,
     ) {
-        // where the players are: the world is kept around them too
+        // where the players are: the world is kept around them too - around the player
+        // where they are, out of their seat on foot or riding in another player's bus (the
+        // cars, the people and the lights round their own bus, standing kilometres behind,
+        // were all a rider got: the bus they rode in drove through an empty town with its
+        // passengers gone and its lights stuck)
         let players: Vec<(u32, DVec3)> = lan
+            .peers()
+            .filter(|p| p.has_pose && p.pose.has_vehicle())
+            .map(|p| (p.pose.id, view_center(&p.pose)))
+            .collect();
+        // (and where their buses are: the people riding in one are sent with it)
+        let buses_at: Vec<(u32, DVec3)> = lan
             .peers()
             .filter(|p| p.has_pose && p.pose.has_vehicle())
             .map(|p| (p.pose.id, DVec3::new(p.pose.x, p.pose.y, p.pose.z)))
@@ -686,7 +705,7 @@ impl LanWorld {
             }
         }
         self.views.retain(|id, _| players.iter().any(|p| p.0 == *id));
-        let players_at = players.clone();
+        let players_at = buses_at;
         let lan_me_pos = me;
         for (id, at) in players {
             let view = self.views.entry(id).or_default();
@@ -754,6 +773,7 @@ impl LanWorld {
                         },
                         looks: nw::CarLooks {
                             rear_fog: c.shown.rear_fog,
+                            front_fog: c.shown.front_fog,
                             high_beam: c.shown.high_beam,
                             horns: c.shown.horns & 3,
                             bulb: c.shown.bulb,
@@ -1319,7 +1339,7 @@ impl LanWorld {
             // switched side by side, drove without headlights or brake lights.
             {
                 use crate::ai_drivers::{
-                    VAR_BRAKE_L, VAR_BRAKE_R, VAR_HEAD_L, VAR_HEAD_R, VAR_HIGH_BEAM, VAR_REAR_FOG, VAR_SMOKE_ALPHA, VAR_SMOKE_FREQ,
+                    VAR_BRAKE_L, VAR_BRAKE_R, VAR_FRONT_FOG, VAR_HEAD_L, VAR_HEAD_R, VAR_HIGH_BEAM, VAR_REAR_FOG, VAR_SMOKE_ALPHA, VAR_SMOKE_FREQ,
                     VAR_SMOKE_LIFE, VAR_SMOKE_SPEED,
                 };
                 let (cfg, conditions) = (t.driver_cfg.clone(), t.conditions);
@@ -1361,6 +1381,7 @@ impl LanWorld {
                         v.set_engine_var(VAR_BRAKE_L, on(c.brake && c.looks.bulb != 3));
                         v.set_engine_var(VAR_BRAKE_R, on(c.brake && c.looks.bulb != 4));
                         v.set_engine_var(VAR_REAR_FOG, on(c.looks.rear_fog));
+                        v.set_engine_var(VAR_FRONT_FOG, on(c.looks.front_fog));
                         v.set_engine_var(VAR_HIGH_BEAM, on(c.looks.high_beam && high));
                     }
                     // a toot for each the host's driver gave since
@@ -1746,5 +1767,23 @@ mod tests {
         let jump = CarState { x: b.x + 5.0, ..b };
         let p = car_path(&a, &jump, 0.5, span);
         assert!((p - glam::DVec2::new((a.x + jump.x) / 2.0, (a.y + jump.y) / 2.0)).length() < 1e-9);
+    }
+
+    /// The host keeps the world round where a player is: on foot or riding in another
+    /// player's bus at the walker, in their own bus at the bus.
+    #[test]
+    fn a_rider_gets_the_world_round_where_they_ride() {
+        let mut pose = omsi_net::Pose { x: 100.0, y: 200.0, z: 3.0, ..Default::default() };
+        assert_eq!(super::view_center(&pose), glam::DVec3::new(100.0, 200.0, 3.0));
+        pose.walker = Some(omsi_net::Walker {
+            x: 2100.0,
+            y: -50.0,
+            z: 4.0,
+            aboard: Some(omsi_net::Aboard { owner: 1, ..Default::default() }),
+            ..Default::default()
+        });
+        assert_eq!(super::view_center(&pose), glam::DVec3::new(2100.0, -50.0, 4.0));
+        pose.walker.as_mut().unwrap().x = f64::NAN;
+        assert_eq!(super::view_center(&pose), glam::DVec3::new(100.0, 200.0, 3.0));
     }
 }

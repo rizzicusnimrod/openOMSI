@@ -69,6 +69,8 @@ const LOOKS_BITS: usize = 8;
 const LOOKS_TAG: u64 = 0b1010;
 /// A car's siren after the looks, and the tag before them.
 const SIREN_TAG: u64 = 0b0110;
+/// A car's front fog lamps after the sirens, and the tag before them.
+const FRONT_FOG_TAG: u64 = 0b0101;
 const PERSON_FOOT_BITS: usize = 24 + 2 + 2 + 19 + 19 + 17 + 8 + 6 + 1;
 const PERSON_WAIT_BITS: usize = 32 + 8;
 const PERSON_ABOARD_BITS: usize = 24 + 2 + 2 + 24 + 12 + 13 + 10 + 8 + 8;
@@ -119,6 +121,8 @@ pub struct CarLooks {
     pub bulb: u8,
     pub smoker: bool,
     pub siren: bool,
+    /// Its front fog lamps (a section of their own after the sirens).
+    pub front_fog: bool,
 }
 
 impl CarLooks {
@@ -137,8 +141,9 @@ impl CarLooks {
             horns: (b >> 2 & 3) as u8,
             bulb: (b >> 4 & 7) as u8,
             smoker: b >> 7 & 1 != 0,
-            // (its own section: `decode`)
+            // (their own sections: `decode`)
             siren: false,
+            front_fog: false,
         }
     }
 }
@@ -290,10 +295,10 @@ pub fn encode(frame: &WorldFrame, protocol: u8) -> Vec<Vec<u8>> {
             &[]
         };
         let parked: Option<(bool, &[u32])> = if first { frame.parked.as_ref().map(|(c, k)| (*c && k.len() <= 127, &k[..k.len().min(127)])) } else { None };
-        left = left.saturating_sub(lights.len() * LIGHT_BITS + gone.len() * GONE_BITS + 1 + parked.map(|p| 8 + p.1.len() * 32).unwrap_or(0) + 8);
+        left = left.saturating_sub(lights.len() * LIGHT_BITS + gone.len() * GONE_BITS + 1 + parked.map(|p| 8 + p.1.len() * 32).unwrap_or(0) + 12);
         let c0 = ci;
-        while ci < cars.len() && ci - c0 < 127 && left >= CAR_BITS + LOOKS_BITS + 1 {
-            left -= CAR_BITS + LOOKS_BITS + 1;
+        while ci < cars.len() && ci - c0 < 127 && left >= CAR_BITS + LOOKS_BITS + 2 {
+            left -= CAR_BITS + LOOKS_BITS + 2;
             ci += 1;
         }
         let p0 = pi;
@@ -425,6 +430,10 @@ pub fn encode(frame: &WorldFrame, protocol: u8) -> Vec<Vec<u8>> {
         w.put(SIREN_TAG, 4);
         for c in &cars[c0..ci] {
             w.put(c.looks.siren as u64, 1);
+        }
+        w.put(FRONT_FOG_TAG, 4);
+        for c in &cars[c0..ci] {
+            w.put(c.looks.front_fog as u64, 1);
         }
         out.push(w.finish());
         first = false;
@@ -578,6 +587,15 @@ pub fn decode(data: &[u8], protocol: u8) -> Option<WorldFrame> {
                 if sirens.len() == f.cars.len() {
                     for (c, s) in f.cars.iter_mut().zip(sirens) {
                         c.looks.siren = s;
+                    }
+                    // (the front fog lamps: likewise)
+                    if r.get(4) == Some(FRONT_FOG_TAG) {
+                        let fogs: Vec<bool> = (0..f.cars.len()).map_while(|_| r.get(1).map(|b| b == 1)).collect();
+                        if fogs.len() == f.cars.len() {
+                            for (c, s) in f.cars.iter_mut().zip(fogs) {
+                                c.looks.front_fog = s;
+                            }
+                        }
                     }
                 }
             }
@@ -808,7 +826,7 @@ mod tests {
             brake: true,
             lights: true,
             at_station: -1,
-            looks: CarLooks { rear_fog: true, high_beam: false, horns: 3, bulb: 2, smoker: true, siren: true },
+            looks: CarLooks { rear_fog: true, high_beam: false, horns: 3, bulb: 2, smoker: true, siren: true, front_fog: true },
         }
     }
 

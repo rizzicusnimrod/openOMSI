@@ -47,6 +47,10 @@ struct Enhanced {
     // the windscreen's wipers: rows 0-2 world to the bus's frame, 3 the bus's origin, 4 the
     // wipe map's rectangle (x min, z min, 1 / width, 1 / height; 0: none)
     wipe: array<vec4<f32>, 5>,
+    // the saloon's lamps the panes of the bus one sits in mirror: row 0 rgb their mean
+    // colour, w their strength in all (0 none); rows 1.. xyz each lamp's place, w its
+    // strength (0: no more)
+    saloon: array<vec4<f32>, 9>,
 };
 @group(0) @binding(11) var<uniform> enh: Enhanced;
 @group(0) @binding(13) var s_lin: sampler;

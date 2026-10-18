@@ -15,6 +15,8 @@ use omsi_vehicle::Vehicle;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const VAR_REAR_FOG: &str = "AIHL_rearfog";
+/// The front fog lamps (the custom fork's).
+pub const VAR_FRONT_FOG: &str = "AIHL_frontfog";
 pub const VAR_HEAD_L: &str = "AIHL_head_l";
 pub const VAR_HEAD_R: &str = "AIHL_head_r";
 pub const VAR_BRAKE_L: &str = "AIHL_brake_l";
@@ -38,6 +40,13 @@ const HIGH_FACTOR: f32 = 2.0;
 const HIGH_SIZE: f32 = 2.5;
 const HIGH_CONE: f32 = 0.6;
 const HIGH_COLOR: [f32; 3] = [255.0, 255.0, 255.0];
+
+/// A front fog lamp sits this far under its side's lowest headlight (m), at least this high
+/// over the road, its glow this much of the headlight's, a halogen's white.
+const FRONT_FOG_DROP: f32 = 0.28;
+const FRONT_FOG_MIN_Z: f32 = 0.25;
+const FRONT_FOG_SIZE: f32 = 0.7;
+const FRONT_FOG_COLOR: [f32; 3] = [255.0, 250.0, 225.0];
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
 
@@ -81,6 +90,7 @@ pub fn patch(def: &Vehicle, model: &mut Model) -> AiPatch {
     let fog = add_rear_fog_lamp(model);
     let sides = split_sides(model);
     let high = add_high_beams(model);
+    add_front_fog_lamps(model);
     let two_stroke = is_two_stroke(def) && add_two_stroke_smoke(model);
     AiPatch { lamps: fog || sides || high, high_beam: high, two_stroke }
 }
@@ -191,6 +201,39 @@ fn add_high_beams(model: &mut Model) -> bool {
             m.light_enh_2.insert(li + 1, high);
             any = true;
             li += 2;
+        }
+    }
+    any
+}
+
+/// A front fog lamp under each side's lowest headlight (`VAR_HEAD_L`/`VAR_HEAD_R`, so after
+/// `split_sides`), in the bumper, on the same mesh after the last of the mesh's lamps,
+/// switched by `VAR_FRONT_FOG`. The game's fog lamps' light takes it up by its variable
+/// (`lights::is_fog_lamp`). False when the model has no split headlights.
+fn add_front_fog_lamps(model: &mut Model) -> bool {
+    let mut any = false;
+    for m in &mut model.meshes {
+        let mut lowest: [Option<LightEnh2>; 2] = [None, None];
+        for l in &m.light_enh_2 {
+            let side = if is_var(l, VAR_HEAD_L) {
+                0
+            } else if is_var(l, VAR_HEAD_R) {
+                1
+            } else {
+                continue;
+            };
+            if lowest[side].as_ref().is_none_or(|b| l.pos[2] < b.pos[2]) {
+                lowest[side] = Some(l.clone());
+            }
+        }
+        for mut fog in lowest.into_iter().flatten() {
+            fog.pos[2] = (fog.pos[2] - FRONT_FOG_DROP).max(FRONT_FOG_MIN_Z);
+            fog.size *= FRONT_FOG_SIZE;
+            fog.color = FRONT_FOG_COLOR;
+            fog.factor = 1.0;
+            fog.variable = VAR_FRONT_FOG.into();
+            m.light_enh_2.push(fog);
+            any = true;
         }
     }
     any

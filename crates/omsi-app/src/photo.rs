@@ -46,6 +46,8 @@ pub(crate) struct Job {
     /// The lens's opening (radius, m) and the distance in focus (m); None: all sharp.
     lens: Option<(f32, f32)>,
     grade: PhotoGrade,
+    /// The cinematic look's letterbox (the picture's visible aspect): the photo is cut to it.
+    crop: Option<f32>,
     path: PathBuf,
     sidecar: serde_json::Value,
     started: std::time::Instant,
@@ -76,6 +78,11 @@ pub(crate) struct Photo {
     /// pictures are all taken in one frame - spread over several, a car driving by left a
     /// trail of copies of itself through the averaged photo.
     pub(crate) live: bool,
+    /// Entered from the cinematic camera: its look (grade, letterbox, lens) over the picture
+    /// and the photo, while `cine_on`; the shot's name (`cinema::Cinema::photo_look`).
+    pub(crate) cine: Option<omsi_render::LensFx>,
+    pub(crate) cine_on: bool,
+    cine_shot: Option<&'static str>,
     saved: Saved,
 }
 
@@ -106,7 +113,6 @@ pub(crate) fn fov_of(mm: f32) -> f32 {
 }
 
 /// The focal length (mm) whose angle of view is `fov` degrees (the inverse of `fov_of`).
-#[cfg_attr(not(test), allow(dead_code))]
 fn focal_of(fov: f32) -> f32 {
     12.0 / (fov.clamp(1.0, 170.0).to_radians() * 0.5).tan()
 }
@@ -203,6 +209,7 @@ pub(crate) fn switch_now(app: &App, name: &str) -> Option<bool> {
     Some(match name {
         "orbit" => p.orbit,
         "grid" => p.grid,
+        "cine" => p.cine_on,
         _ => return None,
     })
 }
@@ -225,6 +232,11 @@ pub(crate) fn switch_set(app: &mut App, name: &str, on: bool) {
         "grid" => {
             if let Some(p) = app.photo.as_mut() {
                 p.grid = on;
+            }
+        }
+        "cine" => {
+            if let Some(p) = app.photo.as_mut() {
+                p.cine_on = on && p.cine.is_some();
             }
         }
         _ => {}
@@ -275,6 +287,9 @@ pub(crate) fn pages(app: &App) -> Vec<(&'static str, Vec<Row>)> {
     use crate::game_lists::{button, row, slider_row, switch_row};
     let Some(p) = app.photo.as_ref() else { return Vec::new() };
     let mut camera: Vec<Row> = Vec::new();
+    if p.cine.is_some() {
+        camera.extend(switch_row(app, "photo:cine", "Cinematic look", "The cinematic camera's grade, letterbox and lens; the photo is cut to the letterbox"));
+    }
     if app.player.is_some() {
         camera.extend(switch_row(app, "photo:orbit", "Around the bus", "The camera circles the bus (hold the middle mouse button to turn it, the wheel to come nearer); off: it flies free (W A S D, Q and E, Shift faster)"));
     }
@@ -445,8 +460,16 @@ impl App {
             wetness: self.wetness,
         };
         let fov = self.camera.as_ref().map(|c| c.fov_deg).unwrap_or(60.0);
-        // the focal length nearest the view's angle now
-        let focal = FOCALS.iter().copied().min_by(|a, b| (fov_of(*a) - fov).abs().total_cmp(&(fov_of(*b) - fov).abs())).unwrap_or(35.0);
+        // from the cinematic camera: its shot as it is - the lens's exact angle, the tilt, the
+        // focus and the look (`cinema::Cinema::photo_look`)
+        let cine = (self.view == crate::cinema::CINEMA).then(|| self.cinema.photo_look(&crate::cinema::Config::from_settings(&self.settings)));
+        // the focal length nearest the view's angle now (the cinematic shot's own)
+        let focal = if cine.is_some() {
+            focal_of(fov)
+        } else {
+            FOCALS.iter().copied().min_by(|a, b| (fov_of(*a) - fov).abs().total_cmp(&(fov_of(*b) - fov).abs())).unwrap_or(35.0)
+        };
+        let roll = if cine.is_some() { self.camera.as_ref().map(|c| c.roll).unwrap_or(0.0) } else { 0.0 };
         self.release_vehicle_keys();
         if !live {
             self.paused = true;
@@ -457,28 +480,39 @@ impl App {
             self.view = "free".into();
         }
         self.ego = false;
-        let focus = self.player.as_ref().zip(self.camera.as_ref()).map(|(p, c)| (p.vehicle.position - c.position).length() as f32).unwrap_or(10.0).clamp(0.5, 500.0);
+        let mut focus = self.player.as_ref().zip(self.camera.as_ref()).map(|(p, c)| (p.vehicle.position - c.position).length() as f32).unwrap_or(10.0).clamp(0.5, 500.0);
+        let mut aperture = 0.0;
+        let mut grade = PhotoGrade::default();
+        if let Some((_, f, a, _)) = cine {
+            focus = f.clamp(0.3, 2000.0);
+            // (the nearest f-number the lens has)
+            aperture = if a > 0.0 { APERTURES.iter().copied().filter(|x| *x > 0.0).min_by(|x, y| (x - a).abs().total_cmp(&(y - a).abs())).unwrap_or(2.8) } else { 0.0 };
+            grade.grain = self.settings.cinematic_grain.clamp(0.0, 1.0);
+        }
         self.photo = Some(Box::new(Photo {
             panel: true,
-            roll: 0.0,
+            roll,
             focal,
             orbit,
             grid: false,
-            grade: PhotoGrade::default(),
-            aperture: 0.0,
+            grade,
+            aperture,
             focus,
             scale: 1.0,
             samples: 64,
             job: None,
             note: None,
             live,
+            cine: cine.map(|c| c.0),
+            cine_on: cine.is_some(),
+            cine_shot: cine.and_then(|c| c.3),
             saved,
         }));
         self.photo_panel(true);
         if live {
             self.service_msg = Some(("Photo mode: the session goes on for everyone".into(), 4.0));
         }
-        log::info!("photo mode on{}", if live { " (LAN: the world goes on)" } else { "" });
+        log::info!("photo mode on{}{}", if live { " (LAN: the world goes on)" } else { "" }, if cine.is_some() { " from the cinematic camera" } else { "" });
     }
 
     /// Photo mode off: the view, the pause, the clock and the weather as they were.
@@ -523,6 +557,10 @@ impl App {
         if let Some(r) = self.renderer.as_mut() {
             r.photo = None;
             r.view_shift = None;
+            r.lens = None;
+        }
+        if self.view == crate::cinema::CINEMA {
+            self.cinema.resume();
         }
         self.service_msg = Some(("Photo mode off".into(), 2.0));
         log::info!("photo mode off");
@@ -692,7 +730,9 @@ impl App {
             "grade": { "ev": p.grade.ev, "contrast": p.grade.contrast, "saturation": p.grade.saturation, "warmth": p.grade.warmth, "tint": p.grade.tint, "glow": p.grade.glow, "vignette": p.grade.vignette, "grain": p.grade.grain },
             "size": [pw, ph],
             "pictures": pictures,
+            "cinematic": p.cine.filter(|_| p.cine_on).map(|c| serde_json::json!({ "shot": p.cine_shot, "look": crate::cinema::LOOKS.get(c.look as usize), "letterbox": c.aspect })),
         });
+        let crop = p.cine.filter(|c| p.cine_on && c.aspect > 0.0).map(|c| c.aspect);
         p.job = Some(Job {
             width: pw,
             height: ph,
@@ -702,6 +742,7 @@ impl App {
             camera: cam,
             lens,
             grade,
+            crop,
             path,
             sidecar,
             started: std::time::Instant::now(),
@@ -855,10 +896,16 @@ pub(crate) fn capture(
             o[k] = (e[k].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
         }
     }
+    // the cinematic look's letterbox: the rows between its bars (as the lens pass keeps them)
+    let (out, h) = match job.crop.map(|aspect| letterbox_rows(w, h, aspect)) {
+        Some((y0, y1)) if y1 > y0 && (y0 > 0 || y1 < h) => (out[(y0 * w * 4) as usize..(y1 * w * 4) as usize].to_vec(), y1 - y0),
+        _ => (out, h),
+    };
     let secs = job.started.elapsed().as_secs_f32();
     let path = job.path.clone();
     let mut sidecar = job.sidecar;
     sidecar["seconds"] = serde_json::json!((secs * 10.0).round() / 10.0);
+    sidecar["size"] = serde_json::json!([w, h]);
     std::thread::spawn(move || {
         match image::save_buffer(&path, &out, w, h, image::ColorType::Rgba8) {
             Ok(()) => {
@@ -875,9 +922,28 @@ pub(crate) fn capture(
 }
 
 
+/// The rows of a `w` x `h` picture a letterbox of `aspect` leaves (first, past the last): the
+/// lens pass's bars (lens.wgsl: |v - 0.5| over half the kept share) taken off.
+fn letterbox_rows(w: u32, h: u32, aspect: f32) -> (u32, u32) {
+    let keep = ((w as f32 / h.max(1) as f32) / aspect.max(0.1)).min(1.0);
+    let y0 = ((h as f32 * (1.0 - keep) * 0.5).ceil() as u32).min(h);
+    let y1 = ((h as f32 * (1.0 + keep) * 0.5).floor() as u32).clamp(y0, h);
+    (y0, y1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 16:9 photo cut to 2.39:1 keeps the middle 74.4 % of its rows; a picture already
+    /// that wide keeps them all.
+    #[test]
+    fn the_letterbox_crop_keeps_the_picture_between_the_bars() {
+        let (y0, y1) = letterbox_rows(3840, 2160, 2.39);
+        assert_eq!((y0, y1), (277, 1883));
+        assert!((3840.0 / (y1 - y0) as f32 - 2.39).abs() < 0.01);
+        assert_eq!(letterbox_rows(2390, 1000, 2.39), (0, 1000));
+    }
 
     /// A 50 mm lens sees 27° up and down, a 24 mm one 53°, and the inverse gives them back.
     #[test]

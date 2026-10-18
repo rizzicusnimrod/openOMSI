@@ -104,8 +104,18 @@ so it can't replace it with the plain version). Check
   the launcher's wheel settings for the classic centring spring.
 * A real tyre screech recording, and a vehicle smoke slider (Display settings).
 
-### Photo mode and interface
+### Cameras, photo mode and interface
 
+* **Cinematic camera** (**Ctrl+F3**) for showcase and YouTube videos: an automatic director that
+  cuts between chase, tracking, roadside fly-by, long-lens, drone, front, wheel-mount, crane,
+  over-the-shoulder and bird's-eye shots, each placed where nothing blocks the view. Film looks
+  (teal and orange, warm film, black and white...), letterbox, focus on the bus with depth of
+  field, motion blur, anamorphic streaks and sun flares. **Ctrl+F3** again cuts to the next shot,
+  **Ctrl+F2** holds the shot. You keep driving while it films.
+* **Dashcam view** (**Ctrl+F1**): a camera at the top of the windscreen with a fisheye lens,
+  colour fringes, sensor noise (lots of it at night), video compression smear, rolling-shutter
+  lean and wobble, mount shake over bumps, stars round lamps, and the date, time and speed in the
+  picture. Both are set up on the *Cameras* page of the options.
 * **Photo mode** (**F10**, or *Photo mode* in the game menu): a free camera, a real lens
   (12-300 mm, aperture, focus and depth of field), exposure and colour looks, and supersampled
   pictures up to 8192 px saved to `Screenshots\Photos`. In multiplayer it works too - the game

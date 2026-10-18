@@ -31,6 +31,7 @@ mod update_watch;
 mod presence;
 mod ambience;
 mod camera_arm;
+mod cinema;
 mod career;
 mod describe;
 mod editor;
@@ -78,6 +79,8 @@ mod app;
 mod applog;
 mod app_events;
 mod bus_service;
+mod acc;
+mod autopilot;
 mod camera_util;
 mod controllers;
 mod hpattern;
@@ -225,6 +228,7 @@ pub(crate) fn launcher_statics() {
     ENHANCED.store(s.enhanced || omsi_cfg::env::var_os("OMSI_ENHANCED").is_some(), std::sync::atomic::Ordering::Relaxed);
     CLASSIC.store(s.classic(), std::sync::atomic::Ordering::Relaxed);
     NIGHT_BRIGHTNESS.store(s.night_brightness as u32, std::sync::atomic::Ordering::Relaxed);
+    DASH_DIMMER.store(s.dash_dimmer as u32, std::sync::atomic::Ordering::Relaxed);
     CLOUDS.store(s.clouds && omsi_cfg::env::var_os("OMSI_NO_CLOUDS").is_none(), std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -308,6 +312,12 @@ pub(crate) fn prepare(mut args: Args, bare: bool) -> Result<Option<(Args, Option
             Ok(()) => {
                 omsi_cfg::add_content_root(c.clone());
                 log::info!("content folder (mods): {}", c.display());
+                // this fork's weather presets beside OMSI's (`omsi_content::weather::PRESETS`)
+                match omsi_content::weather::install_presets(&c) {
+                    Ok(0) => {}
+                    Ok(n) => log::info!("weather presets: {n} put into {}", c.join("Weather").display()),
+                    Err(e) => log::warn!("weather presets: {e}"),
+                }
             }
             Err(e) => log::warn!("content folder {}: {e}", c.display()),
         }
@@ -373,6 +383,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
     CLOUDS.store(settings.clouds && omsi_cfg::env::var_os("OMSI_NO_CLOUDS").is_none(), std::sync::atomic::Ordering::Relaxed);
     SOUND_AI.store(settings.vol_ai.to_bits(), std::sync::atomic::Ordering::Relaxed);
     NIGHT_BRIGHTNESS.store(settings.night_brightness as u32, std::sync::atomic::Ordering::Relaxed);
+    DASH_DIMMER.store(settings.dash_dimmer as u32, std::sync::atomic::Ordering::Relaxed);
     omsi_sim::particles::set_vehicle_amount(settings.exhaust);
     crate::ui::CLASSIC_SETTINGS.store(settings.classic_ui, std::sync::atomic::Ordering::Relaxed);
     SOUND_SCENERY.store(settings.vol_scenery.to_bits(), std::sync::atomic::Ordering::Relaxed);
@@ -544,6 +555,8 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         teleport_pick: false,
         photo: None,
         ui_hidden: None,
+        cinema: Default::default(),
+        dashcam: Default::default(),
         wipers: None,
         discord: None,
         discord_t: 0.0,
@@ -579,7 +592,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         admin_list: None,
         list_kind: None,
         route_arrows: Default::default(),
-        game_keys: omsi_content::KeyboardCfg::load(&crate::startup::keyboard_cfg(&args_root_for_keys)).unwrap_or_default().with_game_defaults().with_vr_defaults().game,
+        game_keys: crate::startup::autopilot_keys(omsi_content::KeyboardCfg::load(&crate::startup::keyboard_cfg(&args_root_for_keys)).unwrap_or_default().with_game_defaults().with_vr_defaults(), settings.secret_autopilot).game,
         own_keys: crate::startup::own_keys(&args_root_for_keys),
         own_shift: crate::startup::own_bindings(&args_root_for_keys, omsi_content::input::KEY_SHIFT),
         key_capture: None,

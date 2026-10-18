@@ -17,23 +17,55 @@
 // falls off below it - the foreground is lit, but no brighter than the road ahead (a
 // bright foreground would blind the eye to the distance). A full beam: a hot spot three
 // times the low beam's along the horizon and a wide flood under and a little over it.
+// A front fog lamp (mode 3, ECE R19): a flat cut-off 1.5 deg under its horizon on both sides
+// and nearly nothing over it - the fog in front of the driver's eyes is left dark, only the
+// road a few metres to some 25 m ahead is lit - and a band some 70 deg wide, the kerbs and
+// the verges beside the bus too.
 fn headlamp(t: vec3<f32>, dir: vec3<f32>, mode: f32) -> f32 {
+    return headlamp_blur(t, dir, mode, 0.0);
+}
+
+// A headlamp's lens or reflector is some 20 cm across, and its beam is only formed some
+// metres out (the photometry of ECE R112 is measured at 25 m): seen from a point `r` metres
+// off, the light comes from the whole lens, some atan(0.2 / r) wide, so the far beam's
+// pattern is smeared over that angle - its cut-off a blur, its hot spot spread thin. In the
+// fog at the bumper the far pattern taken as it is drew each lamp's cut-off as a flat,
+// hard-edged top through the lamp and its hot spot at full strength a few decimetres from
+// the glass: a bright block of lit fog under each headlamp, brighter than the lamp itself.
+const LAMP_APERTURE: f32 = 0.2;
+fn near_blur(r: f32) -> f32 {
+    return degrees(atan(LAMP_APERTURE / max(r, 0.05)));
+}
+
+// `headlamp` with its pattern blurred by `b` degrees (`near_blur`; 0: the far pattern as it
+// is): the cut-off's edge widened, the hot spot's peak spread over the wider angle.
+fn headlamp_blur(t: vec3<f32>, dir: vec3<f32>, mode: f32, b: f32) -> f32 {
     let fwd = normalize(dir.xy + vec2<f32>(1e-6, 0.0));
     let ahead = dot(t.xy, fwd);
     if (ahead <= 0.0) {
         return 0.0;
     }
+    if (mode > 2.9) {
+        let fh = degrees(atan2(t.x * fwd.y - t.y * fwd.x, ahead));
+        let fv = degrees(atan2(t.z, length(t.xy)) - atan2(dir.z, max(length(dir.xy), 1e-4)));
+        let fsoft = select(0.25, 0.45, fract(mode) > 0.1) + 0.5 * b;
+        let fedge = 0.003 + 0.997 * smoothstep(-fsoft, fsoft, -1.5 - fv);
+        let fover = max(-1.5 - fv - 5.0, 0.0) / (5.0 + b);
+        let fq = fh / 32.0;
+        return 0.45 * exp(-fq * fq * fq * fq) * fedge / (1.0 + fover * fover);
+    }
     // across, positive towards the kerb, and up from the lamp's horizon (degrees); a
     // quarter more in the mode's magnitude is a halogen reflector's softer cut-off
     let side = select(1.0, -1.0, mode > 1.9) * (t.x * fwd.y - t.y * fwd.x);
-    let soft = select(0.15, 0.35, fract(abs(mode)) > 0.1);
+    let soft = select(0.15, 0.35, fract(abs(mode)) > 0.1) + 0.5 * b;
     let h = degrees(atan2(side, ahead));
     let v = degrees(atan2(t.z, length(t.xy)) - atan2(dir.z, max(length(dir.xy), 1e-4)));
     if (mode < 0.0) {
-        let core = exp(-(h * h) / 25.0 - (v + 0.3) * (v + 0.3) / 3.2);
-        let over = max(v - 0.5, 0.0) / 2.5;
-        let flood_v = exp(-over * over) / (1.0 + pow(max(-v - 0.8, 0.0) / 1.6, 1.6));
-        let flood = (0.6 * exp(-(h * h) / 81.0) + 0.4 * exp(-(h * h) / 900.0)) * flood_v;
+        let b2 = b * b;
+        let core = exp(-(h * h) / (25.0 + b2) - (v + 0.3) * (v + 0.3) / (3.2 + b2)) * sqrt(25.0 / (25.0 + b2) * 3.2 / (3.2 + b2));
+        let over = max(v - 0.5, 0.0) / (2.5 + b);
+        let flood_v = exp(-over * over) / (1.0 + pow(max(-v - 0.8, 0.0) / (1.6 + b), 1.6));
+        let flood = (0.6 * exp(-(h * h) / (81.0 + b2)) * sqrt(81.0 / (81.0 + b2)) + 0.4 * exp(-(h * h) / (900.0 + b2))) * flood_v;
         return 3.0 * core + 0.8 * flood;
     }
     // (the beam's body lies under the flat line; the wedge the kerb side's cut-off rises
@@ -43,18 +75,20 @@ fn headlamp(t: vec3<f32>, dir: vec3<f32>, mode: f32) -> f32 {
     // degrees up, some 1.5 % of the hot spot - fading out a few degrees higher: kept at
     // every height, it stood over each low beam as a sheet along the road, and the rain or
     // fog lit it into a column of light over the lamp seen from behind)
-    let glare = 0.015 / (1.0 + pow(max(v - cut, 0.0) / 4.0, 2.0));
+    let glare = 0.015 / (1.0 + pow(max(v - cut, 0.0) / (4.0 + b), 2.0));
     let edge = glare + 0.985 * smoothstep(-soft, soft, cut - v);
     // (under the hot spot it falls off steeply: a reflector keeps the foreground some tenths
     // of the hot spot or less, else the road a few metres ahead, nearest the lamp, was the
     // brightest of the beam and the light seemed to lie on the ground at the bumper)
     let under = -0.57 - v;
-    let vert = mix(0.45, 1.0, smoothstep(-0.35, 0.0, under)) / (1.0 + pow(max(under - 0.6, 0.0) / 0.8, 2.5));
+    // (blurred: the band some 1.5 degrees high spread over the blur, its peak lower by as much)
+    let vert = mix(0.45, 1.0, smoothstep(-0.35 - b, 0.0, under)) / (1.0 + pow(max(under - 0.6, 0.0) / (0.8 + b), 2.5)) / sqrt(1.0 + b * b / 2.25);
     // (across: the hot spot's core, and a flood that widens the nearer the road - the
     // foreground is lit over the lane and the verges, the distance in a narrow band)
-    let hk = (h - 1.5) / 7.0;
+    let core_w = sqrt(49.0 + b * b);
+    let hk = (h - 1.5) / core_w;
     let wide = 0.25 + 0.45 * smoothstep(1.0, 6.0, under);
-    let across = (1.0 - wide) * exp(-hk * hk) + wide * exp(-(h * h) / 1225.0);
+    let across = (1.0 - wide) * exp(-hk * hk) * (7.0 / core_w) + wide * exp(-(h * h) / (1225.0 + b * b));
     return across * vert * edge;
 }
 
@@ -83,6 +117,24 @@ fn fog_phase(c: f32) -> f32 {
     return 0.9 * hg_phase(c, 0.85) + 0.1 * hg_phase(c, -0.5);
 }
 
+// The same droplets as a headlamp's beam meets them, looked into: a droplet's forward peak
+// is mostly its diffraction, within a few degrees (a tight aureole round the lamp), and
+// much less at 5 - 25 degrees than one lobe of g 0.85 has it - with that lobe an oncoming
+// low beam in dense fog lit the whole road before it into one white fan towards the eye.
+// A narrow lobe (g 0.95) and a broad one (g 0.6), the back-scatter as `fog_phase`'s: the
+// fog a bus's own beams light in front of the driver, and a beam seen from the side, as
+// before or a little brighter.
+fn beam_phase(c: f32) -> f32 {
+    return 0.5 * hg_phase(c, 0.95) + 0.4 * hg_phase(c, 0.6) + 0.1 * hg_phase(c, -0.5);
+}
+
+// The light the fog has scattered once already (`HEADLAMP_SPREAD`) is no beam any more: it
+// comes from every way about the beam and leaves no forward peak towards an eye that looks
+// into it.
+fn spread_phase(c: f32) -> f32 {
+    return 0.9 * hg_phase(c, 0.45) + 0.1 * hg_phase(c, -0.5);
+}
+
 // The light of a headlamp the fog has scattered once already and that goes on: in fog as
 // thick as a ground fog's (some 75 m of visibility, an optical depth of one over 25 m) most
 // of a beam's light has been knocked off its way within the reach of the lamp, and the
@@ -93,6 +145,27 @@ fn fog_phase(c: f32) -> f32 {
 // sr of a low beam, 0.075 of a full beam (the profile `headlamp` integrated).
 const HEADLAMP_SPREAD_LOW: f32 = 0.036 * 7.0 / 6.2831853;
 const HEADLAMP_SPREAD_FULL: f32 = 0.075 * 7.0 / 6.2831853;
+
+// ... and the beam's light scattered a few degrees at a time, again and again, on its way
+// out: a beam in the fog widens as it goes, its cut-off blurring upwards - lit fog over the
+// flat top of the beam, more the further from the lamp (some `AIR_BLUR_DEG` per optical
+// depth travelled, up to `AIR_BLUR_MAX`). The beam stands in the fog as a glowing body of
+// light, not a thin sheet under its cut-off.
+const AIR_BLUR_DEG: f32 = 5.0;
+const AIR_BLUR_MAX: f32 = 8.0;
+fn blurred_headlamp(t: vec3<f32>, dir: vec3<f32>, mode: f32, depth: f32, near: f32) -> f32 {
+    let sharp = headlamp_blur(t, dir, mode, near);
+    let blur = min(depth * AIR_BLUR_DEG, AIR_BLUR_MAX);
+    if (blur < 0.05) {
+        return sharp;
+    }
+    // (the light that left the lamp a little lower, under its cut-off, turned up to here)
+    let flat = length(t.xy);
+    let lower = normalize(t - vec3<f32>(0.0, 0.0, tan(radians(blur)) * flat));
+    let half_way = normalize(t - vec3<f32>(0.0, 0.0, tan(radians(blur * 0.5)) * flat));
+    let k = min(depth, 1.0);
+    return max(sharp, k * (0.35 * headlamp_blur(half_way, dir, mode, near) + 0.2 * headlamp_blur(lower, dir, mode, near)));
+}
 
 // A lamp's light at r^2 = `r2` from it windowed to nothing at its `range`, as `lamp_light`
 // windows it on the surfaces. Cut off at the range sphere instead, the lit mist ended in a
@@ -190,15 +263,21 @@ fn lamp_airlight(c: vec3<f32>, d: vec3<f32>, start: f32, len: f32, jitter: f32) 
                         // (windowed to nothing at the reach, as on the surfaces: see `fog_window`)
                         let win = fog_window(dot(to, to), range);
                         let ld = to * inverseSqrt(max(dot(to, to), 1e-6));
-                        var beam = 0.0;
+                        let cp = dot(ld, d);
+                        var lit = 0.0;
                         if (l.extra.z != 0.0) {
                             let ax = max(dot(-ld, l.dir.xyz), 0.0);
                             let ax2 = ax * ax;
-                            beam = headlamp(-ld, l.dir.xyz, l.extra.z) + spread * ax2 * ax2 * ax2;
+                            // (the optical depth from the lamp to here)
+                            let depth = sigma0 * exp(-enh.fog.y * max(c.z + d.z * tq - enh.fog.z, 0.0)) * sqrt(dot(to, to));
+                            // (near the lamp its beam is not formed yet: `near_blur`; the beam's
+                            // light and the light scattered on from it each with its own phase)
+                            let direct = blurred_headlamp(-ld, l.dir.xyz, l.extra.z, depth, near_blur(sqrt(dot(to, to))));
+                            lit = direct * beam_phase(cp) + spread * ax2 * ax2 * ax2 * spread_phase(cp);
                         } else {
-                            beam = smoothstep(l.dir.w, l.extra.x, dot(-ld, l.dir.xyz));
+                            lit = smoothstep(l.dir.w, l.extra.x, dot(-ld, l.dir.xyz)) * fog_phase(cp);
                         }
-                        acc = acc + beam * win * fog_phase(dot(ld, d)) * hh * dt / r2;
+                        acc = acc + lit * win * hh * dt / r2;
                     }
                     half = 1.0;
                 } else {
@@ -277,7 +356,7 @@ fn precip_light(x: vec3<f32>, to_eye: vec3<f32>, snow: bool) -> vec3<f32> {
                 let window = (1.0 - q * q) * (1.0 - q * q);
                 var k = core * core / sqrt(dist2 * dist2 + core * core * core * core) * window;
                 if (l.extra.z != 0.0) {
-                    k = headlamp(-ld, l.dir.xyz, l.extra.z) / max(dist2, 0.3) * window;
+                    k = headlamp_blur(-ld, l.dir.xyz, l.extra.z, near_blur(sqrt(dist2))) / max(dist2, 0.3) * window;
                 } else if (l.dir.w > -1.5) {
                     k = k * smoothstep(l.dir.w, l.extra.x, dot(-ld, l.dir.xyz));
                 } else if (l.dir.z < -0.5) {

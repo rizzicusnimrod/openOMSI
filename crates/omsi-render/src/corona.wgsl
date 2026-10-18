@@ -36,8 +36,9 @@ struct CoronaOut {
     // 1 for what is drawn at the scene's level (a precipitation streak, lit fog: a cone or
     // a halo), 0 for a light's glare
     @location(2) kind: f32,
-    // 1 when the light is drawn with a star (`[light_enh_2]` parameter bit 1)
-    @location(3) star: f32,
+    // 1 for a lamp in a vehicle's cab (lights.rs `CAB_LAMP`, bit 16): dimmed at night with
+    // the cab's other lights (`enh.led.z`, lib.rs `cab_dimmer`)
+    @location(3) cab: f32,
     // 1 for a light's cone in the fog (OMSI's fan, see below)
     @location(4) beam: f32,
     // the cone's inner and outer half angles (radians)
@@ -133,7 +134,7 @@ fn vs_main(in: CoronaIn) -> CoronaOut {
         hout.uv = c * 0.5 + 0.5;
         hout.color = vec4<f32>(in.color.rgb, k);
         hout.kind = 1.0;
-        hout.star = 0.0;
+        hout.cab = 0.0;
         hout.beam = 0.0;
         hout.cone = vec2<f32>(0.0, 0.0);
         if (k <= 0.001 || on_screen <= 0.01) {
@@ -177,7 +178,7 @@ fn vs_main(in: CoronaIn) -> CoronaOut {
         bout.uv = c;
         bout.color = vec4<f32>(in.color.rgb, k);
         bout.kind = 1.0;
-        bout.star = 0.0;
+        bout.cab = 0.0;
         bout.beam = 1.0;
         bout.cone = vec2<f32>(inner, outer);
         if (k <= 0.001 || on_screen <= 0.01) {
@@ -246,7 +247,7 @@ fn vs_main(in: CoronaIn) -> CoronaOut {
     out.color = vec4<f32>(in.color.rgb, brightness);
     out.kind = select(0.0, 1.0, streak);
     out.wpos = vec4<f32>(in.pos, select(select(0.0, 2.0, flake), 1.0, streak));
-    out.star = 0.0;
+    out.cab = select(0.0, 1.0, (u32(in.extra.z + 0.5) & 16u) != 0u && !streak);
     out.beam = 0.0;
     out.cone = vec2<f32>(0.0, 0.0);
     // (not `<= 0.001`: a NaN brightness is not smaller, and Direct3D drew it as a black
@@ -304,7 +305,14 @@ fn fs_enhanced(in: CoronaOut) -> @location(0) vec4<f32> {
         return vec4<f32>(in.color.rgb * corona_shape(in) * in.color.a * l * enh.exposure.x, 1.0);
     }
     // (a fog cone is lit fog, not glare: it keeps the scene's level too)
-    let scale = select(enh.exposure.w, enh.exposure.y, in.kind > 0.5);
+    var scale = select(enh.exposure.w, enh.exposure.y, in.kind > 0.5);
+    // (a lamp of the cab one sits in: as dim as the cab's lights at night, its core no
+    // brighter than its glow - over the dark cab a tell-tale's 3x core was a headlamp's glare)
+    var core_k = 3.0;
+    if (in.cab > 0.5) {
+        scale = min(scale, enh.exposure.w * enh.led.z);
+        core_k = 3.0 * clamp(enh.led.z, 0.0, 1.0);
+    }
     var shape = corona_shape(in);
     // (taken here, in uniform control flow: how much of the sprite one pixel spans)
     let r = length(in.uv - vec2<f32>(0.5)) * 2.0;
@@ -321,7 +329,7 @@ fn fs_enhanced(in: CoronaOut) -> @location(0) vec4<f32> {
         // light, as the sprite's distance floor keeps it on the screen)
         let lit = textureSampleLevel(t_corona, s_corona, vec2<f32>(0.5, 0.5), 0.0).rgb;
         let w = max(0.1, px * 1.5);
-        let core = exp(-r * r / (w * w)) * 3.0 + exp(-r * 9.0) * 0.35;
+        let core = exp(-r * r / (w * w)) * core_k + exp(-r * 9.0) * 0.35;
         shape = mix(core * max(lit, shape) + shape * 0.22, shape, wet);
     }
     return vec4<f32>(in.color.rgb * shape * in.color.a * scale, 1.0);

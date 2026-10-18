@@ -301,6 +301,12 @@ impl ObjectType {
         .filter(|s| s.blocks)
     }
 
+    /// The type's box when it is a big see-through object (a tree): the cinematic camera
+    /// keeps out of it and does not film through it (`camera_arm::sight_clear`).
+    pub fn camera_veil(&self) -> Option<&crate::camera_arm::BlockerShape> {
+        Some(self.camera.get_or_init(|| crate::camera_arm::classify(self))).filter(|s| s.veil)
+    }
+
     /// (definition, pivot) per loaded mesh, for the scenery script runtime.
     pub fn mesh_defs(&self) -> Vec<(&MeshDef, Mat4)> {
         self.mesh_def_index
@@ -5217,7 +5223,7 @@ impl World {
             }
             // what the outside camera cannot pass through: houses, walls, shelters, canopies
             // (surface objects too - a petrol station is a drivable [surface] with a roof)
-            if let Some(shape) = ot.camera_shape() {
+            if let Some(shape) = ot.camera_shape().or_else(|| ot.camera_veil()) {
                 state.blockers.push(crate::camera_arm::Blocker {
                     ty: Arc::downgrade(&ot),
                     pos,
@@ -12861,6 +12867,53 @@ fn path_densities(rules: &[omsi_map::MapRule], path: usize) -> (f32, Vec<(u16, f
 /// Ignoring the flag put every lane of Spandau's 40-odd mirrored road pieces 5 to 20 m
 /// beside its road and the wrong way round; a timetable route through one had its bus turn
 /// into the oncoming lanes and jump back where the next piece began.
+/// Whether the lanes of path `pi` of a spline type may not be left for the other half of the
+/// road: between the path and the nearest one the other way, the cross-section's marking
+/// strip next to it is a solid line (`marking_kind`). OMSI's paths carry no such rule -
+/// only the lines the mapper painted say it. A dashed line next to the lane allows
+/// overtaking from it even with a solid one beside that (a one-sided line, as the rule
+/// has it); a texture that is no line it knows says nothing.
+fn no_overtaking(def: &Spline, pi: usize) -> bool {
+    let Some(p) = def.paths.get(pi).filter(|p| p.kind == 0 && p.direction != 2) else {
+        return false;
+    };
+    let x = p.start[0];
+    let Some(xo) = def
+        .paths
+        .iter()
+        .filter(|q| q.kind == 0 && q.direction != 2 && q.direction != p.direction)
+        .map(|q| q.start[0])
+        .min_by(|a, b| (a - x).abs().total_cmp(&(b - x).abs()))
+    else {
+        return false;
+    };
+    let (lo, hi) = (x.min(xo), x.max(xo));
+    def.profiles
+        .iter()
+        .filter_map(|pr| {
+            let solid = marking_kind(&def.textures.get(pr.texture)?.file)?;
+            let (a, b) = pr.points.iter().fold((f32::MAX, f32::MIN), |(a, b), q| (a.min(q.x), b.max(q.x)));
+            let c = (a + b) * 0.5;
+            (b - a < 0.8 && c > lo + 0.2 && c < hi - 0.2).then_some(((c - x).abs(), solid))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .is_some_and(|(_, solid)| solid)
+}
+
+/// What a road marking's texture shows by its name: a solid line (true), a dashed one
+/// (false), or nothing it can tell (None). German and English names; "dashed" goes first
+/// (a `doppelt_gestrichelt` is dashed).
+fn marking_kind(file: &str) -> Option<bool> {
+    let f = file.to_ascii_lowercase();
+    if ["gestrichelt", "unterbrochen", "leitlinie", "dash", "broken", "strich"].iter().any(|k| f.contains(k)) {
+        return Some(false);
+    }
+    if ["durchgezogen", "sperr", "doppellinie", "solid", "continuous", "double"].iter().any(|k| f.contains(k)) {
+        return Some(true);
+    }
+    None
+}
+
 fn spline_lanes(
     def: &Spline,
     s: &omsi_map::MapSpline,
@@ -12914,6 +12967,7 @@ fn spline_lanes(
         let rule_bus = rule_of("bus").is_some();
         let rule_trucks = rule_of("trucks").is_some();
         let priority = rule_of("priority");
+        let no_pass = no_overtaking(def, pi);
         let mut push = |pts: Vec<DVec3>, reversed: bool| {
             let mut l = LaneBuilder::polyline(pts, kind, p.width);
             if let Some(v) = priority {
@@ -12927,6 +12981,7 @@ fn spline_lanes(
             l.no_cars = no_cars;
             l.rule_bus = rule_bus;
             l.rule_trucks = rule_trucks;
+            l.no_overtaking = no_pass;
             l.source = 1;
             l.key = Some(LaneKey {
                 tile,

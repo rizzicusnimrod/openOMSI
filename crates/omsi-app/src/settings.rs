@@ -173,6 +173,51 @@ pub struct Settings {
     /// The information bar along the top (Shift+Y, the menu, the touch panel's button): as
     /// it was left, not switched on again every session (#1164).
     pub info_bar: bool,
+    /// `secret_autopilot=1`: the autopilot (`crate::autopilot`): its keys (Alt+A, Alt+Q/E,
+    /// Alt+D, Alt+C) and its options page section. In no menu, launcher page or README.
+    pub secret_autopilot: bool,
+    /// The autopilot's driving (`crate::autopilot::Config`, Alt+A): its style (0 calm, 0.5
+    /// normal, 1 brisk), top speed (km/h), speed against the limit (per cent), gap to the
+    /// vehicle ahead (1 short .. 3 long), whether it indicates at junctions and whether a
+    /// steering key or the wheel takes the bus back.
+    pub autopilot_style: f32,
+    pub autopilot_max_kmh: f32,
+    pub autopilot_limit_pct: f32,
+    pub autopilot_gap: f32,
+    pub autopilot_indicate: bool,
+    pub autopilot_steer_takeover: bool,
+    /// How far behind a standing vehicle the autopilot stops (m).
+    pub autopilot_stop_gap: f32,
+    /// The headlamp range control's wheel (Alt+Page Up / Page Down): steps of
+    /// `lights::HEADLAMP_RANGE_STEP` deg, + up, - down, 0 as the lamps are aimed (-4 .. 2).
+    pub headlamp_range: i8,
+    /// The instrument dimmer (Alt+Home / End): the cab's lights and screens at night in per
+    /// cent of the automatic level (20 .. 150).
+    pub dash_dimmer: u8,
+    /// The cinematic camera (`crate::cinema`, Ctrl+F3): how long a shot lasts (s), its grade
+    /// (`cinema::LOOKS`), the letterbox's aspect (0 none), its depth of field (a multiple of a
+    /// full-frame camera's, 0 off), motion blur, glides instead of cuts, which shots it takes
+    /// (from the air, from inside the bus, standing by the road), the hand-held cameras'
+    /// shake (a multiple), film grain (0..1) and the sun's flares.
+    pub cinematic_shot_secs: f32,
+    pub cinematic_look: f32,
+    pub cinematic_letterbox: f32,
+    pub cinematic_dof: f32,
+    pub cinematic_motion_blur: bool,
+    pub cinematic_glide: bool,
+    pub cinematic_drone: bool,
+    pub cinematic_inside: bool,
+    pub cinematic_roadside: bool,
+    pub cinematic_shake: f32,
+    pub cinematic_grain: f32,
+    pub cinematic_flare: bool,
+    /// The streaks through bright lights (an anamorphic lens's, 0 none .. 1 strong).
+    pub cinematic_streaks: f32,
+    /// The dashcam (Ctrl+F1): its lens across the diagonal (degrees), the date, time and
+    /// speed in the picture, and its quality (0 a cheap camera .. 1 a good one).
+    pub dashcam_fov: f32,
+    pub dashcam_stamp: bool,
+    pub dashcam_quality: f32,
     /// The size of the game's interface over the picture - texts, the menu, the timetable,
     /// the navigator - on top of the screen's own scale and the window's height (see
     /// `ui::size_factor`): 0.5 .. 2 (1 = as designed).
@@ -404,7 +449,7 @@ impl Settings {
     /// picture go soft for seconds. An 8192 shadow map took a fifth of a day's frame on an
     /// RX 6700 XT, 1024 mirrors another tenth, for little to be seen; 8x MSAA a twentieth.)
     fn desktop() -> Self {
-        Self { msaa: 8, anisotropy: 16, ssao: true, shadows: true, shadow_size: 4096, shadow_blobs: true, navigator: true, ui_opacity: 0.85, notes: true, ui_scale: 1.0, ui_scale_window: true, navigator_corner: "bottom-left".into(), boarding: "auto".into(), detail_textures: true, exact_fare: true, enhanced: true, graphics: "enhanced".into(), triple: Default::default(), triple_span: true, triple_hud_center: true, vr: false, vr_scale: 0.65, vr_head_smoothing_ms: 0.0, vr_mirror_rate: 16.0, vr_desktop_mirror: true, fullscreen: false, vsync: true, volume: 0.6, drive_keys: "simple".into(), post_aa: "fxaa".into(), render_scale: 1.0, language: "ENG".into(), pax_voices: "all".into(), nav_arrows: false, nav_ai: true, get_up: false, texture_compression: true, texture_memory: 0, auto_clutch: true, momentary_gears: false, auto_shift: false, min_obj_size: 0.013, max_obj_dist: -1.0, max_fps: 0, chat: true, chat_size: 1.0, tooltips: true, name_tags: true, show_fps: false, clouds: true, pax_density: 1.0, vol_ai: 1.0, vol_scenery: 1.0, mirror_size: 512, mirror_hud: 0, mirror_refresh: "full".into(), doppler: true, driver: true, maintenance: 0, ai_unsched_factor: 1.0, ai_max_scheduled: 0, ai_max_parked: 0, ai_max_humans: 200, ai_drivers: Default::default(), exhaust: 0.67, classic_ui: false, advanced_settings: false, collision_vehicles: true, collision_objects: true, collision_pedestrians: true, head_movement: true, driverview_smooth: true, hands_in_cab: false, alt_view: true, precision_zoom: false, time_speed: 1.0, time_sync: false, metar_sync: false, metar_station: String::new(), machine_translation: false, shadow_casters: "all".into(), ctrl_deadzone: 0.0, right_stick_look: true, ctrl_off: String::new(), steering_linear: false, old_steering: false, red_steer_spd: false, reflections: true, led_glow: 6, led_mips: 1.3, night_brightness: 100, mouse_sens: 1.0, graphics_api: "auto".into(), ff_invert: false, ff_enabled: true, ff_road_vib: 1.0, ff_engine_vib: 1.0, ff_fade: 0.28, ff_realistic: true, traffic_events: "normal".into(), traffic_event_breakdown: true, traffic_event_delivery: true, traffic_event_stop: true, traffic_event_emergency: true, traffic_event_slow: true, traffic_event_learner: true, brake_hold: true, mouse_steering: false, mouse_right_off: false, mouse_smooth: true, look_sens: 1.0, look_smoothing_ms: 0.0, blinker_cancel: true, wheel_range: 900.0, wheel_lock: 0.0, fov: 0.0, camera_collision: true, steer_look: false, steer_look_angle: 30.0, steer_look_response: 0.25, head_idle: 0.0, head_idle_pace: 1.0, pedal_throttle: 1.0, pedal_brake: 1.0, seat: [0.0; 3], seat_pitch_deg: 0.0, head_tracking: false, head_tracking_port: 4242, head_tracking_invert: String::new(), discord_status: true, discord_app_id: String::new(), voice_chat: true, info_bar: false }
+        Self { msaa: 8, anisotropy: 16, ssao: true, shadows: true, shadow_size: 4096, shadow_blobs: true, navigator: true, ui_opacity: 0.85, notes: true, ui_scale: 1.0, ui_scale_window: true, navigator_corner: "bottom-left".into(), boarding: "auto".into(), detail_textures: true, exact_fare: true, enhanced: true, graphics: "enhanced".into(), triple: Default::default(), triple_span: true, triple_hud_center: true, vr: false, vr_scale: 0.65, vr_head_smoothing_ms: 0.0, vr_mirror_rate: 16.0, vr_desktop_mirror: true, fullscreen: false, vsync: true, volume: 0.6, drive_keys: "simple".into(), post_aa: "fxaa".into(), render_scale: 1.0, language: "ENG".into(), pax_voices: "all".into(), nav_arrows: false, nav_ai: true, get_up: false, texture_compression: true, texture_memory: 0, auto_clutch: true, momentary_gears: false, auto_shift: false, min_obj_size: 0.013, max_obj_dist: -1.0, max_fps: 0, chat: true, chat_size: 1.0, tooltips: true, name_tags: true, show_fps: false, clouds: true, pax_density: 1.0, vol_ai: 1.0, vol_scenery: 1.0, mirror_size: 512, mirror_hud: 0, mirror_refresh: "full".into(), doppler: true, driver: true, maintenance: 0, ai_unsched_factor: 1.0, ai_max_scheduled: 0, ai_max_parked: 0, ai_max_humans: 200, ai_drivers: Default::default(), exhaust: 0.67, classic_ui: false, advanced_settings: false, collision_vehicles: true, collision_objects: true, collision_pedestrians: true, head_movement: true, driverview_smooth: true, hands_in_cab: false, alt_view: true, precision_zoom: false, time_speed: 1.0, time_sync: false, metar_sync: false, metar_station: String::new(), machine_translation: false, shadow_casters: "all".into(), ctrl_deadzone: 0.0, right_stick_look: true, ctrl_off: String::new(), steering_linear: false, old_steering: false, red_steer_spd: false, reflections: true, led_glow: 6, led_mips: 1.3, night_brightness: 100, mouse_sens: 1.0, graphics_api: "auto".into(), ff_invert: false, ff_enabled: true, ff_road_vib: 1.0, ff_engine_vib: 1.0, ff_fade: 0.28, ff_realistic: true, traffic_events: "normal".into(), traffic_event_breakdown: true, traffic_event_delivery: true, traffic_event_stop: true, traffic_event_emergency: true, traffic_event_slow: true, traffic_event_learner: true, brake_hold: true, mouse_steering: false, mouse_right_off: false, mouse_smooth: true, look_sens: 1.0, look_smoothing_ms: 0.0, blinker_cancel: true, wheel_range: 900.0, wheel_lock: 0.0, fov: 0.0, camera_collision: true, steer_look: false, steer_look_angle: 30.0, steer_look_response: 0.25, head_idle: 0.0, head_idle_pace: 1.0, pedal_throttle: 1.0, pedal_brake: 1.0, seat: [0.0; 3], seat_pitch_deg: 0.0, head_tracking: false, head_tracking_port: 4242, head_tracking_invert: String::new(), discord_status: true, discord_app_id: String::new(), voice_chat: true, info_bar: false, secret_autopilot: false, autopilot_style: 0.5, autopilot_max_kmh: 80.0, autopilot_limit_pct: 100.0, autopilot_gap: 2.0, autopilot_indicate: true, autopilot_steer_takeover: true, autopilot_stop_gap: 2.0, headlamp_range: 0, dash_dimmer: 100, cinematic_shot_secs: 9.0, cinematic_look: 1.0, cinematic_letterbox: 2.39, cinematic_dof: 1.5, cinematic_motion_blur: true, cinematic_glide: false, cinematic_drone: true, cinematic_inside: true, cinematic_roadside: true, cinematic_shake: 1.0, cinematic_grain: 0.25, cinematic_flare: true, cinematic_streaks: 0.3, dashcam_fov: 130.0, dashcam_stamp: true, dashcam_quality: 0.5 }
     }
 }
 
@@ -672,6 +717,32 @@ impl Settings {
                 "ui_scale_window" => s.ui_scale_window = b(v),
                 "notes" => s.notes = b(v),
                 "info_bar" => s.info_bar = b(v),
+                "secret_autopilot" => s.secret_autopilot = b(v),
+                "autopilot_style" => s.autopilot_style = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 1.0)).unwrap_or(s.autopilot_style),
+                "autopilot_max_kmh" => s.autopilot_max_kmh = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(20.0, 120.0)).unwrap_or(s.autopilot_max_kmh),
+                "autopilot_limit_pct" => s.autopilot_limit_pct = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(50.0, 150.0)).unwrap_or(s.autopilot_limit_pct),
+                "autopilot_gap" => s.autopilot_gap = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.round().clamp(1.0, 3.0)).unwrap_or(s.autopilot_gap),
+                "autopilot_indicate" => s.autopilot_indicate = b(v),
+                "autopilot_steer_takeover" => s.autopilot_steer_takeover = b(v),
+                "headlamp_range" => s.headlamp_range = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.round().clamp(-4.0, 2.0) as i8).unwrap_or(s.headlamp_range),
+                "dash_dimmer" => s.dash_dimmer = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.round().clamp(20.0, 150.0) as u8).unwrap_or(s.dash_dimmer),
+                "cinematic_shot_secs" => s.cinematic_shot_secs = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(3.0, 30.0)).unwrap_or(s.cinematic_shot_secs),
+                "cinematic_look" => s.cinematic_look = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.round().clamp(0.0, 6.0)).unwrap_or(s.cinematic_look),
+                "cinematic_letterbox" => s.cinematic_letterbox = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 3.0)).unwrap_or(s.cinematic_letterbox),
+                "cinematic_dof" => s.cinematic_dof = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 4.0)).unwrap_or(s.cinematic_dof),
+                "cinematic_motion_blur" => s.cinematic_motion_blur = b(v),
+                "cinematic_glide" => s.cinematic_glide = b(v),
+                "cinematic_drone" => s.cinematic_drone = b(v),
+                "cinematic_inside" => s.cinematic_inside = b(v),
+                "cinematic_roadside" => s.cinematic_roadside = b(v),
+                "cinematic_flare" => s.cinematic_flare = b(v),
+                "cinematic_streaks" => s.cinematic_streaks = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 1.0)).unwrap_or(s.cinematic_streaks),
+                "dashcam_stamp" => s.dashcam_stamp = b(v),
+                "cinematic_shake" => s.cinematic_shake = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 3.0)).unwrap_or(s.cinematic_shake),
+                "cinematic_grain" => s.cinematic_grain = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 1.0)).unwrap_or(s.cinematic_grain),
+                "dashcam_fov" => s.dashcam_fov = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(90.0, 160.0)).unwrap_or(s.dashcam_fov),
+                "dashcam_quality" => s.dashcam_quality = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 1.0)).unwrap_or(s.dashcam_quality),
+                "autopilot_stop_gap" => s.autopilot_stop_gap = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(1.0, 6.0)).unwrap_or(s.autopilot_stop_gap),
                 "chat_size" => s.chat_size = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.5, 3.0)).unwrap_or(s.chat_size),
                 "ui_scale" => s.ui_scale = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.5, 2.0)).unwrap_or(s.ui_scale),
                 "shadow_casters" => s.shadow_casters = if v.eq_ignore_ascii_case("omsi") { "omsi".into() } else { "all".into() },

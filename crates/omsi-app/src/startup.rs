@@ -85,6 +85,12 @@ pub(crate) fn fatal_dialog(title: &str, text: &str) {
 /// The `Inputs/keyboard.cfg` the game follows: the content folder's once the launcher has
 /// saved key bindings there, else the original installation's (never written) - or, where
 /// that has none, its `keyboard_reset.cfg`, the standard keys OMSI falls back to as well.
+/// The key list with the autopilot's keys where it is switched on (`secret_autopilot`), and
+/// without them where it is not.
+pub(crate) fn autopilot_keys(cfg: omsi_content::KeyboardCfg, on: bool) -> omsi_content::KeyboardCfg {
+    if on { cfg.with_autopilot_keys() } else { cfg.without_autopilot_keys() }
+}
+
 pub(crate) fn keyboard_cfg(root: &Path) -> PathBuf {
     if let Some(own) = content_dir().map(|c| c.join("Inputs/keyboard.cfg")).filter(|p| p.exists()) {
         return own;
@@ -400,6 +406,8 @@ pub(crate) static ENHANCED_PLUS: std::sync::atomic::AtomicBool = std::sync::atom
 pub(crate) static CLASSIC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// The night's brightness in per cent (`Settings::night_brightness`), for `weather_lighting`.
 pub(crate) static NIGHT_BRIGHTNESS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+/// The instrument dimmer in per cent (`Settings::dash_dimmer`), for `weather_lighting`.
+pub(crate) static DASH_DIMMER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
 /// Volume of the AI vehicles and of the scenery's own sounds (OMSI's `sound_ai` and
 /// `sound_scenery`), as the bits of an f32.
 pub(crate) static SOUND_AI: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);

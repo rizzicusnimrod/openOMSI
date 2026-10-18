@@ -67,15 +67,55 @@ pub fn lerp(a: &Weather, b: &Weather, k: f32) -> Weather {
         ground_wet: [m(a.ground_wet[0], b.ground_wet[0]), m(a.ground_wet[1], b.ground_wet[1]), m(a.ground_wet[2], b.ground_wet[2])],
         snow: if late { b.snow } else { a.snow },
         snow_on_road: if late { b.snow_on_road } else { a.snow_on_road },
+        // (the sky of a preset that has none as its cloud type says, see `implied_sky`)
+        sky: match (a.sky, b.sky) {
+            (None, None) => None,
+            _ if k >= 1.0 => b.sky,
+            (x, y) => {
+                let (x, y) = (x.unwrap_or_else(|| implied_sky(a)), y.unwrap_or_else(|| implied_sky(b)));
+                Some(omsi_content::weather::Sky {
+                    cumulus: m(x.cumulus, y.cumulus),
+                    deck: m(x.deck, y.deck),
+                    veil: m(x.veil, y.veil),
+                    haze: m(x.haze, y.haze),
+                    angstrom: m(x.angstrom, y.angstrom),
+                    // (0, the day's own layer, stays the day's own until the other takes over)
+                    aerosol_height: if x.aerosol_height <= 0.0 || y.aerosol_height <= 0.0 { if late { y.aerosol_height } else { x.aerosol_height } } else { m(x.aerosol_height, y.aerosol_height) },
+                    exposure: m(x.exposure, y.exposure),
+                })
+            }
+        },
     }
 }
 
-/// The installed weathers (`Weather/*.owt`), as (file, weather).
+/// The enhanced sky of a weather without `[openomsi_sky]` as near as its cloud type gives
+/// it (the cover `weather_setup::clouds_of` takes from it), in an ordinary day's air: what
+/// a change to or from a preset with a sky of its own blends with.
+fn implied_sky(w: &Weather) -> omsi_content::weather::Sky {
+    let kind = w.clouds.0.trim().to_ascii_lowercase();
+    let (cumulus, deck) = if kind.is_empty() || kind.starts_with("-1") {
+        (0.0, 0.0)
+    } else if kind.starts_with("overcast") {
+        (0.0, 1.0)
+    } else {
+        (match kind.trim_start_matches("cumulus").trim() {
+            "1" => 0.35,
+            "2" => 0.55,
+            "3" => 0.75,
+            _ => 0.5,
+        }, 0.0)
+    };
+    omsi_content::weather::Sky { cumulus, deck, veil: 0.0, haze: 1.0, angstrom: 1.3, aerosol_height: 0.0, exposure: 0.0 }
+}
+
+/// The installed weathers (`Weather/*.owt`) the cycle and the lists go by - this fork's
+/// presets (`omsi_content::weather::is_preset`) - as (file, weather).
 pub fn installed() -> Vec<(String, Weather)> {
     let mut files: Vec<String> = omsi_cfg::read_dir_merged("Weather")
         .into_iter()
         .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("owt")))
         .filter_map(|p| p.file_name().map(|n| format!("Weather/{}", n.to_string_lossy())))
+        .filter(|f| omsi_content::weather::is_preset(f))
         .collect();
     files.sort();
     files.dedup();

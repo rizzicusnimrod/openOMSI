@@ -333,10 +333,13 @@ pub(crate) fn keyboard_actions(app: &App) -> Vec<String> {
 }
 
 fn keyboard_cfg(app: &App) -> omsi_content::KeyboardCfg {
-    omsi_content::KeyboardCfg::load(&crate::startup::keyboard_cfg(&app.args.root))
-        .unwrap_or_default()
-        .with_game_defaults()
-        .with_vr_defaults()
+    crate::startup::autopilot_keys(
+        omsi_content::KeyboardCfg::load(&crate::startup::keyboard_cfg(&app.args.root))
+            .unwrap_or_default()
+            .with_game_defaults()
+            .with_vr_defaults(),
+        app.settings.secret_autopilot,
+    )
 }
 
 fn write_keyboard_cfg(_app: &App, cfg: &omsi_content::KeyboardCfg) -> Result<(), String> {
@@ -352,7 +355,7 @@ fn write_keyboard_cfg(_app: &App, cfg: &omsi_content::KeyboardCfg) -> Result<(),
 
 impl App {
     fn install_keyboard_cfg(&mut self, cfg: omsi_content::KeyboardCfg) {
-        let runtime = cfg.with_game_defaults().with_vr_defaults();
+        let runtime = crate::startup::autopilot_keys(cfg.with_game_defaults().with_vr_defaults(), self.settings.secret_autopilot);
         self.game_keys = runtime.game.clone();
         if let Some(p) = self.player.as_mut() {
             p.bindings = runtime.vehicles;
@@ -1111,6 +1114,21 @@ fn steps_of(verb: &str) -> Option<Vec<f32>> {
         "volume" => VOLUME.to_vec(),
         "led_glow" => (0..16).map(|v| v as f32).collect(),
         "night_brightness" => (2..=40).map(|v| v as f32 * 5.0).collect(),
+        "headlamp_range" => (-4..=2).map(|v| v as f32).collect(),
+        "dash_dimmer" => (2..=15).map(|v| v as f32 * 10.0).collect(),
+        "autopilot_style" => vec![0.0, 0.5, 1.0],
+        "autopilot_max_kmh" => (6..=20).map(|v| v as f32 * 5.0).collect(),
+        "autopilot_limit_pct" => (16..=24).map(|v| v as f32 * 5.0).collect(),
+        "autopilot_gap" => vec![1.0, 2.0, 3.0],
+        "autopilot_stop_gap" => (2..=10).map(|v| v as f32 * 0.5).collect(),
+        "cinematic_shot_secs" => vec![4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 12.0, 14.0, 16.0, 20.0, 25.0, 30.0],
+        "cinematic_look" => (0..=6).map(|v| v as f32).collect(),
+        "cinematic_letterbox" => vec![0.0, 1.85, 2.0, 2.39],
+        "cinematic_dof" => (0..=8).map(|v| v as f32 * 0.5).collect(),
+        "cinematic_shake" => (0..=12).map(|v| v as f32 * 0.25).collect(),
+        "cinematic_grain" | "cinematic_streaks" => (0..=10).map(|v| v as f32 * 0.1).collect(),
+        "dashcam_fov" => vec![110.0, 120.0, 130.0, 140.0, 150.0],
+        "dashcam_quality" => vec![0.0, 0.5, 1.0],
         "led_mips" => (0..=80).map(|v| v as f32 * 0.05).collect(),
         "ui_scale" => (10..=40).map(|v| v as f32 * 0.05).collect(),
         "chat_size" => (5..=30).map(|v| v as f32 * 0.1).collect(),
@@ -1252,6 +1270,22 @@ fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
         "volume" => s.volume,
         "led_glow" => s.led_glow as f32,
         "night_brightness" => s.night_brightness as f32,
+        "headlamp_range" => s.headlamp_range as f32,
+        "dash_dimmer" => s.dash_dimmer as f32,
+        "autopilot_style" => s.autopilot_style,
+        "autopilot_max_kmh" => s.autopilot_max_kmh,
+        "autopilot_limit_pct" => s.autopilot_limit_pct,
+        "autopilot_gap" => s.autopilot_gap,
+        "autopilot_stop_gap" => s.autopilot_stop_gap,
+        "cinematic_shot_secs" => s.cinematic_shot_secs,
+        "cinematic_look" => s.cinematic_look,
+        "cinematic_letterbox" => s.cinematic_letterbox,
+        "cinematic_dof" => s.cinematic_dof,
+        "cinematic_shake" => s.cinematic_shake,
+        "cinematic_grain" => s.cinematic_grain,
+        "cinematic_streaks" => s.cinematic_streaks,
+        "dashcam_fov" => s.dashcam_fov,
+        "dashcam_quality" => s.dashcam_quality,
         "led_mips" => s.led_mips,
         "ctrl_deadzone" => s.ctrl_deadzone,
         "pedal_t" => s.pedal_throttle,
@@ -1342,6 +1376,71 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
             app.settings.night_brightness = v.round().clamp(10.0, 200.0) as u8;
             crate::startup::NIGHT_BRIGHTNESS.store(app.settings.night_brightness as u32, std::sync::atomic::Ordering::Relaxed);
             Some(("night_brightness", app.settings.night_brightness.to_string()))
+        }
+        "headlamp_range" => {
+            app.settings.headlamp_range = v.round().clamp(-4.0, 2.0) as i8;
+            Some(("headlamp_range", app.settings.headlamp_range.to_string()))
+        }
+        "dash_dimmer" => {
+            app.settings.dash_dimmer = v.round().clamp(20.0, 150.0) as u8;
+            crate::startup::DASH_DIMMER.store(app.settings.dash_dimmer as u32, std::sync::atomic::Ordering::Relaxed);
+            Some(("dash_dimmer", app.settings.dash_dimmer.to_string()))
+        }
+        "autopilot_style" => {
+            app.settings.autopilot_style = v.clamp(0.0, 1.0);
+            Some(("autopilot_style", app.settings.autopilot_style.to_string()))
+        }
+        "autopilot_max_kmh" => {
+            app.settings.autopilot_max_kmh = v.clamp(20.0, 120.0);
+            Some(("autopilot_max_kmh", app.settings.autopilot_max_kmh.to_string()))
+        }
+        "autopilot_limit_pct" => {
+            app.settings.autopilot_limit_pct = v.clamp(50.0, 150.0);
+            Some(("autopilot_limit_pct", app.settings.autopilot_limit_pct.to_string()))
+        }
+        "autopilot_gap" => {
+            app.settings.autopilot_gap = v.round().clamp(1.0, 3.0);
+            Some(("autopilot_gap", app.settings.autopilot_gap.to_string()))
+        }
+        "autopilot_stop_gap" => {
+            app.settings.autopilot_stop_gap = v.clamp(1.0, 6.0);
+            Some(("autopilot_stop_gap", app.settings.autopilot_stop_gap.to_string()))
+        }
+        "cinematic_shot_secs" => {
+            app.settings.cinematic_shot_secs = v.clamp(3.0, 30.0);
+            Some(("cinematic_shot_secs", app.settings.cinematic_shot_secs.to_string()))
+        }
+        "cinematic_look" => {
+            app.settings.cinematic_look = v.round().clamp(0.0, 6.0);
+            Some(("cinematic_look", app.settings.cinematic_look.to_string()))
+        }
+        "cinematic_letterbox" => {
+            app.settings.cinematic_letterbox = v.clamp(0.0, 3.0);
+            Some(("cinematic_letterbox", app.settings.cinematic_letterbox.to_string()))
+        }
+        "cinematic_dof" => {
+            app.settings.cinematic_dof = v.clamp(0.0, 4.0);
+            Some(("cinematic_dof", app.settings.cinematic_dof.to_string()))
+        }
+        "cinematic_shake" => {
+            app.settings.cinematic_shake = v.clamp(0.0, 3.0);
+            Some(("cinematic_shake", app.settings.cinematic_shake.to_string()))
+        }
+        "cinematic_grain" => {
+            app.settings.cinematic_grain = v.clamp(0.0, 1.0);
+            Some(("cinematic_grain", app.settings.cinematic_grain.to_string()))
+        }
+        "cinematic_streaks" => {
+            app.settings.cinematic_streaks = v.clamp(0.0, 1.0);
+            Some(("cinematic_streaks", app.settings.cinematic_streaks.to_string()))
+        }
+        "dashcam_fov" => {
+            app.settings.dashcam_fov = v.clamp(90.0, 160.0);
+            Some(("dashcam_fov", app.settings.dashcam_fov.to_string()))
+        }
+        "dashcam_quality" => {
+            app.settings.dashcam_quality = v.clamp(0.0, 1.0);
+            Some(("dashcam_quality", app.settings.dashcam_quality.to_string()))
         }
         "led_mips" => {
             app.settings.led_mips = v.clamp(0.0, 4.0);
@@ -1555,6 +1654,15 @@ fn toggle_now(app: &App, id: &str) -> Option<bool> {
         "hands_in_cab" => s.hands_in_cab,
         "ff" => s.ff_enabled,
         "brake_hold" => s.brake_hold,
+        "autopilot_indicate" => s.autopilot_indicate,
+        "autopilot_steer_takeover" => s.autopilot_steer_takeover,
+        "cinematic_motion_blur" => s.cinematic_motion_blur,
+        "cinematic_glide" => s.cinematic_glide,
+        "cinematic_drone" => s.cinematic_drone,
+        "cinematic_inside" => s.cinematic_inside,
+        "cinematic_roadside" => s.cinematic_roadside,
+        "cinematic_flare" => s.cinematic_flare,
+        "dashcam_stamp" => s.dashcam_stamp,
         "auto_clutch" => s.auto_clutch,
         "headtrack" => s.head_tracking,
         "timetable_win" => app.timetable,
@@ -1743,6 +1851,42 @@ fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static str, String
         "brake_hold" => {
             app.settings.brake_hold = on;
             Some(("brake_hold", bit))
+        }
+        "autopilot_indicate" => {
+            app.settings.autopilot_indicate = on;
+            Some(("autopilot_indicate", bit))
+        }
+        "autopilot_steer_takeover" => {
+            app.settings.autopilot_steer_takeover = on;
+            Some(("autopilot_steer_takeover", bit))
+        }
+        "cinematic_motion_blur" => {
+            app.settings.cinematic_motion_blur = on;
+            Some(("cinematic_motion_blur", bit))
+        }
+        "cinematic_glide" => {
+            app.settings.cinematic_glide = on;
+            Some(("cinematic_glide", bit))
+        }
+        "cinematic_drone" => {
+            app.settings.cinematic_drone = on;
+            Some(("cinematic_drone", bit))
+        }
+        "cinematic_inside" => {
+            app.settings.cinematic_inside = on;
+            Some(("cinematic_inside", bit))
+        }
+        "cinematic_roadside" => {
+            app.settings.cinematic_roadside = on;
+            Some(("cinematic_roadside", bit))
+        }
+        "cinematic_flare" => {
+            app.settings.cinematic_flare = on;
+            Some(("cinematic_flare", bit))
+        }
+        "dashcam_stamp" => {
+            app.settings.dashcam_stamp = on;
+            Some(("dashcam_stamp", bit))
         }
         "auto_clutch" => {
             app.settings.auto_clutch = on;
@@ -2061,12 +2205,14 @@ pub(crate) fn set_advanced(app: &mut App, on: bool) {
 }
 
 /// The name of the weather in force (the file's name without its ending).
-/// The weather files (`Weather/*.owt`) of every content root, by name.
+/// The weather files (`Weather/*.owt`) of every content root, by name: this fork's presets
+/// (`omsi_content::weather::is_preset`).
 fn weather_files() -> Vec<String> {
     let mut files: Vec<String> = omsi_cfg::read_dir_merged("Weather")
         .into_iter()
         .filter(|p| p.extension().map(|e| e.eq_ignore_ascii_case("owt")).unwrap_or(false))
         .filter_map(|p| p.file_name().map(|n| format!("Weather/{}", n.to_string_lossy())))
+        .filter(|f| omsi_content::weather::is_preset(f))
         .collect();
     files.sort_by(|a, b| bus_cmp(a.trim_start_matches("Weather/").trim_start_matches('#'), b.trim_start_matches("Weather/").trim_start_matches('#')));
     files.dedup();
@@ -2402,12 +2548,28 @@ fn options_pages(app: &App) -> Vec<Page> {
     let pct = |v: f32| format!("{:.0} %", v * 100.0);
     let cm = |v: f32| format!("{:+.0} cm", v * 100.0);
     let later = "Takes effect when the game starts the next time";
-    let game: Vec<(String, String)> = vec![
+    let mut game: Vec<(String, String)> = vec![
         switch_row(app, "navigator", "Navigator", "Enables/Disables the Minimap"),
         switch_row(app, "nav_ai", "AI vehicles on the map", "Shows/hides the other (AI) vehicles on the Minimap and the city map"),
         switch_row(app, "nav_arrows", "Route arrows (as in OMSI 2)", "Shows OMSI 2's route arrows over the road"),
         pick("navigator_corner", "Corner", later),
         switch_row(app, "get_up", "Ability to get up (Ctrl+Shift+G)", "Allows you to get out of the car and explore the world"),
+        slider_row(app, "cinematic_shot_secs", "Cinematic camera: shot length", "How long a shot lasts before it cuts to the next", &|v| format!("{v:.0} s")),
+        slider_row(app, "cinematic_look", "Cinematic camera: look", "The colour grade of the picture", &|v| crate::cinema::LOOKS.get(v.round() as usize).copied().unwrap_or("?").to_string()),
+        slider_row(app, "cinematic_letterbox", "Cinematic camera: letterbox", "Black bars for a cinema picture", &|v| if v <= 0.0 { "Off".to_string() } else { format!("{v:.2}:1") }),
+        slider_row(app, "cinematic_dof", "Cinematic camera: depth of field", "How soft what is out of focus gets (Enhanced graphics)", &|v| if v <= 0.0 { "Off".to_string() } else { format!("{v:.1}x") }),
+        switch_row(app, "cinematic_motion_blur", "Cinematic camera: motion blur", "A film camera's blur of what moves (Enhanced graphics)"),
+        switch_row(app, "cinematic_glide", "Cinematic camera: glide between shots", "The camera flies from one shot to the next instead of cutting"),
+        switch_row(app, "cinematic_drone", "Cinematic camera: drone shots", "Shots from the air, circling the bus or high above it"),
+        switch_row(app, "cinematic_inside", "Cinematic camera: shots from inside", "Over the driver's shoulder through the windscreen"),
+        switch_row(app, "cinematic_roadside", "Cinematic camera: roadside cameras", "Cameras standing by the road the bus drives past"),
+        slider_row(app, "cinematic_shake", "Cinematic camera: camera shake", "How much the hand-held cameras move", &|v| if v <= 0.0 { "Off".to_string() } else { format!("{v:.2}x") }),
+        slider_row(app, "cinematic_grain", "Cinematic camera: film grain", "The grain of film over the picture", &|v| format!("{:.0}%", v * 100.0)),
+        switch_row(app, "cinematic_flare", "Cinematic camera: lens flares", "The sun's reflections in the lens"),
+        slider_row(app, "cinematic_streaks", "Cinematic camera: light streaks", "The streaks through headlights and lamps", &|v| if v <= 0.0 { "Off".to_string() } else { format!("{:.0}%", v * 100.0) }),
+        slider_row(app, "dashcam_fov", "Dashcam: lens", "How wide the dashcam sees, across the picture's diagonal", &|v| format!("{v:.0}°")),
+        switch_row(app, "dashcam_stamp", "Dashcam: date, time and speed", "The dashcam's stamp in the picture"),
+        slider_row(app, "dashcam_quality", "Dashcam: camera quality", "A cheap camera has more noise, colour fringes and smear", &|v| (if v < 0.25 { "Cheap" } else if v > 0.75 { "Good" } else { "Normal" }).to_string()),
         switch_row(app, "coll_objects", "Collisions with objects", "Enables/disables collisions with objects such as buildings, streetlights, etc."),
         switch_row(app, "coll_vehicles", "Collisions with vehicles", "Enables/Disables Collisions with Other Vehicles"),
         switch_row(app, "collision_pedestrians", "Collisions with people", "Enables/disables knocking down people"),
@@ -2419,7 +2581,7 @@ fn options_pages(app: &App) -> Vec<Page> {
         pick("ai_unsched_factor", "Random traffic", later),
         pick("ai_max_scheduled", "Timetable vehicles", later),
         pick("ai_max_parked", "Parked cars", later),
-        pick("traffic_events", "Traffic events", "Now and then something happens on the road ahead (the Thüringer Wald for now)"),
+        pick("traffic_events", "Traffic events", "Now and then something happens on the road ahead"),
         switch_row(app, "traffic_event_breakdown", "Breakdowns", "A car stands half off the road with its hazard lights on"),
         switch_row(app, "traffic_event_delivery", "Deliveries in the street", "A lorry or van stands in a town street's lane for a few minutes"),
         switch_row(app, "traffic_event_stop", "Cars in bus stops", "A car stands in one of your next stops; it leaves when you honk or have served the stop"),
@@ -2443,6 +2605,8 @@ fn options_pages(app: &App) -> Vec<Page> {
         pick("shadow_casters", "Shadows cast by", later),
         switch_row(app, "detail_textures", "Detail texturing up close", "The ground and large walls get fine grain when close"),
         slider_row(app, "night_brightness", "Night brightness", "How bright nights look: lower is darker, 100% as it comes", &|v| format!("{}%", v as i64)),
+        slider_row(app, "headlamp_range", "Headlamp range (Alt+Page Up/Down)", "Tilts your bus's low and full beam up or down, as the wheel on the dashboard", &|v| if v == 0.0 { "As aimed".to_string() } else { format!("{:+} ({:.1} deg)", v as i64, v * crate::lights::HEADLAMP_RANGE_STEP) }),
+        slider_row(app, "dash_dimmer", "Instrument lights at night (Alt+Home/End)", "The cab's instruments, switches and screens at night, against the automatic level", &|v| format!("{}%", v as i64)),
         slider_row(app, "led_glow", "LED glow", "How strongly the dots of LED destination displays glow", &|v| format!("{}/15", v as i64)),
         slider_row(app, "led_mips", "LED mask mipmaps", "Keep the mip chain of the LED masks (smoother from a distance).", &|v| format!("{v:.2}")),
         switch_row(app, "reflections", "Reflection maps (paint, chrome, glass)", later).filter(|_| !app.settings.ray_tracing()),
@@ -2461,6 +2625,20 @@ fn options_pages(app: &App) -> Vec<Page> {
             "Three physical screen projections; OpenXR takes priority",
         ),
     ];
+    // (the autopilot, a secret feature: its options only where `secret_autopilot=1`)
+    if s.secret_autopilot {
+        game.extend([
+            slider_row(app, "autopilot_style", "Autopilot driving style", "How firmly it takes bends, slows down and pulls away", &|v| (if v < 0.25 { "Calm" } else if v > 0.75 { "Brisk" } else { "Normal" }).to_string()),
+            slider_row(app, "autopilot_max_kmh", "Autopilot top speed", "The fastest it drives, whatever the speed limit says", &|v| format!("{v:.0} km/h")),
+            slider_row(app, "autopilot_limit_pct", "Autopilot speed against the limit", "100% drives at the speed limit, less stays under it", &|v| format!("{v:.0}%")),
+            slider_row(app, "autopilot_gap", "Autopilot gap to the vehicle ahead", "How far behind the vehicle ahead it keeps", &|v| (if v < 1.5 { "Short (1.2 s)" } else if v > 2.5 { "Long (2.5 s)" } else { "Normal (1.8 s)" }).to_string()),
+            slider_row(app, "autopilot_stop_gap", "Autopilot stops behind a vehicle at", "How close it stops behind a vehicle standing in front", &|v| format!("{v:.1} m")),
+            switch_row(app, "autopilot_indicate", "Autopilot uses the indicators", "It indicates before it turns off at a junction"),
+            switch_row(app, "autopilot_steer_takeover", "Steering takes over from the autopilot", "A steering key or the wheel takes the bus back (off: only the brake does)"),
+        ]
+        .into_iter()
+        .flatten());
+    }
     // (the rig's own settings only while it is on)
     let triple = vec![
         switch_row(

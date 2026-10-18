@@ -353,7 +353,10 @@ impl ApplicationHandler for App {
                 }
                 // in the own bus's cab: at the wheel, a passenger's view, or sitting in a
                 // seat of it after getting up (its inside is drawn and heard from inside)
-                self.in_cab = matches!(self.view.as_str(), "driver" | "pax")
+                // (the dashcam hangs in the cab; the cinematic camera's look over the driver's
+                // shoulder is from inside it)
+                self.in_cab = matches!(self.view.as_str(), "driver" | "pax" | crate::cinema::DASHCAM)
+                    || (self.view == crate::cinema::CINEMA && self.cinema.inside)
                     || (self.view == "foot" && self.foot_bus() == Some(crate::humans::BusId::Player));
                 // standing or sitting in another player's bus: that bus is drawn and heard
                 // from inside (its interior meshes, not the outside ones over them)
@@ -752,7 +755,7 @@ impl ApplicationHandler for App {
                     || self.chooser.is_some()
                     || self.list_kind.is_some()
                     || self.navigator.as_ref().is_some_and(|n| n.map_open())
-                    || !matches!(self.view.as_str(), "driver" | "outside" | "pax");
+                    || !crate::cinema::bus_view(&self.view);
                 let hide = (moved || actions.iter().any(|a| a.1)) && !needs_mouse && !vr_on;
                 if self.vr_nav_edit.is_none() && hide != self.cursor_hidden.is_some() && (hide || needs_mouse) {
                     if let Some(win) = self.window.as_ref() {
@@ -766,7 +769,7 @@ impl ApplicationHandler for App {
                 // the bus's force feedback (OMSI's FF_Vib_Amp, and on a wheel its forces)
                 // (in every view of the bus - the wheel went slack outside and in the
                 // passenger view)
-                let driving = self.player.as_ref().filter(|_| matches!(self.view.as_str(), "driver" | "outside" | "pax") && !self.paused);
+                let driving = self.player.as_ref().filter(|_| crate::cinema::bus_view(&self.view) && !self.paused);
                 let kmh = driving.map(|p| p.vehicle.physics.velocity_kmh()).unwrap_or(0.0);
                 let wheel_bump = ctl.wheel_bump(driving.and_then(|p| p.vehicle.rigid.as_ref()), kmh, dt);
                 ctl.feedback(crate::controllers::FfInput {
@@ -951,6 +954,32 @@ impl ApplicationHandler for App {
                         if !down || (self.game_menu.is_none() && self.chooser.is_none()) {
                             p.action(&name, down);
                         }
+                    }
+                }
+                // (the cinematic camera places its roadside cameras along the duty's route)
+                if self.view == crate::cinema::CINEMA {
+                    self.autopilot_route();
+                }
+                // the autopilot's plan (`crate::autopilot`): the way, the steering, the speed
+                if self.player.as_ref().is_some_and(|p| p.autopilot.on || p.autopilot.note.is_some()) {
+                    self.autopilot_route();
+                    let others = self.autopilot_others();
+                    let indicator = self.player.as_ref().map(|p| crate::lan::indicator(&p.vehicle)).unwrap_or(0);
+                    let cfg = crate::autopilot::Config::from_settings(&self.settings);
+                    match (self.player.as_mut(), self.traffic.as_ref()) {
+                        (Some(p), Some(t)) => {
+                            p.autopilot.cfg = cfg;
+                            p.autopilot.plan(&p.vehicle, t, &others, indicator, dt)
+                        }
+                        (Some(p), None) => p.autopilot.off(" (no road network)"),
+                        _ => {}
+                    }
+                }
+                // the secret adaptive cruise control's eye (`crate::acc`): the vehicle ahead
+                if self.player.as_ref().is_some_and(|p| p.acc.as_ref().is_some_and(|a| a.on)) {
+                    let lead = self.acc_lead();
+                    if let Some(acc) = self.player.as_mut().and_then(|p| p.acc.as_mut()) {
+                        acc.lead = lead;
                     }
                 }
                 // the on-screen wheel and pedals (a phone)
@@ -1175,8 +1204,27 @@ impl ApplicationHandler for App {
                                     c.fov_deg = (c.fov_deg * z).clamp(8.0, 120.0);
                                 }
                             };
-                            let mut cam = p.camera_look(&self.view, &base, head_look, self.orbit);
-                            finish(&mut cam);
+                            let aspect = self.surface.as_ref().map(|s| s.config.width as f32 / s.config.height.max(1) as f32).unwrap_or(16.0 / 9.0);
+                            let mut cam = match (self.view.as_str(), self.world.as_deref()) {
+                                // the cinematic camera's shots and the dashcam (`crate::cinema`)
+                                (crate::cinema::CINEMA, Some(w)) => {
+                                    let cfg = crate::cinema::Config::from_settings(&self.settings);
+                                    let subject = crate::cinema::Subject::of(&p.vehicle);
+                                    let net = self.traffic.as_ref().map(|t| &t.net);
+                                    let (route, at, heading) = (&p.autopilot.route, p.vehicle.position, p.vehicle.heading);
+                                    let way = || crate::cinema::road_ahead(net, at, heading, route, 300.0);
+                                    self.cinema.update(&subject, w, &way, dt, aspect, &cfg)
+                                }
+                                (crate::cinema::DASHCAM, _) => {
+                                    let cfg = crate::cinema::Config::from_settings(&self.settings);
+                                    self.dashcam.update(&p.vehicle, dt, aspect, &cfg)
+                                }
+                                _ => {
+                                    let mut c = p.camera_look(&self.view, &base, head_look, self.orbit);
+                                    finish(&mut c);
+                                    c
+                                }
+                            };
                             // Smooth cockpit camera switch (arrow keys): the glide mixes the camera left and the one
                             // taken in the bus's own frame (ease-out over CAM_BLEND_SECS); the bus's motion and
                             // the head go on top afterwards, so nothing of the last frame's picture is needed.
@@ -1981,6 +2029,9 @@ impl ApplicationHandler for App {
                     w.update_light_map_atlas(r, cam.position);
                 }
                 *self.profile.entry("lights.atlas").or_default() += __ta.elapsed().as_secs_f64();
+                if let Some(p) = self.player.as_mut() {
+                    p.vehicle.beam_aim = lights::headlamp_aim(self.settings.headlamp_range);
+                }
                 if let (Some(w), Some(scene), Some(cam)) = (
                     self.world.as_ref(),
                     self.scene.as_mut(),
@@ -2169,7 +2220,19 @@ impl ApplicationHandler for App {
                 // (the players of a LAN session or server, for the list at the top right)
                 let players = self.players_hud();
                 // (the interface hidden: for 2.5 s after, the key that shows it again)
-                let ui_hidden = self.ui_hidden.map(|t| (t.elapsed().as_secs_f32() < 2.5, self.game_key_name("interface_toggle").unwrap_or_else(|| "Ctrl+H".into())));
+                let ui_hidden = self.ui_hidden.map(|t| (t.elapsed().as_secs_f32() < 2.5, self.game_key_name("interface_toggle").unwrap_or_else(|| "Ctrl+H".into())))
+                    // (the cinematic camera and the dashcam: the picture alone)
+                    .or_else(|| crate::cinema::lens_view(&self.view).then(|| (false, String::new())));
+                let clean = self.clean_picture();
+                // the dashcam's stamp, and the cinematic camera's line for a moment
+                let stamp = (self.view == crate::cinema::DASHCAM && self.settings.dashcam_stamp && self.photo.is_none())
+                    .then(|| self.player.as_ref())
+                    .flatten()
+                    .map(|p| {
+                        let (left, right) = crate::cinema::stamp(&self.clock, p.vehicle.physics.velocity_kmh());
+                        (left, right, self.started.elapsed().as_secs_f32().fract() < 0.6)
+                    });
+                let caption = self.cinema.note.as_ref().filter(|_| crate::cinema::lens_view(&self.view) && self.photo.is_none()).map(|n| n.0.clone());
                 if let (true, Some(r), Some(scene)) = (
                     self.world.is_some(),
                     self.renderer.as_ref(),
@@ -2193,6 +2256,15 @@ impl ApplicationHandler for App {
                     // the object editor's keys, while it is on (one quiet line)
                     // the mirror editor's keys and the panel under the cursor, while it is on
                     lines.extend(mirror_help);
+                    if let Some(line) = self.player.as_ref().and_then(|p| p.autopilot.status()) {
+                        lines.push(line);
+                    }
+                    // (the secret adaptive cruise control: what it just did, else while it is on)
+                    if let Some(acc) = self.player.as_ref().and_then(|p| p.acc.as_ref()) {
+                        if let Some(line) = acc.note.as_ref().map(|n| n.0.clone()).or_else(|| acc.status()) {
+                            lines.push(line);
+                        }
+                    }
                     if self.editor.is_some() {
                         lines.push("Object editor: click picks · drag moves · wheel turns (Shift lifts) · Del · C copy · V variant · Backspace undo · Ctrl+S save · Esc".into());
                     }
@@ -2246,7 +2318,7 @@ impl ApplicationHandler for App {
                     // pictures' only)
                     scene.overlays.clear();
                     // (photo mode: its own messages alone, see `ui::Ui::draw_photo`)
-                    let notes = if self.photo.is_some() { self.service_msg.as_ref().map(|m| vec![m.0.clone()]).unwrap_or_default() } else if self.ui_hidden.is_some() { Vec::new() } else { lines };
+                    let notes = if self.photo.is_some() { self.service_msg.as_ref().map(|m| vec![m.0.clone()]).unwrap_or_default() } else if clean { Vec::new() } else { lines };
                     let hud = self
                         .surface
                         .as_ref()
@@ -2259,7 +2331,7 @@ impl ApplicationHandler for App {
                         self.navigator.as_mut(),
                         self.player.as_ref(),
                         self.surface.as_ref(),
-                        self.photo.is_none() && self.ui_hidden.is_none(),
+                        self.photo.is_none() && !clean,
                     ) {
                         let old_enabled = nav.enabled;
                         let old_opacity = nav.opacity;
@@ -2471,6 +2543,8 @@ impl ApplicationHandler for App {
                             tags,
                             photo: crate::photo::view(self.photo.as_deref()),
                             ui_hidden,
+                            stamp,
+                            caption,
                             notices: &self.notices,
                             notice_anchor: self.navigator.as_ref().and_then(|n| n.screen_rect()),
                         };
@@ -2516,6 +2590,8 @@ impl ApplicationHandler for App {
                     .or_else(|| self.player.as_ref().map(|p| &p.vehicle));
                 lighting.puddle_parts = puddle_vehicle.into_iter().flat_map(|v| &v.trailers)
                     .filter_map(|t| t.ty.def.bounding_box.map(|bb| (t.position, t.heading, bb))).take(3).collect();
+                // the saloon's lamps that are on, mirrored in the panes from inside
+                lighting.saloon = if self.in_cab { puddle_vehicle.map(crate::lights::saloon_lamps).unwrap_or_default() } else { Vec::new() };
                 lighting.detail = self.settings.detail_textures;
                 // (the airstream over the glass of the bus one rides in: another player's at
                 // their speed)
@@ -2681,9 +2757,43 @@ impl ApplicationHandler for App {
                             self.mirror_hud.set_glass(w.mirror_glass.lock().clone());
                             self.mirror_hud.sync(p, self.settings.mirror_hud);
                         }
+                        // (riding in another player's bus: its mirrors, `render_remote_mirrors`)
+                        let riding = self.inside_remote.and_then(|id| self.remotes.remotes.get(&id).map(|rv| (id, rv)));
                         if self.settings.mirror_size == 0 {
                             self.mirror_budget = 0.0;
                             self.mirrors_seen = 0;
+                        } else if let (Some((id, rv)), Some(w)) = (riding, self.world.as_ref()) {
+                            let v = rv.vehicle();
+                            let mirrors = v.ty.def.cameras_reflexion.len() + v.trailers.iter().map(|t| t.ty.def.cameras_reflexion.len()).sum::<usize>();
+                            if self.settings.mirror_refresh == "off" {
+                                // (drawn once as one gets in)
+                                self.mirror_budget = 0.0;
+                                let key = u64::MAX - id as u64;
+                                if self.frozen_mirrors.as_ref().map(|m| m.bus) != Some(key) {
+                                    self.mirrors_seen = render_remote_mirrors(r, scene, w, v, &lighting, None, None);
+                                    self.frozen_mirrors = Some(FrozenMirrors { bus: key, since: MIRROR_FREEZE_REDRAW });
+                                }
+                            } else if mirrors > 0 {
+                                #[cfg(windows)]
+                                let vr_active = self.vr.is_some();
+                                #[cfg(not(windows))]
+                                let vr_active = false;
+                                let max_hz = if self.settings.mirror_refresh == "full" { MIRROR_MAX_HZ_FULL } else { MIRROR_MAX_HZ_ECO };
+                                let rate = MIRROR_RATE.max(mirrors as f32 * MIRROR_MIN_HZ).min(max_hz * self.mirrors_seen.max(1) as f32);
+                                let mirror_view = if vr_active || self.settings.triple.enabled {
+                                    None
+                                } else {
+                                    Some((*cam, s.config.width as f32 / s.config.height.max(1) as f32))
+                                };
+                                self.mirror_budget = (self.mirror_budget + raw_dt.min(0.1) * rate).min(2.5);
+                                let mut drawn = 0;
+                                while drawn < self.mirrors_seen.clamp(1, 2) && self.mirror_budget >= 1.0 {
+                                    self.mirror_budget -= 1.0;
+                                    drawn += 1;
+                                    self.mirror_turn = self.mirror_turn.wrapping_add(1);
+                                    self.mirrors_seen = render_remote_mirrors(r, scene, w, v, &lighting, Some(self.mirror_turn), mirror_view);
+                                }
+                            }
                         } else if self.settings.mirror_refresh == "off" {
                             self.mirror_budget = 0.0;
                             if let (Some(w), Some(p)) = (self.world.as_ref(), self.player.as_ref()) {
@@ -2810,7 +2920,7 @@ impl ApplicationHandler for App {
                                 }
                             }
                         }
-                        if self.in_cab && self.photo.is_none() && self.ui_hidden.is_none() {
+                        if self.in_cab && self.photo.is_none() && !clean {
                             if let Some(w) = self.world.as_ref() {
                                 self.mirror_hud.ensure_frame(r, scene);
                                 let hud = self
@@ -2827,6 +2937,21 @@ impl ApplicationHandler for App {
                                 crate::ui::shift_overlays(scene, start, hud[0]);
                             }
                         }
+                        // the cinematic camera's or the dashcam's lens over the picture
+                        r.lens = match (self.view.as_str(), self.player.as_ref()) {
+                            // (photo mode from the cinematic camera: its look, see `Photo::cine`)
+                            _ if self.photo.is_some() => self.photo.as_ref().and_then(|p| p.cine.filter(|_| p.cine_on)),
+                            (crate::cinema::CINEMA, Some(p)) => {
+                                let cfg = crate::cinema::Config::from_settings(&self.settings);
+                                Some(self.cinema.lens(&crate::cinema::Subject::of(&p.vehicle), &cfg, raw_dt.min(0.1), self.total_frames))
+                            }
+                            (crate::cinema::DASHCAM, Some(_)) => {
+                                let cfg = crate::cinema::Config::from_settings(&self.settings);
+                                let aspect = s.config.width as f32 / s.config.height.max(1) as f32;
+                                Some(self.dashcam.lens(&cfg, raw_dt.min(0.1), aspect, lighting.night, self.total_frames))
+                            }
+                            _ => None,
+                        };
                         // photo mode: its next pictures, and the window's through its lens
                         if let Some(ph) = self.photo.as_deref_mut() {
                             if let Some(msg) = crate::photo::capture(ph, r, scene, &lighting) {
@@ -2860,6 +2985,12 @@ impl ApplicationHandler for App {
                                 cam,
                                 &lighting,
                             );
+                        }
+                        // (what the cinematic camera's picture showed: is the bus in sight?)
+                        if let Some(probe) = r.depth_probe() {
+                            if let (crate::cinema::CINEMA, Some(p)) = (self.view.as_str(), self.player.as_ref()) {
+                                self.cinema.seen(&probe, &crate::cinema::Subject::of(&p.vehicle));
+                            }
                         }
                         // the on-screen controls over the picture (a phone)
                         self.touch.render(r, &view, s.config.width, s.config.height);
@@ -3133,7 +3264,113 @@ impl ApplicationHandler for App {
 }
 
 impl App {
+    /// Only the picture is shown, no interface over it (but a menu opened): the interface
+    /// hidden (`interface_toggle`), or the cinematic camera or the dashcam filming.
+    pub(crate) fn clean_picture(&self) -> bool {
+        self.ui_hidden.is_some() || crate::cinema::lens_view(&self.view)
+    }
+
     /// The window's size in pixels, while the mirror panels can be worked (in the cab, no menu).
+    /// The vehicle ahead in the way of the player's bus for its adaptive cruise control: the
+    /// traffic (AI cars and buses, a client's copies of the host's), the other players'
+    /// buses and the vehicles placed by hand, with their rear sections.
+    /// The autopilot on or off (`autopilot_toggle`).
+    pub(crate) fn toggle_autopilot(&mut self) {
+        let net = self.traffic.as_ref().map(|t| &t.net);
+        if let Some(p) = self.player.as_mut() {
+            p.autopilot.toggle(&p.vehicle, net);
+            // (a brake the keys hold would take the bus back at once)
+            if p.autopilot.on {
+                p.axes.brake = 0.0;
+            }
+        }
+    }
+
+    /// The duty's route for the autopilot: its trip's lanes, made anew for another trip or
+    /// another build of the network.
+    fn autopilot_route(&mut self) {
+        let (_, _, _, trip) = crate::navigator::duty_parts(self.duty.as_ref());
+        let (Some(p), Some(t), Some(w)) = (self.player.as_mut(), self.traffic.as_ref(), self.world.as_ref()) else { return };
+        let ap = &mut p.autopilot;
+        match (trip, self.schedule.as_ref()) {
+            (Some((key, name)), Some(sch)) => {
+                if ap.route_key != key || ap.route_gen != t.lanes_generation {
+                    ap.route = sch.trip_route(w, t, &name).0;
+                    ap.route_key = key;
+                    ap.route_gen = t.lanes_generation;
+                }
+            }
+            _ => {
+                ap.route.clear();
+                ap.route_key.clear();
+            }
+        }
+    }
+
+    /// The vehicles round the player's bus the autopilot may follow (`acc::outlines`).
+    fn autopilot_others(&self) -> Vec<crate::acc::Other> {
+        let Some(p) = self.player.as_ref() else { return Vec::new() };
+        let traffic = self.traffic.iter().flat_map(|t| t.cars.iter().map(|c| (&c.vehicle, c.vehicle.physics.speed)));
+        let remotes = self.remotes.remotes.values().map(|r| (r.vehicle(), r.last.speed_kmh / 3.6));
+        let placed = self.placed.iter().map(|q| (&q.vehicle, q.vehicle.physics.speed));
+        crate::acc::outlines(p.vehicle.position, traffic.chain(remotes).chain(placed))
+    }
+
+    /// The autopilot's keys (`autopilot_*` of the game's key list): its top speed up and
+    /// down, the gap to the vehicle ahead and its driving style, kept in the settings.
+    pub(crate) fn autopilot_key(&mut self, what: &str) {
+        let s = &mut self.settings;
+        let (key, value, said) = match what {
+            "faster" | "slower" => {
+                s.autopilot_max_kmh = (s.autopilot_max_kmh + if what == "faster" { 5.0 } else { -5.0 }).clamp(30.0, 100.0);
+                ("autopilot_max_kmh", s.autopilot_max_kmh.to_string(), format!("Autopilot top speed {:.0} km/h", s.autopilot_max_kmh))
+            }
+            "gap" => {
+                s.autopilot_gap = if s.autopilot_gap >= 2.5 { 1.0 } else { s.autopilot_gap.round() + 1.0 };
+                let name = match s.autopilot_gap as i32 { 1 => "short (1.2 s)", 3 => "long (2.5 s)", _ => "normal (1.8 s)" };
+                ("autopilot_gap", s.autopilot_gap.to_string(), format!("Autopilot gap: {name}"))
+            }
+            _ => {
+                s.autopilot_style = if s.autopilot_style >= 0.75 { 0.0 } else { s.autopilot_style + 0.5 };
+                let name = if s.autopilot_style < 0.25 { "calm" } else if s.autopilot_style > 0.75 { "brisk" } else { "normal" };
+                ("autopilot_style", s.autopilot_style.to_string(), format!("Autopilot driving style: {name}"))
+            }
+        };
+        crate::game_lists::remember_setting(key, &value);
+        if let Some(p) = self.player.as_mut() {
+            p.autopilot.tell(said);
+        }
+    }
+
+    /// The headlamp range control's wheel (`range` +1 up / -1 down) and the instrument
+    /// dimmer (`dimmer` +1 brighter / -1 darker), kept in the settings.
+    pub(crate) fn lamp_key(&mut self, range: i8, dimmer: i8) {
+        let s = &mut self.settings;
+        let said = if range != 0 {
+            s.headlamp_range = (s.headlamp_range + range).clamp(-4, 2);
+            crate::game_lists::remember_setting("headlamp_range", &s.headlamp_range.to_string());
+            match s.headlamp_range {
+                0 => "Headlamp range 0: as aimed".to_string(),
+                r => format!("Headlamp range {r:+}: {:.1} deg {}", r.unsigned_abs() as f32 * lights::HEADLAMP_RANGE_STEP, if r > 0 { "up" } else { "down" }),
+            }
+        } else {
+            let k = s.dash_dimmer as i32 + dimmer as i32 * 10;
+            s.dash_dimmer = k.clamp(20, 150) as u8;
+            crate::game_lists::remember_setting("dash_dimmer", &s.dash_dimmer.to_string());
+            crate::startup::DASH_DIMMER.store(s.dash_dimmer as u32, std::sync::atomic::Ordering::Relaxed);
+            format!("Instrument lights {} %", s.dash_dimmer)
+        };
+        self.service_msg = Some((said, 2.0));
+    }
+
+    pub(crate) fn acc_lead(&self) -> Option<crate::acc::Lead> {
+        let p = self.player.as_ref()?;
+        let traffic = self.traffic.iter().flat_map(|t| t.cars.iter().map(|c| (&c.vehicle, c.vehicle.physics.speed)));
+        let remotes = self.remotes.remotes.values().map(|r| (r.vehicle(), r.last.speed_kmh / 3.6));
+        let placed = self.placed.iter().map(|q| (&q.vehicle, q.vehicle.physics.speed));
+        crate::acc::lead_around(&p.vehicle, traffic.chain(remotes).chain(placed))
+    }
+
     pub(crate) fn mirror_hud_size(&self) -> Option<(f32, f32)> {
         if !self.in_cab || self.game_menu.is_some() || !self.mirror_hud.editing() {
             return None;

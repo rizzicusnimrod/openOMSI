@@ -1,0 +1,59 @@
+openOMSI weather preset. OMSI 2 reads it too: it passes the openomsi_preset and
+openomsi_sky blocks by. The second number under temp is the dew point (C).
+
+The openomsi_sky block is the sky of openOMSI's Enhanced graphics:
+  cumulus cover 0..0.85, grey deck 0..1 (closed from 0.85), cirrus veil (optical depth
+  0..2), haze (aerosol against an ordinary clear day: 0.4 crisp .. 3 sultry), its
+  Angstrom exponent (1.6 a deep blue sky .. 0.6 a milky one), the hazy layer's depth in
+  metres (0 = growing and settling with the day's sun), and (optional) the day's
+  exposure in stops (-1.5 the gloom of a storm .. 0 as the eye adapts).
+
+[openomsi_preset]
+1
+
+[name]
+Golden Autumn
+
+[description]
+A calm autumn day, a few clouds, soft warm light low over the woods.
+[end]
+
+[fog]
+25000
+1
+
+[wind]
+200
+3
+
+[temp]
+13
+7
+
+[press]
+1022
+
+[clouds]
+Cumulus 1
+1500
+
+[precip]
+0
+32
+0
+-2
+0
+
+[groundwet]
+20
+255
+0
+
+[openomsi_sky]
+0.15
+0
+0.1
+1
+1.3
+0
+0

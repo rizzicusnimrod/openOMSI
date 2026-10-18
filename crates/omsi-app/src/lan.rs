@@ -2906,6 +2906,22 @@ fn glide(cur: &mut Vec<f32>, want: &[f32], k: f32) {
     }
 }
 
+/// Another player's bus levels its headlamps as the own bus does (`level_beams`): its pitch
+/// comes with their body's sag on its springs, the road's slope is read here from the
+/// ground under its first and its last axle.
+fn level_remote_beams(v: &mut omsi_sim::VehicleInstance, w: &World, dt: f32) {
+    let Some((front, rear)) = v.axle_span() else {
+        return;
+    };
+    let rot = v.body_rotation();
+    let at = |long: f32| v.position + rot.transform_point3(glam::Vec3::new(0.0, long, 0.0)).as_dvec3();
+    let (f, r) = (at(front), at(rear));
+    if let (Some(zf), Some(zr)) = (w.ground_height(f.x, f.y), w.ground_height(r.x, r.y)) {
+        let run = (f - r).truncate().length().max(0.5);
+        v.level_beams(((zf - zr) / run).atan().to_degrees() as f32, dt);
+    }
+}
+
 /// One frame of another player's bus: the pose glides towards the latest state, the AI
 /// scripts run with that state as their inputs, the table's variables are pinned to the
 /// sender's values, and the horn is pressed and let go as theirs is.
@@ -3537,6 +3553,7 @@ pub fn tick(
             }
             None => drive_remote(rv, &pose, dt, false),
         }
+        level_remote_beams(&mut rv.vehicle, w, dt);
         // (a game that sends its strings with all its variables has them shown whole in
         // `drive_remote`: the pose's display texts are cut at 32 characters)
         if rv.synced_strings.is_empty() {

@@ -192,6 +192,10 @@ pub(crate) struct Player {
     /// The settings' automated manual (#713): a gear lever's gates are worked by the
     /// engine speed (see [`Player::tick_auto_shift`]).
     pub(crate) auto_shift: bool,
+    /// The secret adaptive cruise control, where it is fitted (`crate::acc`).
+    pub(crate) acc: Option<crate::acc::Acc>,
+    /// The autopilot (`crate::autopilot`, Alt+A).
+    pub(crate) autopilot: crate::autopilot::Autopilot,
     /// Seconds until the automated manual may shift again; the engine's idle speed as seen.
     pub(crate) auto_shift_wait: f32,
     pub(crate) auto_shift_idle: f32,
@@ -1550,15 +1554,50 @@ impl Player {
         if a.throttle.is_some_and(|t| t > 0.05) {
             self.axes.brake = 0.0;
         }
-        self.auto_clutch_bite(a.throttle.unwrap_or(0.0).max(self.axes.throttle));
-        self.tick_auto_shift(dt, a.throttle.unwrap_or(0.0).max(self.axes.throttle), a.brake.unwrap_or(0.0).max(self.axes.brake));
+        let throttle = a.throttle.unwrap_or(self.axes.throttle).max(self.axes.throttle);
+        let brake = a.brake.unwrap_or(self.axes.brake).max(self.axes.brake);
+        // (the autopilot's hands on the wheel and the pedals, or the adaptive cruise
+        // control's foot on the pedals; the driver's over either)
+        let steering_keys = self.axes.left_key || self.axes.right_key;
+        let driven = self.autopilot.control(dt, &self.vehicle, throttle, brake, self.axes.steering, steering_keys, a.steering);
+        let (throttle, brake) = match (driven, self.acc.as_mut()) {
+            (Some((_, t, b)), acc) => {
+                if let Some(acc) = acc {
+                    acc.off("");
+                }
+                (t, b)
+            }
+            (None, Some(acc)) => {
+                let ready = crate::acc::ready(&self.vehicle);
+                acc.pedals(dt, self.vehicle.physics.speed, throttle, brake, ready)
+            }
+            (None, None) => (throttle, brake),
+        };
+        if let Some((s, _, _)) = driven {
+            // (the keys' wheel stands where the autopilot holds it: taken over, it goes on
+            // from there)
+            self.axes.steering = s;
+        }
+        // (the autopilot's indicator, by the bus's own keys)
+        if let Some(side) = self.autopilot.signal_cmd.take() {
+            let key = match side {
+                1 => "blinker_left_set",
+                2 => "blinker_right_set",
+                _ => "blinker_off",
+            };
+            self.action(key, true);
+            self.action(key, false);
+        }
+        self.auto_clutch_bite(a.throttle.unwrap_or(0.0).max(self.axes.throttle).max(throttle));
+        self.tick_auto_shift(dt, throttle, brake);
         self.vehicle.set_controls(omsi_sim::Controls {
-            throttle: a.throttle.unwrap_or(self.axes.throttle).max(self.axes.throttle),
-            brake: a.brake.unwrap_or(self.axes.brake).max(self.axes.brake),
+            throttle,
+            brake,
             clutch: a.clutch.unwrap_or(self.axes.clutch).max(self.axes.clutch),
             // (a wheel at rest does not hold against the keys)
-            steering: match a.steering {
-                Some(s) if s.abs() > 0.02 || self.axes.steering == 0.0 => s,
+            steering: match (driven, a.steering) {
+                (Some((s, _, _)), _) => s,
+                (None, Some(s)) if s.abs() > 0.02 || self.axes.steering == 0.0 => s,
                 _ => self.axes.steering,
             },
         });

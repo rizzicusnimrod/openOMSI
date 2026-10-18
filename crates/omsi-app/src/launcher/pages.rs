@@ -1034,7 +1034,7 @@ fn gameplay_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, cols: [Rect; 2]) ->
     sel_setting(ui, s, dirty, "s-maxsched", c.row(), "Timetable vehicles", "ai_max_scheduled", &[("0", "All"), ("10", "At most 10"), ("25", "At most 25"), ("50", "At most 50")]);
     sel_setting(ui, s, dirty, "s-maxpark", c.row(), "Parked cars", "ai_max_parked", &[("-1", "None"), ("0", "Every space"), ("35", "At most 35"), ("100", "At most 100"), ("250", "At most 250")]);
     // (the custom fork's traffic events: the Thüringer Wald for now, see `crate::events`)
-    c.section(ui, "Traffic events (Thüringer Wald)");
+    c.section(ui, "Traffic events");
     sel_setting(ui, s, dirty, "s-events", c.row(), "How often", "traffic_events", &[("off", "Off"), ("rare", "Rarely"), ("normal", "Now and then"), ("often", "Often")]);
     toggle_setting(ui, s, dirty, c.row(), "Breakdowns", "traffic_events.breakdown");
     toggle_setting(ui, s, dirty, c.row(), "Deliveries in the street", "traffic_events.delivery");

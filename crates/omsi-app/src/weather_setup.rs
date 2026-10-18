@@ -93,7 +93,7 @@ impl CustomWeather {
             path:std::path::PathBuf::from(c.encode()),name:"Custom weather".into(),description:"User-defined weather".into(),
             fog:(c.visibility_m,1.0),wind:(c.wind_dir,c.wind_speed),temp:(c.temp_c,absolute_humidity(c.temp_c,c.humidity)),
             pressure:c.pressure,clouds:(cloud.into(),c.cloud_base_m),precip:vec![c.precip as f32,c.precip_intensity,0.0,0.0,0.0],
-            ground_wet:[c.road_wetness*255.0,0.0,0.0],snow:c.snow_cover,snow_on_road:c.snow_on_road}
+            ground_wet:[c.road_wetness*255.0,0.0,0.0],snow:c.snow_cover,snow_on_road:c.snow_on_road,sky:None}
     }
 }
 fn saturation_vapour_pressure(temp_c:f32)->f32{6.112*((17.67*temp_c)/(temp_c+243.5)).exp()}
@@ -473,6 +473,7 @@ pub(crate) fn weather_lighting(
     // exposure takes it; the plain shading's night light is scaled by it, more as it gets
     // darker
     lighting.night_brightness = crate::startup::NIGHT_BRIGHTNESS.load(std::sync::atomic::Ordering::Relaxed).clamp(10, 200) as f32 / 100.0;
+    lighting.cab_dimmer = crate::startup::DASH_DIMMER.load(std::sync::atomic::Ordering::Relaxed).clamp(20, 150) as f32 / 100.0;
     if !lighting.enhanced && lighting.night_brightness != 1.0 {
         let k = 1.0 + (lighting.night_brightness - 1.0) * lighting.night.clamp(0.0, 1.0);
         lighting.secondary *= k;
@@ -483,7 +484,12 @@ pub(crate) fn weather_lighting(
     let (density, offset) = clouds_of(w, cloud_drift);
     lighting.cloud_density = density;
     lighting.cloud_offset = offset;
-    let model_sky = *crate::weather_model::CURRENT.lock().unwrap_or_else(|e| e.into_inner());
+    // (the model's sky, else the weather's own `[openomsi_sky]`: a preset made for these
+    // graphics says what its sky is, not only what OMSI's cloud picture and visibility
+    // allow - a cirrus veil, a grey deck, the air of a crisp or a sultry day)
+    let model_sky = crate::weather_model::CURRENT.lock().unwrap_or_else(|e| e.into_inner()).or_else(|| {
+        w.sky.map(|s| crate::weather_model::ModelSky { cumulus: s.cumulus, deck: s.deck, veil: s.veil, haze: s.haze, angstrom: s.angstrom, aerosol_height: s.aerosol_height })
+    });
     let (kind, rate) = precip_of(w);
     lights::apply_weather(
         &mut lighting,
@@ -507,6 +513,8 @@ pub(crate) fn weather_lighting(
         }
     }
     lighting.wetness = wetness;
+    // (a preset's gloom: `Sky::exposure`)
+    lighting.weather_ev = w.sky.map_or(0.0, |s| s.exposure);
     // [wind] direction (deg) and speed (m/s): the snowfall drifts with it
     lighting.wind = glam::Vec3::new(w.wind.0.to_radians().sin() * w.wind.1, w.wind.0.to_radians().cos() * w.wind.1, 0.0);
     // Omsi.exe hides the sun under an 'ovc' cloud type (the Overcast ones in clouds.cfg) and

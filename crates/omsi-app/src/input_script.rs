@@ -9,7 +9,7 @@ pub(crate) fn is_game_action(name: &str) -> bool {
     name.starts_with("view_")
         || matches!(
             name.as_str(),
-            "sim_pause" | "screenshot" | "quicksave" | "toggel_mouse_ctrl" | "toggel_ctrler" | "interface_toggle"
+            "sim_pause" | "screenshot" | "quicksave" | "toggel_mouse_ctrl" | "toggel_ctrler" | "interface_toggle" | "autopilot_toggle" | "autopilot_faster" | "autopilot_slower" | "autopilot_gap" | "autopilot_style" | "headlamp_range_up" | "headlamp_range_down" | "dash_brighter" | "dash_darker"
         )
 }
 
@@ -932,7 +932,7 @@ impl App {
     /// Whether the mouse steering (when on) steers in the view shown: every view of the
     /// player's bus, the map camera (F4) included, but not walking.
     pub(crate) fn mouse_steers_in_view(&self) -> bool {
-        self.player.is_some() && (matches!(self.view.as_str(), "driver" | "outside" | "pax") || (self.view == "free" && !self.ego))
+        self.player.is_some() && (crate::cinema::bus_view(&self.view) || (self.view == "free" && !self.ego))
     }
 
     /// Looking round with the mouse goes by the cursor's way in the window (a view of the
@@ -3177,6 +3177,7 @@ impl App {
             .into_iter()
             .filter(|p| p.extension().map(|e| e.eq_ignore_ascii_case("owt")).unwrap_or(false))
             .filter_map(|p| p.file_name().map(|n| format!("Weather/{}", n.to_string_lossy())))
+            .filter(|f| omsi_content::weather::is_preset(f))
             .collect();
         files.sort();
         files.dedup();
@@ -3600,6 +3601,38 @@ impl App {
 
     /// The key a `[game]` action of keyboard.cfg is on, as the key list names it (None: on
     /// no key).
+    /// The cinematic camera (`crate::cinema`, Ctrl+F3) over the player's bus; in it already,
+    /// the next shot.
+    pub(crate) fn enter_cinematic(&mut self) {
+        if self.player.is_none() || self.on_foot.is_some() {
+            self.service_msg = Some(("The cinematic camera films your bus: take your seat in it first".into(), 4.0));
+            return;
+        }
+        if self.view == crate::cinema::CINEMA {
+            self.cinema.next_shot();
+            return;
+        }
+        self.cinema.start();
+        self.view = crate::cinema::CINEMA.into();
+        self.ego = false;
+        let key = |a: &str, or: &str| self.game_key_name(a).unwrap_or_else(|| or.to_string());
+        self.cinema.note = Some((
+            format!("Cinematic camera  ·  {} next shot  ·  {} hold the shot  ·  F1 back to the cab", key("view_set_cinematic", "Ctrl+F3"), key("view_cinematic_hold", "Ctrl+F2")),
+            5.0,
+        ));
+    }
+
+    /// The dashcam (`crate::cinema::Dashcam`, Ctrl+F1) at the top of the player's windscreen.
+    pub(crate) fn enter_dashcam(&mut self) {
+        if self.player.is_none() || self.on_foot.is_some() {
+            self.service_msg = Some(("The dashcam is in your bus: take your seat in it first".into(), 4.0));
+            return;
+        }
+        self.view = crate::cinema::DASHCAM.into();
+        self.ego = false;
+        self.cinema.note = Some(("Dashcam  ·  F1 back to the cab".into(), 4.0));
+    }
+
     pub(crate) fn game_key_name(&self, action: &str) -> Option<String> {
         self.game_keys
             .iter()
@@ -3619,6 +3652,16 @@ impl App {
                 log::info!("interface {}", if self.ui_hidden.is_some() { "hidden" } else { "shown" });
             }
             "quicksave" => self.quick_save(),
+            // (the autopilot only where it is switched on, `secret_autopilot=1`)
+            "autopilot_toggle" if self.settings.secret_autopilot => self.toggle_autopilot(),
+            "autopilot_faster" if self.settings.secret_autopilot => self.autopilot_key("faster"),
+            "autopilot_slower" if self.settings.secret_autopilot => self.autopilot_key("slower"),
+            "autopilot_gap" if self.settings.secret_autopilot => self.autopilot_key("gap"),
+            "autopilot_style" if self.settings.secret_autopilot => self.autopilot_key("style"),
+            "headlamp_range_up" => self.lamp_key(1, 0),
+            "headlamp_range_down" => self.lamp_key(-1, 0),
+            "dash_brighter" => self.lamp_key(0, 1),
+            "dash_darker" => self.lamp_key(0, -1),
             "view_set_ego" => {
                 // on foot from where the camera is (beside the bus in the driver's view)
                 if let (Some(cam), Some(p)) = (self.camera.as_mut(), self.player.as_ref()) {
@@ -3636,6 +3679,13 @@ impl App {
             "view_set_driver" => self.view = "driver".into(),
             "view_set_passenger" => self.view = "pax".into(),
             "view_set_outside" => self.view = "outside".into(),
+            "view_set_cinematic" => self.enter_cinematic(),
+            "view_cinematic_hold" => {
+                if self.view == crate::cinema::CINEMA {
+                    self.cinema.toggle_hold();
+                }
+            }
+            "view_set_dashcam" => self.enter_dashcam(),
             // the cabin (the driver's or the passenger's) and the outside, one press apart:
             // what a single button on a controller wants. `view_toggle_viewpoint` is the
             // four-mode cycle, with the map in it, and stays where it is.
@@ -4198,6 +4248,7 @@ impl App {
             self.surface.as_ref(),
         ) {
             (Some(p), Some(cam), Some(s)) if self.view != "free"
+                && !crate::cinema::lens_view(&self.view)
                 && (self.view != "foot" || self.foot_reaches_bus())
                 && !(self.vr_active() && self.mouse_drive
                 && matches!(self.view.as_str(), "driver" | "pax")) => {

@@ -20,6 +20,29 @@ pub struct Weather {
     pub ground_wet: [f32; 3],
     pub snow: bool,
     pub snow_on_road: bool,
+    /// The sky as this fork's enhanced graphics draw it (`[openomsi_sky]`, which OMSI 2
+    /// passes by): without it they make what they can of the cloud type and the visibility.
+    pub sky: Option<Sky>,
+}
+
+/// A weather's sky for the enhanced graphics (`[openomsi_sky]`), in the terms of the weather
+/// model's (`weather_model::ModelSky`): the cumulus cover (0..0.85), the grey deck (0..1,
+/// closed from 0.85), the optical depth of the cirrus veil (0..2), the aerosol against an
+/// ordinary clear day (0.3..6: a crisp winter day 0.5, summer haze 2..3), its Ångström
+/// exponent (dry fine dust 1.5, humid haze 0.6: a blue or a milky sky) and the depth of the
+/// hazy layer (m; 0 = as the day's sun grows and settles it); and, optionally, how much
+/// darker (stops, negative) or brighter the day is shown than the eye's adaptation alone
+/// makes it - a storm's gloom, which the automatic exposure otherwise lifts back to an
+/// ordinary grey day.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sky {
+    pub cumulus: f32,
+    pub deck: f32,
+    pub veil: f32,
+    pub haze: f32,
+    pub angstrom: f32,
+    pub aerosol_height: f32,
+    pub exposure: f32,
 }
 
 impl Weather {
@@ -46,10 +69,134 @@ impl Weather {
                 "groundwet" => w.ground_wet = r.f32s::<3>(),
                 "snow" => w.snow = true,
                 "snowonroad" => w.snow_on_road = true,
+                "openomsi_sky" => {
+                    let [cumulus, deck, veil, haze, angstrom, aerosol_height] = r.f32s::<6>();
+                    w.sky = Some(Sky {
+                        cumulus: cumulus.clamp(0.0, 0.85),
+                        deck: deck.clamp(0.0, 1.0),
+                        veil: veil.clamp(0.0, 2.0),
+                        haze: haze.clamp(0.3, 6.0),
+                        angstrom: angstrom.clamp(0.45, 1.6),
+                        aerosol_height: aerosol_height.clamp(0.0, 4000.0),
+                        exposure: r.opt_f32().unwrap_or(0.0).clamp(-3.0, 1.0),
+                    });
+                }
                 _ => {}
             }
         }
         w
+    }
+}
+
+/// This fork's own weather presets (`weather_presets/`): every season's weather, each with
+/// its sky for the enhanced graphics (`[openomsi_sky]`). They go into the content folder's
+/// `Weather` (`install_presets`), where the game and the launcher list them beside OMSI 2's.
+pub const PRESETS: &[(&str, &str)] = &[
+    ("After the Rain.owt", include_str!("../weather_presets/After the Rain.owt")),
+    ("Autumn Gale.owt", include_str!("../weather_presets/Autumn Gale.owt")),
+    ("Between the Showers.owt", include_str!("../weather_presets/Between the Showers.owt")),
+    ("Breezy and Broken.owt", include_str!("../weather_presets/Breezy and Broken.owt")),
+    ("Crisp Winter Sun.owt", include_str!("../weather_presets/Crisp Winter Sun.owt")),
+    ("Crystal Clear.owt", include_str!("../weather_presets/Crystal Clear.owt")),
+    ("Dense Fog.owt", include_str!("../weather_presets/Dense Fog.owt")),
+    ("Drizzle.owt", include_str!("../weather_presets/Drizzle.owt")),
+    ("Fair-Weather Cumulus.owt", include_str!("../weather_presets/Fair-Weather Cumulus.owt")),
+    ("Freezing Fog.owt", include_str!("../weather_presets/Freezing Fog.owt")),
+    ("Golden Autumn.owt", include_str!("../weather_presets/Golden Autumn.owt")),
+    ("Grey Overcast.owt", include_str!("../weather_presets/Grey Overcast.owt")),
+    ("Grey Winter Day.owt", include_str!("../weather_presets/Grey Winter Day.owt")),
+    ("Heavy Snow.owt", include_str!("../weather_presets/Heavy Snow.owt")),
+    ("High Cirrus.owt", include_str!("../weather_presets/High Cirrus.owt")),
+    ("Light Snow.owt", include_str!("../weather_presets/Light Snow.owt")),
+    ("Morning Mist.owt", include_str!("../weather_presets/Morning Mist.owt")),
+    ("Steady Rain.owt", include_str!("../weather_presets/Steady Rain.owt")),
+    ("Sultry Before the Storm.owt", include_str!("../weather_presets/Sultry Before the Storm.owt")),
+    ("Summer Haze.owt", include_str!("../weather_presets/Summer Haze.owt")),
+    ("Thunderstorm.owt", include_str!("../weather_presets/Thunderstorm.owt")),
+];
+
+/// Whether a weather file (its name, or a path ending in it) is one of this fork's presets
+/// (`PRESETS`): the only weathers the lists offer. OMSI 2's own and the add-ons' stay on the
+/// disk - the original game needs them - and still load where a situation, a saved choice
+/// or a server names one.
+pub fn is_preset(file: &str) -> bool {
+    let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+    PRESETS.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
+}
+
+/// The version a preset says it is (`[openomsi_preset]`); none for anyone else's file.
+fn preset_version(text: &str) -> Option<u32> {
+    let mut lines = text.lines().map(str::trim);
+    lines.find(|l| l.eq_ignore_ascii_case("[openomsi_preset]"))?;
+    lines.find(|l| !l.is_empty())?.parse().ok()
+}
+
+/// Put this fork's presets (`PRESETS`) into `content`'s `Weather` folder, OMSI's way (CRLF):
+/// those not there yet, and over an older version of its own - never over a file someone
+/// made or changed into another weather without the marker. How many were written.
+pub fn install_presets(content: &Path) -> std::io::Result<usize> {
+    let dir = content.join("Weather");
+    std::fs::create_dir_all(&dir)?;
+    let mut written = 0;
+    for (name, text) in PRESETS {
+        let target = dir.join(name);
+        let stale = match std::fs::read(&target) {
+            Err(_) => true,
+            Ok(old) => preset_version(&String::from_utf8_lossy(&old)).is_some_and(|v| v < preset_version(text).unwrap_or(0)),
+        };
+        if stale {
+            std::fs::write(&target, text.replace("\r\n", "\n").replace('\n', "\r\n"))?;
+            written += 1;
+        }
+    }
+    Ok(written)
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+
+    /// Every preset reads as the weather it means: a name, a sky of its own, a dew point
+    /// no higher than the air, rain or snow only where the season allows.
+    #[test]
+    fn every_preset_is_a_whole_weather() {
+        assert!(PRESETS.len() >= 20);
+        for (name, text) in PRESETS {
+            let w = Weather::parse(&CfgFile::from_str(name, text));
+            assert_eq!(format!("{}.owt", w.name), *name);
+            assert!(!w.description.is_empty(), "{name}");
+            assert!(w.sky.is_some(), "{name}");
+            assert_eq!(preset_version(text), Some(1), "{name}");
+            assert!(w.fog.0 >= 50.0 && w.fog.0 <= 50_000.0, "{name}");
+            assert!(w.temp.1 > 0.0, "{name}: humidity");
+            if w.precip.first() == Some(&2.0) {
+                assert!(w.temp.0 <= 1.0 && w.snow, "{name}: snow in the warm");
+            }
+        }
+        // (the seventh number, the day's exposure, is read where it is given)
+        let storm = PRESETS.iter().find(|p| p.0 == "Thunderstorm.owt").unwrap();
+        assert!(Weather::parse(&CfgFile::from_str(storm.0, storm.1)).sky.unwrap().exposure < -1.0);
+        let six = Weather::parse(&CfgFile::from_str("x.owt", "[openomsi_sky]\n0.3\n0\n0\n1\n1.3\n0\n\n[snow]\n"));
+        assert!(six.snow && six.sky.unwrap().exposure == 0.0);
+        assert!(is_preset("Weather/Thunderstorm.owt") && is_preset("C:\\x\\Weather\\crystal clear.owt"));
+        assert!(!is_preset("Weather/#CAVOK.owt") && !is_preset("Weather/Sommerlich.owt"));
+    }
+
+    #[test]
+    fn presets_go_in_once_and_never_over_anyone_elses_file() {
+        let dir = std::env::temp_dir().join(format!("omsi_presets_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(install_presets(&dir).unwrap(), PRESETS.len());
+        assert_eq!(install_presets(&dir).unwrap(), 0);
+        let (name, _) = PRESETS[0];
+        let file = dir.join("Weather").join(name);
+        assert!(std::fs::read_to_string(&file).unwrap().contains("\r\n[openomsi_sky]\r\n"));
+        // someone's own weather of that name stays; an older preset of ours is replaced
+        std::fs::write(&file, "[name]\r\nmine\r\n").unwrap();
+        assert_eq!(install_presets(&dir).unwrap(), 0);
+        std::fs::write(&file, "[openomsi_preset]\r\n0\r\n").unwrap();
+        assert_eq!(install_presets(&dir).unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

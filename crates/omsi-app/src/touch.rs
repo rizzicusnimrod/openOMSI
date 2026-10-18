@@ -279,7 +279,7 @@ impl App {
             t.buttons = b;
             return;
         }
-        let driving = self.player.is_some() && matches!(self.view.as_str(), "driver" | "outside" | "pax");
+        let driving = self.player.is_some() && crate::cinema::bus_view(&self.view);
         x -= step;
         push(&mut b, Btn::Panel, rb(x, y, r), "tune", "", t.panel, true);
         x -= step;

@@ -979,6 +979,14 @@ pub struct VehicleInstance {
     /// others 0 - or, with incandescent lamps (`set_lamp_filament`), followed as a filament
     /// glows up and goes out, so a change of beam crosses over as a halogen lamp's does.
     pub spot_fade: Vec<f32>,
+    /// The headlamps' levelling (degrees): the slow part of the body's pitch over the road
+    /// under its wheels - its springs' sag, a kneeling front, the load - followed over a few
+    /// seconds (`BEAM_LEVEL_S`), which the beams take back as a levelled headlamp does, so
+    /// that only braking and bumps dip them. None for a vehicle without its own physics.
+    pub beam_trim: Option<f32>,
+    /// The headlamp range control (degrees, + lowers the beams): the driver's wheel on the
+    /// dashboard, on top of the levelling (`beam_trim`). 0 for every vehicle but the own bus.
+    pub beam_aim: f32,
     /// The meshes' transforms in the modelled pose, for `[smoothskin]` (made when needed).
     skin_rest: Vec<Mat4>,
     /// Static obstacles; the vehicle's `[boundingbox]` is kept out of them.
@@ -1258,6 +1266,8 @@ impl VehicleInstance {
             particles: ParticleSet::new(ty.model.particle_systems(), std::ptr::addr_of!(host) as u64 ^ 0x9e37_79b9).for_vehicle(),
             light_fade: Vec::new(),
             spot_fade: Vec::new(),
+            beam_trim: None,
+            beam_aim: 0.0,
             v_springfactor,
             rest_sag,
             ai_lift,
@@ -1900,6 +1910,9 @@ impl VehicleInstance {
         self.heading = heading;
         self.pitch = pitch;
         self.bank = bank;
+        if let Some(road) = road_pitch(&rb) {
+            self.level_beams(road, dt);
+        }
         // script interface
         let speed = rb.forward_speed();
         self.physics.speed = speed;
@@ -4074,7 +4087,50 @@ impl TrailerPart {
     }
 }
 
+/// How long the headlamps' levelling takes to follow the body's pitch over the road (s,
+/// see `VehicleInstance::beam_trim`), and the most it takes back (degrees).
+const BEAM_LEVEL_S: f32 = 4.0;
+const BEAM_LEVEL_MAX: f32 = 4.0;
+
+/// The road's pitch under a rigid body (degrees, up ahead positive): from the ground under
+/// its foremost and its rearmost axle's wheels, while they stand on it.
+fn road_pitch(rb: &crate::rigid::RigidBody) -> Option<f32> {
+    let on: Vec<&crate::rigid::RigidWheel> = rb.wheels.iter().filter(|w| w.on_ground && w.ground_seen).collect();
+    let front = on.iter().map(|w| w.attach.y).fold(f32::MIN, f32::max);
+    let rear = on.iter().map(|w| w.attach.y).fold(f32::MAX, f32::min);
+    if on.is_empty() || front - rear < 1.5 {
+        return None;
+    }
+    let ground = |y: f32| {
+        let zs: Vec<f64> = on.iter().filter(|w| (w.attach.y - y).abs() < 0.3).map(|w| w.ground_z).collect();
+        zs.iter().sum::<f64>() / zs.len().max(1) as f64
+    };
+    let rise = (ground(front) - ground(rear)) as f32;
+    Some(rise.atan2(front - rear).to_degrees())
+}
+
 impl VehicleInstance {
+    /// The headlamps' levelling (`beam_trim`) follows, over `dt` s, the body's pitch over
+    /// the road under its wheels (`road`, degrees): for the own bus from its wheels, for
+    /// another player's copy from the ground under its axles (`axle_span`).
+    pub fn level_beams(&mut self, road: f32, dt: f32) {
+        let lean = (self.pitch - road).clamp(-BEAM_LEVEL_MAX, BEAM_LEVEL_MAX);
+        let k = 1.0 - (-dt.max(0.0) / BEAM_LEVEL_S).exp();
+        self.beam_trim = Some(match self.beam_trim {
+            Some(t) => t + (lean - t) * k,
+            None => lean,
+        });
+    }
+
+    /// The foremost and the rearmost axle's place along the body (m, model frame), when
+    /// they are apart enough to measure a slope between them.
+    pub fn axle_span(&self) -> Option<(f32, f32)> {
+        let axles = &self.ty.def.axles;
+        let front = axles.iter().map(|a| a.long).fold(f32::MIN, f32::max);
+        let rear = axles.iter().map(|a| a.long).fold(f32::MAX, f32::min);
+        (axles.len() >= 2 && front - rear >= 1.5).then_some((front, rear))
+    }
+
     /// Rotation of the vehicle body (model frame → world, without translation).
     pub fn body_rotation(&self) -> Mat4 {
         body_rotation(self.heading, self.pitch, self.bank, body_reversed(&self.ty.def, false))

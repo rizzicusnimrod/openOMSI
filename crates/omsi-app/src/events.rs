@@ -1,4 +1,4 @@
-//! Traffic events (the custom fork's; for now on the Thüringer Wald map alone): now and then
+//! Traffic events (the custom fork's; on every map): now and then
 //! something happens on the road ahead of the player's bus that changes the drive for a
 //! while and then clears up by itself.
 //!
@@ -51,9 +51,6 @@ use crate::traffic::{EventRole, Halt, PlayerBox, Traffic};
 use glam::{DVec2, DVec3};
 use omsi_render::{Renderer, Scene};
 use omsi_sim::traffic::{LaneKind, Network};
-
-/// The maps that have traffic events, by their folder's name.
-const EVENT_MAPS: [&str; 1] = ["TH_Wald"];
 
 /// How far ahead of the bus an event's car is put on the road (m along the road).
 const AHEAD_MIN: f32 = 220.0;
@@ -112,12 +109,14 @@ fn triangle_sco() -> Option<String> {
     Some(dir.join("warndreieck.sco").to_string_lossy().into_owned())
 }
 
-/// What the cars are: the map's random traffic types whose file name has one of these in it.
-const BREAKDOWN_CARS: [&str; 5] = ["TH_Trabant", "TH_Wartburg", "TH_R21", "TH_Golf4", "TH_CorsaC"];
-const DELIVERY_VANS: [&str; 5] = ["L2000_Getraenke", "L2000_Koffer", "Sprinter_Kasten", "T4_Kasten", "Kangoo_Rapid"];
+/// What the cars are: the map's random traffic types whose file name has one of these in it
+/// (the Thüringer Wald's by their names, any map's by the common words; a map with none of
+/// them takes any of its cars light enough, see `Traffic::event_pick`).
+const BREAKDOWN_CARS: [&str; 13] = ["TH_Trabant", "TH_Wartburg", "TH_R21", "TH_Golf4", "TH_CorsaC", "trabant", "wartburg", "lada", "dacia", "polski", "zastava", "moskvich", "skoda"];
+const DELIVERY_VANS: [&str; 16] = ["L2000_Getraenke", "L2000_Koffer", "Sprinter_Kasten", "T4_Kasten", "Kangoo_Rapid", "kasten", "koffer", "transporter", "lieferwagen", "sprinter", "transit", "ducato", "caddy", "kangoo", "furgon", "kisteher"];
 const STOP_CARS: [&str; 6] = ["TH_Golf4", "TH_CorsaC", "TH_Focus", "TH_Zafira", "TH_A4_B6", "TH_Trabant"];
-const SLOW_LORRIES: [&str; 3] = ["TH_W50", "MB_SK_Kipper", "MB_SK_Pritsche"];
-const LEARNER_CARS: [&str; 3] = ["TH_Golf4", "TH_CorsaC", "TH_Focus"];
+const SLOW_LORRIES: [&str; 12] = ["TH_W50", "MB_SK_Kipper", "MB_SK_Pritsche", "kipper", "pritsche", "lkw", "truck", "lorry", "traktor", "tractor", "csepel", "raba"];
+const LEARNER_CARS: [&str; 7] = ["TH_Golf4", "TH_CorsaC", "TH_Focus", "golf", "corsa", "polo", "fabia"];
 /// OMSI 2's own ambulance (Berlin's Mercedes T1): its script runs the blue lights and the
 /// siren and claims the right of way.
 const AMBULANCE: &str = "Vehicles\\MB_T1\\ai_mb_t1_rtw.ovh";
@@ -299,12 +298,8 @@ pub(crate) struct Events {
 }
 
 impl Events {
-    /// The director for the map in `map_dir`, or None for a map without traffic events.
+    /// The director for the map in `map_dir` (every map has one).
     pub(crate) fn new(map_dir: &std::path::Path, cfg: Config, seed: u64) -> Option<Events> {
-        let name = map_dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        if !EVENT_MAPS.iter().any(|m| name.eq_ignore_ascii_case(m)) {
-            return None;
-        }
         let forced = omsi_cfg::env::var("OMSI_EVENT").ok().and_then(|v| Kind::parse(&v));
         if forced.is_some() {
             log::info!("traffic events: OMSI_EVENT starts a {} at once", forced.map(Kind::name).unwrap_or(""));
@@ -1296,9 +1291,9 @@ mod tests {
     }
 
     #[test]
-    fn events_are_for_the_thueringer_wald_alone() {
-        let cfg = Config { every_min: Some(12.0), breakdown: true, delivery: true, stop: true, emergency: true, slow: true, learner: true };
+    fn events_are_on_every_map() {
+        let cfg = Config::from_settings(&crate::settings::Settings::default());
         assert!(Events::new(std::path::Path::new("C:/OMSI 2/maps/TH_Wald"), cfg.clone(), 1).is_some());
-        assert!(Events::new(std::path::Path::new("C:/OMSI 2/maps/Grundorf"), cfg, 1).is_none());
+        assert!(Events::new(std::path::Path::new("C:/OMSI 2/maps/Budapest 181"), cfg, 1).is_some());
     }
 }

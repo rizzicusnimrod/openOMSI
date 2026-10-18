@@ -358,17 +358,67 @@ pub(crate) fn render_mirrors(
     only: Option<usize>,
     view: Option<(Camera, f32)>,
 ) -> usize {
+    let rig = MirrorRig { vehicle: &p.vehicle, offsets: &p.mirror_offsets, shifts: &p.mirror_shifts, fovs: &p.mirror_fovs, driver_eye: driver_eye(p) };
+    render_rig_mirrors(renderer, scene, world, &rig, lighting, only, view)
+}
+
+/// [`render_mirrors`] for another player's bus one rides in: its mirrors as they are set
+/// in its files. The mirror textures are one set, by camera number, for every bus whose
+/// glass names them (`reflexionN.bmp`) - its glass showed the cameras of the rider's own
+/// bus, standing wherever it was left, and those were not drawn while away from it.
+pub(crate) fn render_remote_mirrors(
+    renderer: &mut Renderer,
+    scene: &mut Scene,
+    world: &scene::World,
+    v: &omsi_sim::VehicleInstance,
+    lighting: &omsi_render::Lighting,
+    only: Option<usize>,
+    view: Option<(Camera, f32)>,
+) -> usize {
+    let rig = MirrorRig { vehicle: v, offsets: &[], shifts: &[], fovs: &[], driver_eye: vehicle_driver_eye(v) };
+    render_rig_mirrors(renderer, scene, world, &rig, lighting, only, view)
+}
+
+/// Where the driver's eye of a vehicle is, by its standard driver's camera (for aiming its
+/// mirrors with no view to aim them by).
+fn vehicle_driver_eye(v: &omsi_sim::VehicleInstance) -> DVec3 {
+    let def = &v.ty.def;
+    match def.cameras_driver.get(def.camera_std % def.cameras_driver.len().max(1)) {
+        Some(c) => v.camera_world(c).0,
+        None => v.position + DVec3::Z * 2.0,
+    }
+}
+
+/// A vehicle's mirrors to draw: the vehicle, the player's own turns, shifts and fields of
+/// view of them (none for another player's bus) and its driver's eye.
+struct MirrorRig<'a> {
+    vehicle: &'a omsi_sim::VehicleInstance,
+    offsets: &'a [[f32; 2]],
+    shifts: &'a [[f32; 3]],
+    fovs: &'a [f32],
+    driver_eye: DVec3,
+}
+
+fn render_rig_mirrors(
+    renderer: &mut Renderer,
+    scene: &mut Scene,
+    world: &scene::World,
+    rig: &MirrorRig,
+    lighting: &omsi_render::Lighting,
+    only: Option<usize>,
+    view: Option<(Camera, f32)>,
+) -> usize {
     // (aimed from the eye of the view being drawn, as Omsi.exe aims them - from the
     // driver's without one)
-    let eye = view.as_ref().map(|v| v.0.position).unwrap_or_else(|| driver_eye(p));
+    let eye = view.as_ref().map(|v| v.0.position).unwrap_or(rig.driver_eye);
     // the leading vehicle's cameras, then its rear sections' (openOMSI: numbered on from the
     // last of the one in front, so a screen in the cab can show a camera on a rear door),
     // each aimed and placed in its own body
-    let v = &p.vehicle;
+    let v = rig.vehicle;
     let mut cams: Vec<(omsi_vehicle::Camera, (DVec3, f32, f32, f32))> = Vec::new();
     let aim = |i: usize, c: &omsi_vehicle::Camera, position: DVec3, rot: glam::Mat4| {
-        let c = adjusted(c, p.mirror_shifts.get(i).copied().unwrap_or([0.0; 3]), p.mirror_fovs.get(i).copied().unwrap_or(0.0));
-        mirror_view_in(position, rot, &c, eye, p.mirror_offsets.get(i).copied().unwrap_or([0.0; 2]))
+        let c = adjusted(c, rig.shifts.get(i).copied().unwrap_or([0.0; 3]), rig.fovs.get(i).copied().unwrap_or(0.0));
+        mirror_view_in(position, rot, &c, eye, rig.offsets.get(i).copied().unwrap_or([0.0; 2]))
     };
     for c in &v.ty.def.cameras_reflexion {
         let c = aim(cams.len(), c, v.position, v.body_rotation());

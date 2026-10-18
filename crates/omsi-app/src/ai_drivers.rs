@@ -14,7 +14,7 @@
 
 use omsi_content::weather::Weather;
 pub use omsi_sim::ai_patch::{
-    VAR_BRAKE_L, VAR_BRAKE_R, VAR_HEAD_L, VAR_HEAD_R, VAR_HIGH_BEAM, VAR_REAR_FOG, VAR_SMOKE_ALPHA, VAR_SMOKE_FREQ,
+    VAR_BRAKE_L, VAR_BRAKE_R, VAR_FRONT_FOG, VAR_HEAD_L, VAR_HEAD_R, VAR_HIGH_BEAM, VAR_REAR_FOG, VAR_SMOKE_ALPHA, VAR_SMOKE_FREQ,
     VAR_SMOKE_LIFE, VAR_SMOKE_SPEED,
 };
 
@@ -50,6 +50,17 @@ pub struct Config {
     /// Drivers who use their rear fog lamp, and how far one must see at most (m).
     pub rear_fog: f32,
     pub rear_fog_m: f32,
+    /// Drivers who have front fog lamps and use them, and how far one must see at most (m).
+    pub front_fog: f32,
+    pub front_fog_m: f32,
+    /// Drivers who drive with their high beams on a dark road outside the towns (a limit of
+    /// at least `high_beam_kmh`), dipping them for a vehicle coming within `high_beam_dip_m`
+    /// or one ahead within `high_beam_follow_m`; and those slow to dip (`flaws`).
+    pub high_beam: f32,
+    pub high_beam_kmh: f32,
+    pub high_beam_dip_m: f32,
+    pub high_beam_follow_m: f32,
+    pub high_beam_late: f32,
     /// Drivers who put their hazard lights on when braking hard (m/s²) from speed (km/h),
     /// and for how long after stopping (s).
     pub hazard: f32,
@@ -143,6 +154,13 @@ impl Default for Config {
             off_delay_max: 120.0,
             rear_fog: 0.6,
             rear_fog_m: 150.0,
+            front_fog: 0.45,
+            front_fog_m: 250.0,
+            high_beam: 0.75,
+            high_beam_kmh: 70.0,
+            high_beam_dip_m: 450.0,
+            high_beam_follow_m: 150.0,
+            high_beam_late: 0.12,
             hazard: 0.7,
             hazard_decel: 4.5,
             hazard_speed: 40.0,
@@ -280,6 +298,8 @@ config_fields! {
     fog_min_m: num, fog_max_m: num,
     on_delay_max: num, off_delay_min: num, off_delay_max: num,
     rear_fog: share, rear_fog_m: num,
+    front_fog: share, front_fog_m: num,
+    high_beam: share, high_beam_kmh: num, high_beam_dip_m: num, high_beam_follow_m: num, high_beam_late: share,
     hazard: share, hazard_decel: num, hazard_speed: num, hazard_hold_min: num, hazard_hold_max: num,
     honk: share, patience_min: num, patience_max: num, honk_repeat_min: num, honk_repeat_max: num, honk_max: count,
     angry: share, angry_decel: num,
@@ -409,6 +429,15 @@ pub const OPTION_PAGES: &[(&str, &[OptionRow])] = {
             heading("Rear fog lamp", "A bright red lamp at the back, in thick fog"),
             row("rear_fog", "Drivers who use it", "Share of the drivers who switch it on in fog", Percent, 0.0, 1.0, 0.05),
             adv("rear_fog_m", "On below a visibility of", "How thick the fog must be", Metres, 25.0, 500.0, 25.0),
+            heading("High beams", "On dark roads outside the towns, dipped for others"),
+            row("high_beam", "Drivers who use them", "Share of the drivers who drive with high beams where it is dark and nobody comes", Percent, 0.0, 1.0, 0.05),
+            adv("high_beam_kmh", "On roads with a limit of at least", "Roads with a lower limit count as towns", Kmh, 30.0, 130.0, 10.0),
+            adv("high_beam_dip_m", "Dipped for oncoming traffic within", "How far off an oncoming vehicle makes them dip", Metres, 100.0, 1000.0, 50.0),
+            adv("high_beam_follow_m", "Dipped behind a vehicle within", "How close a vehicle ahead makes them dip", Metres, 30.0, 400.0, 10.0),
+            row("high_beam_late", "Slow to dip", "Share of the drivers who dip seconds late and dazzle you", Percent, 0.0, 1.0, 0.01),
+            heading("Front fog lamps", "Low, wide lamps in the bumper, in fog"),
+            row("front_fog", "Drivers who use them", "Share of the drivers whose car has them and who switch them on in fog", Percent, 0.0, 1.0, 0.05),
+            adv("front_fog_m", "On below a visibility of", "How thick the fog must be", Metres, 50.0, 1000.0, 25.0),
         ]),
         ("AI hazards & horn", &[
             heading("Hazard lights", "Braking hard, e.g. at the end of a jam"),
@@ -628,6 +657,13 @@ pub struct Input {
     pub held_ahead: bool,
     /// An oncoming bus's high beams are in the driver's eyes.
     pub dazzled: bool,
+    /// A dark road outside the towns (by the time of day, `high_beam_kmh` or faster): one
+    /// for the high beams.
+    pub dark_road: bool,
+    /// The nearest vehicle coming the other way whose lamps face the driver's (m), within
+    /// `high_beam_dip_m`; and the gap to the vehicle ahead (m).
+    pub meets: Option<f32>,
+    pub follows: Option<f32>,
     /// The vehicle the driver lets go first by choice, close by (a bus out of its stop, a
     /// car in beside them at a merge), by id.
     pub courtesy: Option<u64>,
@@ -651,6 +687,9 @@ pub struct Output {
     pub lights: bool,
     pub blinker: i32,
     pub rear_fog: bool,
+    pub front_fog: bool,
+    /// Driving with the high beams on (not a flash).
+    pub high_beam: bool,
     /// Sound the horn now (one toot).
     pub horn: bool,
     /// The high beams flashed on.
@@ -667,6 +706,10 @@ pub struct Driver {
     always: bool,
     hazard_user: bool,
     rear_fog_user: bool,
+    front_fog_user: bool,
+    high_beam_user: bool,
+    /// Seconds before dipping the high beams for someone.
+    dip_delay: f32,
     impatient: bool,
     angry: bool,
     no_indicator: bool,
@@ -696,6 +739,12 @@ pub struct Driver {
     last_bad: f64,
     noticed_dark: bool,
     rear_fog: bool,
+    front_fog: bool,
+    /// Driving with the high beams on, and for how long something has called for dipping
+    /// them, or nothing has.
+    high_beam: bool,
+    dip_for: f32,
+    clear_for: f32,
     speed_prev: Option<f32>,
     /// Smoothed deceleration (m/s², positive braking).
     decel: f32,
@@ -801,12 +850,19 @@ impl Driver {
         let wait_patience = d.between(cfg.flash_wait_min, cfg.flash_wait_max);
         let dazzle_reaction = d.between(0.5, 2.0);
         let courteous = d.chance(cfg.flash_courtesy);
+        let front_fog_user = d.chance(cfg.front_fog);
+        let high_beam_user = d.chance(cfg.high_beam);
+        let late_dipper = d.chance(cfg.high_beam_late) && flaws;
+        let dip_delay = if late_dipper { d.between(3.0, 7.0) } else { d.between(0.4, 1.8) };
         Driver {
             dice: d,
             clock: 0.0,
             always,
             hazard_user,
             rear_fog_user,
+            front_fog_user,
+            high_beam_user,
+            dip_delay,
             impatient,
             angry,
             no_indicator,
@@ -835,6 +891,10 @@ impl Driver {
             last_bad: 0.0,
             noticed_dark: false,
             rear_fog: false,
+            front_fog: false,
+            high_beam: false,
+            dip_for: 0.0,
+            clear_for: 0.0,
             speed_prev: None,
             decel: 0.0,
             hazard: false,
@@ -924,6 +984,27 @@ impl Driver {
         let proper = self.rear_fog_user && fog_thick && self.bad;
         let misused = self.rear_fog_misuse && (c.raining() || c.light < 0.3);
         self.rear_fog = (proper || misused) && lights;
+        // --- front fog lamps: in fog, by those who have them ------------------------
+        let fog = c.visibility_m < cfg.front_fog_m * if self.front_fog { 1.2 } else { 1.0 };
+        self.front_fog = self.front_fog_user && fog && self.bad && lights;
+        // --- high beams on a dark road, dipped for others --------------------------
+        let wants_high = self.high_beam_user && lights && i.dark_road && kmh > 30.0 && !self.front_fog && c.visibility_m > 500.0;
+        let dip = i.meets.is_some() || i.follows.is_some_and(|g| g < cfg.high_beam_follow_m) || i.dazzled;
+        if wants_high && !dip {
+            self.dip_for = 0.0;
+            self.clear_for += dt;
+            // (on again once the road has stayed clear a moment)
+            if self.clear_for > 1.5 {
+                self.high_beam = true;
+            }
+        } else {
+            self.clear_for = 0.0;
+            self.dip_for += dt;
+            // (a bus flashing its own high beams at one who has not dipped: at once)
+            if !wants_high || self.dip_for >= self.dip_delay || (i.dazzled && self.dip_for > 0.3) {
+                self.high_beam = false;
+            }
+        }
 
         // --- hazard lights on hard braking ----------------------------------------
         if let Some(prev) = self.speed_prev {
@@ -1010,7 +1091,7 @@ impl Driver {
 
         let flash = self.flash_lights(cfg, i, kmh);
 
-        Output { lights, blinker, rear_fog: self.rear_fog, horn, flash }
+        Output { lights, blinker, rear_fog: self.rear_fog, front_fog: self.front_fog, high_beam: self.high_beam && lights, horn, flash }
     }
 
     /// Why the driver has decided to flash since the last call ("provoked", "cut in",

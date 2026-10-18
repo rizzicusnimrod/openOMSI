@@ -185,6 +185,10 @@ pub(crate) struct App {
     /// The interface hidden (`interface_toggle`, Ctrl+H), since when: the picture alone, but
     /// for a menu opened over it.
     pub(crate) ui_hidden: Option<std::time::Instant>,
+    /// The cinematic camera's director and the dashcam's mount (`crate::cinema`; the views
+    /// "cinema" and "dashcam").
+    pub(crate) cinema: crate::cinema::Cinema,
+    pub(crate) dashcam: crate::cinema::Dashcam,
     /// The player's windscreen's wipers and the water they sweep (`crate::wipers`).
     pub(crate) wipers: Option<crate::wipers::Wipers>,
     /// Discord's "Playing openOMSI" status, and when it was last brought up to date.

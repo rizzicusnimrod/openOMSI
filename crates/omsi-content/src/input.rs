@@ -134,6 +134,38 @@ impl KeyboardCfg {
         if !self.game.iter().any(|b| b.action.eq_ignore_ascii_case("interface_toggle")) {
             self.game.push(KeyBinding { action: "interface_toggle".into(), scan_code: 35, modifier: KEY_CTRL });
         }
+        // the headlamp range control's wheel (Page Up / Down) and the instrument dimmer (Home
+        // brighter, End darker), on Alt as well
+        for (action, scan_code) in [("headlamp_range_up", 201), ("headlamp_range_down", 209), ("dash_brighter", 199), ("dash_darker", 207)] {
+            if !self.game.iter().any(|b| b.action.eq_ignore_ascii_case(action)) {
+                self.game.push(KeyBinding { action: action.into(), scan_code, modifier: KEY_ALT });
+            }
+        }
+        // the cinematic camera (again: the next shot) and the dashcam, Ctrl+F3 and Ctrl+F1
+        // beside OMSI's outside and cab views, the cinematic camera's shot held on Ctrl+F2
+        for (action, scan_code) in [("view_set_cinematic", 61), ("view_cinematic_hold", 60), ("view_set_dashcam", 59)] {
+            if !self.game.iter().any(|b| b.action.eq_ignore_ascii_case(action)) {
+                self.game.push(KeyBinding { action: action.into(), scan_code, modifier: KEY_CTRL });
+            }
+        }
+        self
+    }
+
+    /// The autopilot's keys (openOMSI's; a secret feature, added only where it is switched
+    /// on), all on Alt (OMSI's own file has no Alt keys) round the left hand's home: A on and
+    /// off, Q and E its top speed down and up, D the distance it keeps, C its driving style.
+    pub fn with_autopilot_keys(mut self) -> Self {
+        for (action, scan_code) in [("autopilot_toggle", 30), ("autopilot_slower", 16), ("autopilot_faster", 18), ("autopilot_gap", 32), ("autopilot_style", 46)] {
+            if !self.game.iter().any(|b| b.action.eq_ignore_ascii_case(action)) {
+                self.game.push(KeyBinding { action: action.into(), scan_code, modifier: KEY_ALT });
+            }
+        }
+        self
+    }
+
+    /// Without the autopilot's keys (a key file written while it was shown keeps them).
+    pub fn without_autopilot_keys(mut self) -> Self {
+        self.game.retain(|b| !b.action.to_ascii_lowercase().starts_with("autopilot_"));
         self
     }
 

@@ -45,6 +45,9 @@ struct FogLampParams {
     // xy the picture's size in pixels, z 1: the sun's glare is added, w the share of the
     // weather's extinction that is mist and fog (not rain)
     size: vec4<f32>,
+    // the headlamps shining into the eye (lib.rs `lamp_glare`): where each is from the
+    // camera (world) and its light at the eye; w 0 = none
+    glare: array<vec4<f32>, 4>,
 };
 @group(1) @binding(0) var<uniform> fp: FogLampParams;
 @group(1) @binding(1) var t_depth: texture_depth_2d;
@@ -154,12 +157,15 @@ fn sun_shafts(c: vec3<f32>, d: vec3<f32>, len: f32, jitter: f32) -> vec3<f32> {
 @fragment
 fn fs_fog_lamps(in: FogVsOut) -> @location(0) vec4<f32> {
     // (the texture's last row: how much of the sun is seen, worked out once for the frame
-    // in its first texel)
+    // in its first texel, and of each headlamp shining into the eye in the next four)
     // (t_fog is not this pass's target: the row is the one under the half picture)
     if (i32(in.clip.y) >= i32(ceil(fp.size.y * 0.5))) {
         var seen = 0.0;
-        if (i32(in.clip.x) == 0 && fp.size.z > 0.5 && camera.sun_dir.z > -0.02) {
+        let x = i32(in.clip.x);
+        if (x == 0 && fp.size.z > 0.5 && camera.sun_dir.z > -0.02) {
             seen = sun_seen(camera.cam_pos.xyz, camera.sun_dir.xyz);
+        } else if (x >= 1 && x <= 4 && fp.glare[x - 1].w > 0.0) {
+            seen = lamp_seen(fp.glare[x - 1].xyz);
         }
         return vec4<f32>(seen, 0.0, 0.0, 0.0);
     }
@@ -199,6 +205,37 @@ fn sun_seen(c: vec3<f32>, s: vec3<f32>) -> f32 {
         n = n + 1.0;
     }
     return seen / n;
+}
+
+// How much of a headlamp `at` from the camera is seen (0..1): what the depth prepass
+// holds in front of it - a tree's crown, a hedge, a house - hides it, and its glare
+// with it (the cars in its way are taken out before, lib.rs `blocked`). A lens of some
+// 15 cm round its middle, at least a couple of pixels; whatever stands within 1.2 m of it
+// does not hide it - its own car's body round the lamp, which for a lorry's lamps on its
+// axis (one AI lamp behind the grille, lights.rs `ai_headlamps`) stands a metre in front.
+fn lamp_seen(at: vec3<f32>) -> f32 {
+    let c = camera.cam_pos.xyz;
+    let dist = length(at);
+    let clip = camera.view_proj * vec4<f32>(c + at, 1.0);
+    let rim = camera.view_proj * vec4<f32>(c + at + camera.cam_up.xyz * 0.15, 1.0);
+    if (clip.w <= 0.0 || rim.w <= 0.0) {
+        return 1.0;
+    }
+    let to_px = vec2<f32>(0.5 * fp.size.x, -0.5 * fp.size.y);
+    let px = clip.xy / clip.w * to_px + 0.5 * fp.size.xy;
+    let r = max(length((rim.xy / rim.w - clip.xy / clip.w) * to_px), 1.5);
+    let near = dist - 1.2 - 0.01 * dist;
+    var seen = 0.0;
+    for (var k = 0; k < 13; k = k + 1) {
+        var o = vec2<f32>(0.0);
+        if (k > 0) {
+            let ang = f32(k) * 2.3999632;
+            o = vec2<f32>(cos(ang), sin(ang)) * sqrt(f32(k) / 12.0);
+        }
+        // (beyond the picture's edge nothing is known: what stands at the edge is taken)
+        seen = seen + select(0.0, 1.0, pixel_ray(px + o * r).w >= near);
+    }
+    return seen / 13.0;
 }
 
 // Glare: the eye's own scattered light round a bright source - the sun seen directly
@@ -247,6 +284,34 @@ fn sun_glare(dir: vec3<f32>) -> vec3<f32> {
     return e * f + e * halo;
 }
 
+// The glare of the headlamps shining into the eye (fp.glare), as much of each as is seen
+// (`lamp_seen`, in the half texture's last row): the inverse square of the disability
+// glare function, at two fifths of the sun's (`LAMP_VEIL`) and fading out over some five
+// degrees (`LAMP_VEIL_SPREAD`) - the lamp's corona draws the first degree round it
+// (corona.wgsl). An oncoming full beam veils the road round the car; a low beam's light
+// over its cut-off a little. (The sun's whole function - its 1/theta tail and its veil
+// over all the picture - made every oncoming car a blinding cloud of light a quarter of
+// the screen wide, and it showed through the trees.)
+const LAMP_VEIL: f32 = 2.0;
+const LAMP_VEIL_SPREAD: f32 = 5.0;
+fn lamp_glare(dir: vec3<f32>) -> f32 {
+    let row = i32(textureDimensions(t_fog).y) - 1;
+    var sum = 0.0;
+    for (var k = 0; k < 4; k = k + 1) {
+        let g = fp.glare[k];
+        if (g.w <= 0.0) {
+            continue;
+        }
+        let seen = textureLoad(t_fog, vec2<i32>(k + 1, row), 0).r;
+        if (seen <= 0.0) {
+            continue;
+        }
+        let theta = max(degrees(acos(clamp(dot(dir, normalize(g.xyz)), -1.0, 1.0))), 0.75);
+        sum = sum + g.w * seen * LAMP_VEIL / (theta * theta) * exp(-theta / LAMP_VEIL_SPREAD);
+    }
+    return sum;
+}
+
 // at full size, added onto the picture: the four nearest half-size rays, each as far as
 // it was worked out to a distance like this pixel's (the light in front of a near pole
 // is not the light in front of the houses behind it)
@@ -290,6 +355,8 @@ fn fs_fog_composite(in: FogVsOut) -> @location(0) vec4<f32> {
     if (fp.size.z > 0.5) {
         glare = sun_glare(ray.xyz) * enh.exposure.x;
     }
+    // (a headlamp's: a warm white)
+    glare = glare + vec3<f32>(1.0, 0.96, 0.88) * lamp_glare(ray.xyz) * enh.exposure.x;
     return vec4<f32>(air_light + min(glare, vec3<f32>(4000.0)), 0.0);
 }
 

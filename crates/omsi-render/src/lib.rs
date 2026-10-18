@@ -126,6 +126,188 @@ impl Default for PhotoGrade {
     }
 }
 
+/// A camera's own picture over the window's (`Renderer::lens`, lens.wgsl): the cinematic
+/// camera's and the dashcam's lens, sensor and grade, laid over the finished picture in a
+/// last pass before the interface. Every graphics mode has it; the depth of field and the
+/// motion blur need the depth prepass (Enhanced) and are left out without it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LensFx {
+    /// Barrel distortion: 0 the rectilinear picture, 1 an equidistant fisheye over the
+    /// picture's diagonal (the corners keep what they show, the middle is magnified).
+    pub fisheye: f32,
+    /// Lateral chromatic aberration: red and blue apart by this share of the radius at the
+    /// corners.
+    pub chroma: f32,
+    /// Darker corners (0 none, 1 strong).
+    pub vignette: f32,
+    /// A small sensor's noise (0..1, stronger at night), a video codec's smear of flat areas
+    /// (0..1) and the camera's sharpening halo along the edges.
+    pub noise: f32,
+    pub smear: f32,
+    pub sharpen: f32,
+    /// Rolling shutter: the bottom row lies this share of the width further over than the
+    /// top one (the camera turning while the sensor is read), and the mount's wobble of it:
+    /// amplitude (share of the width), cycles over the height, phase (cycles).
+    pub skew: f32,
+    pub wobble: [f32; 3],
+    /// The letterbox: the picture's visible aspect (2.39 for scope) - 0 none.
+    pub aspect: f32,
+    /// Film grain (0..1).
+    pub grain: f32,
+    /// The star round bright lights (a six-bladed aperture's), an anamorphic lens's blue
+    /// streak through them, the sun's ghosts in the lens.
+    pub star: f32,
+    pub streak: f32,
+    pub flare: f32,
+    /// The grade: the look (lens.wgsl `grade`: 0 none, 1 teal and orange, 2 warm film, 3 cold,
+    /// 4 black and white, 5 dashcam, 6 bleach bypass) and how much of it, the exposure on top
+    /// (EV), saturation and contrast (1 = as is).
+    pub look: u32,
+    pub look_amount: f32,
+    pub ev: f32,
+    pub saturation: f32,
+    pub contrast: f32,
+    /// Depth of field: the distance in focus (m, 0 = none), the aperture (f-number, a
+    /// full-frame camera's) and a multiple of the blur that gives.
+    pub focus: f32,
+    pub aperture: f32,
+    pub dof: f32,
+    /// Motion blur: the shutter's time (s, 1/48 = a film camera's 180 degrees; 0 = none), the
+    /// frame's own time, and whether the picture cut to another camera this frame (nothing
+    /// to blur with).
+    pub shutter: f32,
+    pub frame_dt: f32,
+    pub cut: bool,
+    /// The box that moves with its pixels rather than with the world (the player's bus).
+    pub moving: Option<MovingBox>,
+    /// The noise's and the grain's pattern this frame.
+    pub seed: f32,
+    /// Draw the depth probe this frame (`Renderer::depth_probe`), where the picture has a
+    /// depth and the last one has been read.
+    pub probe: bool,
+    /// A dashcam's windscreen glare (the dashboard mirrored in the glass, 0..1), its small
+    /// sensor's softness (px) and how much of its highlights bleed to white (0..1).
+    pub glare: f32,
+    pub soften: f32,
+    pub bleed: f32,
+}
+
+impl Default for LensFx {
+    fn default() -> Self {
+        LensFx {
+            fisheye: 0.0,
+            chroma: 0.0,
+            vignette: 0.0,
+            noise: 0.0,
+            smear: 0.0,
+            sharpen: 0.0,
+            skew: 0.0,
+            wobble: [0.0; 3],
+            aspect: 0.0,
+            grain: 0.0,
+            star: 0.0,
+            streak: 0.0,
+            flare: 0.0,
+            look: 0,
+            look_amount: 1.0,
+            ev: 0.0,
+            saturation: 1.0,
+            contrast: 1.0,
+            focus: 0.0,
+            aperture: 2.8,
+            dof: 1.0,
+            shutter: 0.0,
+            frame_dt: 0.0,
+            cut: false,
+            moving: None,
+            seed: 0.0,
+            probe: false,
+            glare: 0.0,
+            soften: 0.0,
+            bleed: 0.0,
+        }
+    }
+}
+
+/// A box in the world that carries what is in it (`LensFx::moving`): where it is now and
+/// where it was the frame before (centre, rotation; half its size along its own axes).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MovingBox {
+    pub center: DVec3,
+    pub rotation: glam::Mat3,
+    pub half: Vec3,
+    pub prev_center: DVec3,
+    pub prev_rotation: glam::Mat3,
+}
+
+/// lens.wgsl `Lens`.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct LensUniform {
+    a: [f32; 4],
+    b: [f32; 4],
+    c: [f32; 4],
+    d: [f32; 4],
+    e: [f32; 4],
+    f: [f32; 4],
+    g: [f32; 4],
+    h: [f32; 4],
+    size: [f32; 4],
+    sun: [f32; 4],
+    inv_vp: [[f32; 4]; 4],
+    reproject: [[f32; 4]; 4],
+    reproject_box: [[f32; 4]; 4],
+    box_rows: [[f32; 4]; 4],
+    k: [f32; 4],
+}
+
+/// The lens pass's pipeline and what it binds where nothing else is (made with its first use).
+struct LensRes {
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    buf: wgpu::Buffer,
+    no_depth: wgpu::TextureView,
+    no_highlight: wgpu::TextureView,
+    probe: ProbeRes,
+}
+
+/// What the window's picture showed where (`Renderer::depth_probe`): the distance along the
+/// view (m) to the nearest surface at `width` x `height` points across it (row by row from
+/// the top left; the sky is the far plane), and the view-projection and render origin it
+/// was drawn with. Cut-out leaves are not in it (the depth prepass lets them through).
+#[derive(Clone, Debug)]
+pub struct DepthProbe {
+    pub width: u32,
+    pub height: u32,
+    pub metres: Vec<f32>,
+    pub view_proj: Mat4,
+    pub origin: DVec3,
+}
+
+/// The depth probe's size.
+const PROBE_W: u32 = 256;
+const PROBE_H: u32 = 144;
+
+/// The probe's pass and its way back: drawn and copied in a frame (`LensFx::probe`), mapped
+/// once that frame is submitted, read when the mapping is done - the frame never waits.
+struct ProbeRes {
+    pipeline: wgpu::RenderPipeline,
+    view: wgpu::TextureView,
+    texture: wgpu::Texture,
+    buffer: wgpu::Buffer,
+    /// 0 free, 1 drawn and copied (to be mapped after the submit), 2 mapping, 3 mapped.
+    state: Arc<std::sync::atomic::AtomicU8>,
+    view_proj: Mat4,
+    origin: DVec3,
+}
+
+/// The longest motion blur, as a share of the picture's height.
+const LENS_BLUR_MAX: f32 = 0.035;
+/// The largest circle of confusion, as a share of the picture's height.
+const LENS_COC_MAX: f32 = 0.011;
+/// The sensor the depth of field is worked out for: a full-frame camera's height (m).
+const LENS_SENSOR: f32 = 0.024;
+
 /// The enhanced lighting (enhanced_common.wgsl `Enhanced`).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -160,7 +342,14 @@ struct EnhancedUniform {
     /// (world to the bus's frame), 3 xyz its origin relative to the render origin, 4 the
     /// wipe map's rectangle on the glass (x min, z min, 1 / width, 1 / height; 0 width: none)
     wipe: [[f32; 4]; 5],
+    /// The saloon's lamps the panes of the bus one sits in mirror (`Lighting::saloon`): row 0
+    /// rgb their mean colour, w their strength in all (0: none); rows 1.. xyz each lamp's
+    /// place relative to the render origin, w its strength (0: no more).
+    saloon: [[f32; 4]; SALOON_LAMPS + 1],
 }
+
+/// How many of the saloon's lamps the panes mirror (the strongest).
+pub const SALOON_LAMPS: usize = 8;
 
 /// High-range colour targets of the enhanced path for one size: the multisampled one the
 /// scene is drawn into, the single-sampled one it resolves into, the glow's levels, the
@@ -305,7 +494,20 @@ struct AoTargets {
 struct FogLampUniform {
     inv_view_proj: [[f32; 4]; 4],
     size: [f32; 4],
+    /// The headlamps that shine into the eye (`lamp_glare`): where each is from the camera
+    /// (world, m) and its light at the eye (irradiance, 1 = 10 000 lux); w 0 = none.
+    glare: [[f32; 4]; GLARE_LAMPS],
 }
+
+/// How many headlamps' glare the fog lamps' pass draws round them (the brightest).
+const GLARE_LAMPS: usize = 4;
+
+/// What of a headlamp's light at the eye the adaptation takes as light to adapt to (the
+/// veil it lays over the retina is seen as brighter light: the eye closes down, and the road
+/// beyond the oncoming car goes darker until it has passed and the eye has opened again).
+/// (Taken before the picture knows what hides the lamp - fog_lamps.wgsl `lamp_seen` - a
+/// car behind the trees darkened the road too: half the eye's share.)
+const GLARE_ADAPT: f32 = 0.25;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -359,9 +561,9 @@ pub struct PointLight {
     pub core: f32,
     /// A headlamp (enhanced path), lit by a headlamp's profile instead of the cone
     /// (lamp_air.wgsl `headlamp`): 1 a low beam for traffic on the right, its cut-off rising
-    /// to the right, 2 one for traffic on the left, -1 a full beam, each a quarter more for a
-    /// halogen lamp (its softer cut-off); 0 any other light. A headlamp's `direction` is its
-    /// own horizon (the vehicle's pitch, no aim down).
+    /// to the right, 2 one for traffic on the left, -1 a full beam, 3 a front fog lamp, each a
+    /// quarter more for a halogen lamp (its softer cut-off); 0 any other light. A headlamp's
+    /// `direction` is its own horizon (the vehicle's pitch, no aim down).
     pub beam: f32,
     /// A lamp in a housing - a street lamp's head, a platform's light (`[maplight]`): the
     /// enhanced path sends its light down and out, a few per cent above its horizon.
@@ -371,6 +573,10 @@ pub struct PointLight {
     /// A headlamp's (enhanced path): the vehicles of `Scene::light_blockers` its light stops
     /// at, one bit each - those ahead of it, never its own.
     pub blockers: u32,
+    /// A headlamp of the vehicle the camera is at (enhanced path): with the others of that
+    /// vehicle it casts shadows from a shadow map of their own (`LampShadow::look`) - the
+    /// poles, the trees, the signs and the people in front of the bus.
+    pub shadow: bool,
 }
 
 impl Default for PointLight {
@@ -387,6 +593,7 @@ impl Default for PointLight {
             housed: false,
             mode: LightMode::Both,
             blockers: 0,
+            shadow: false,
         }
     }
 }
@@ -549,7 +756,20 @@ const FAR_MAP_ASPECT: f32 = 1.25;
 /// street lamp's light leaves it downwards, see `PointLight::housed`).
 const LAMP_SHADOW_FOV: f32 = 150.0;
 
-/// A street lamp that casts shadows this frame.
+/// The headlamps' shadow map (`PointLight::shadow`): it looks along the road from between
+/// the lamps, `HEADLAMP_SHADOW_WIDE` degrees either side and `HEADLAMP_SHADOW_TALL` up and
+/// down round an axis `HEADLAMP_SHADOW_DOWN` under the horizon - the low beam's spread
+/// and the road from a few metres before the bumper - from `HEADLAMP_SHADOW_NEAR` m ahead
+/// of the lamps (the bus's own nose casts nothing) out to its beams' reach, at most
+/// `HEADLAMP_SHADOW_REACH` m. A quarter of the shadow size over a hundred degrees: a
+/// texel some 7 cm across at 30 m.
+const HEADLAMP_SHADOW_WIDE: f32 = 50.0;
+const HEADLAMP_SHADOW_TALL: f32 = 25.0;
+const HEADLAMP_SHADOW_DOWN: f32 = 10.0;
+const HEADLAMP_SHADOW_NEAR: f32 = 1.2;
+const HEADLAMP_SHADOW_REACH: f32 = 120.0;
+
+/// A street lamp - or a vehicle's headlamps - casting shadows this frame.
 #[derive(Debug, Clone, Copy)]
 struct LampShadow {
     /// Its index in the light buffer, where it is (render-origin relative) and its reach.
@@ -558,6 +778,10 @@ struct LampShadow {
     range: f32,
     /// How much of its shadow shows: 0..1 while it fades in or out (`LampSlot`).
     fade: f32,
+    /// The headlamps' map (`HEADLAMP_SHADOW_WIDE`): the way they look (horizontal, unit)
+    /// and how many lights from `index` on share it; a street lamp's looks straight down.
+    look: Option<Vec3>,
+    count: u32,
 }
 
 /// A street lamp holding one of the `LAMP_SHADOWS` shadow maps from frame to frame: where it
@@ -581,7 +805,7 @@ const LAMP_SWAP: f32 = 1.3;
 /// lamp that beats it by `LAMP_SWAP`; a holder no longer among the candidates (far behind)
 /// lets go at once. Maps filled from nothing - the first frame, after a jump - show at once.
 /// Each map's candidate (an index into `chosen`) and how far its shadow has faded in.
-fn hold_lamp_slots(slots: &mut [Option<LampSlot>; LAMP_SHADOWS], chosen: &[(f32, DVec3)], dt: f32) -> Vec<(usize, f32)> {
+fn hold_lamp_slots(slots: &mut [Option<LampSlot>], chosen: &[(f32, DVec3)], dt: f32) -> Vec<(usize, f32)> {
     let find = |at: DVec3| chosen.iter().position(|c| (c.1 - at).length_squared() < 0.01);
     for s in slots.iter_mut() {
         if s.is_some_and(|x| find(x.at).is_none()) {
@@ -625,11 +849,41 @@ fn hold_lamp_slots(slots: &mut [Option<LampSlot>; LAMP_SHADOWS], chosen: &[(f32,
 }
 
 impl LampShadow {
-    /// The shadow map's view and projection: straight down, depth 0..1 over its reach.
+    /// The shadow map's view and projection: straight down, depth 0..1 over its reach (the
+    /// headlamps': along the road, see `HEADLAMP_SHADOW_WIDE`).
     fn view_proj(&self) -> Mat4 {
+        if let Some(f) = self.look {
+            let (tall, down) = (HEADLAMP_SHADOW_TALL.to_radians(), HEADLAMP_SHADOW_DOWN.to_radians());
+            let aspect = HEADLAMP_SHADOW_WIDE.to_radians().tan() / tall.tan();
+            let proj = Mat4::perspective_rh(2.0 * tall, aspect, HEADLAMP_SHADOW_NEAR, self.range.max(HEADLAMP_SHADOW_NEAR + 1.0));
+            let axis = Vec3::new(f.x * down.cos(), f.y * down.cos(), -down.sin());
+            return proj * Mat4::look_to_rh(self.position, axis, Vec3::Z);
+        }
         let proj = Mat4::perspective_rh(LAMP_SHADOW_FOV.to_radians(), 1.0, 0.1, self.range.max(1.0));
         let view = Mat4::look_to_rh(self.position, -Vec3::Z, Vec3::Y);
         proj * view
+    }
+
+    /// Whether something at `c` of radius `r` (render-origin relative) may cast a shadow in
+    /// this map: within the lamp's reach under its head, or in the headlamps' view.
+    fn reaches(&self, c: Vec3, r: f32) -> bool {
+        let v = c - self.position;
+        match self.look {
+            None => c.z - r < self.position.z && v.length() < self.range + r,
+            Some(f) => {
+                let ahead = v.x * f.x + v.y * f.y;
+                let side = (v.x * f.y - v.y * f.x).abs();
+                ahead + r > HEADLAMP_SHADOW_NEAR
+                    && v.length() < self.range + r
+                    && side - 1.6 * r < ahead.max(0.0) * HEADLAMP_SHADOW_WIDE.to_radians().tan()
+            }
+        }
+    }
+
+    /// The light buffer's lights it shadows as the shaders read them (`Camera::lamp_shadow`):
+    /// the first's index and, over 65536, how many share the map (none = one).
+    fn lights_code(&self) -> f32 {
+        (self.index + if self.look.is_some() { self.count << 16 } else { 0 }) as f32
     }
 }
 const LIGHT_GRID_SIDE: usize = 64;
@@ -829,6 +1083,10 @@ pub struct Lighting {
     pub inside: Option<(DVec3, f64, [f32; 6])>,
     /// The player's bus's wipers: the frame the wipe map (`MaterialExtra::wiped`) lies in.
     pub wipe: Option<WipeFrame>,
+    /// The lamps of the saloon the camera sits in that are on (where, their colour 0..1,
+    /// their strength): at night its panes mirror them and the lit saloon, the windscreen in
+    /// front of the driver as well - why drivers switch the front saloon lights off.
+    pub saloon: Vec<(DVec3, [f32; 3], f32)>,
     /// Actual road height beneath the player's vehicle; independent of suspension motion.
     /// The local puddle capture is skipped when no road height is known.
     pub puddle_ground: Option<f64>,
@@ -873,6 +1131,13 @@ pub struct Lighting {
     /// the enhanced picture's exposure by night is taken that much up or down, less and less
     /// through the dusk and not at all by day (`night_exposure_weight`).
     pub night_brightness: f32,
+    /// The weather's own exposure (stops; a preset's `[openomsi_sky]`): a storm's day shown
+    /// that much darker than the eye's adaptation alone makes it; by day only, less and less
+    /// into the night (`night_exposure_weight`).
+    pub weather_ev: f32,
+    /// The instrument dimmer (1 = the automatic level; the settings' 0.2 .. 1.5): the cab's
+    /// lamps and screens at night that much brighter or darker (`cab_dimmer`).
+    pub cab_dimmer: f32,
     /// The player's vehicle's velocity (m/s, world): at speed the airstream drives the drops
     /// on its glass up the windscreen and back along the side windows.
     pub glass_wind: Vec3,
@@ -888,8 +1153,8 @@ pub struct Lighting {
     /// The optical depth of a high ice-cloud veil (0 none .. 2 a thick milky one).
     pub veil: f32,
     /// The air as a weather model knows it: aerosol amount relative to a clear day, its
-    /// Ångström exponent and its layer's depth (m); without it the day's own air is drawn
-    /// from the calendar (`day_air`).
+    /// Ångström exponent and its layer's depth (m; 0 = the day's own); without it the day's
+    /// own air is drawn from the calendar (`day_air`).
     pub air: Option<[f32; 3]>,
 }
 
@@ -945,6 +1210,7 @@ impl Default for Lighting {
             classic: false,
             inside: None,
             wipe: None,
+            saloon: Vec::new(),
             puddle_ground: None,
             puddle_normal: Vec3::Z,
             puddle_parts: Vec::new(),
@@ -956,6 +1222,8 @@ impl Default for Lighting {
             led_glow: 1.5,
             led_mips: 1.3,
             night_brightness: 1.0,
+            weather_ev: 0.0,
+            cab_dimmer: 1.0,
             glass_wind: Vec3::ZERO,
             moon_dir: Vec3::new(0.0, -0.5, -0.866),
             moon_illum: 0.0,
@@ -2261,6 +2529,9 @@ pub struct Renderer {
     /// The lamps' and headlights' light on what the camera looks at (`view_lamp_light`),
     /// which the eye adapts to by night.
     view_lamps: Option<f32>,
+    /// The headlamps shining into the window's eye (`lamp_glare`) and their light there in
+    /// all (irradiance), for the glare drawn round them and the adaptation.
+    lamp_glare: ([[f32; 4]; GLARE_LAMPS], f32),
     /// A sky being computed on a helper thread, for this input.
     sky_job: Option<(
         atmosphere::SkyInput,
@@ -2268,6 +2539,11 @@ pub struct Renderer {
     )>,
     /// The pre-exposure (natural log) as it follows the sky's.
     exposure: Option<f32>,
+    /// What the night brightness setting adds to it (natural log, see `prepare_enhanced`).
+    night_offset: f32,
+    /// The weather's own exposure by day (EV, `Lighting::weather_ev`), taken after the
+    /// metering: before it, the meter lifted a storm's dark day back to a grey one.
+    weather_ev: f32,
     /// The projection's width over height while a picture is drawn into a texture (see
     /// `render_to_texture`), whatever the texture's own shape.
     texture_aspect: Option<f32>,
@@ -2282,6 +2558,12 @@ pub struct Renderer {
     /// (the camera moved across the lens, the plane in focus kept where it is). Mirrors are
     /// not moved.
     pub view_shift: Option<[f32; 2]>,
+    /// The cinematic camera's or the dashcam's lens over the window's picture (None: the
+    /// picture as it is), its pipeline, and the window picture's view-projection and render
+    /// origin the frame before (its motion blur).
+    pub lens: Option<LensFx>,
+    lens_res: Option<LensRes>,
+    prev_view: Option<(Mat4, DVec3)>,
     /// Overlay pipeline without multisampling, for drawing the HUD after the post pass.
     overlay_pipeline_1x: wgpu::RenderPipeline,
     xr_ui_pipeline: wgpu::RenderPipeline,
@@ -4875,13 +5157,19 @@ impl Renderer {
             sky_state: None,
             city_glow: None,
             view_lamps: None,
+            lamp_glare: ([[0.0; 4]; GLARE_LAMPS], 0.0),
             sky_job: None,
             exposure: None,
+            night_offset: 0.0,
+            weather_ev: 0.0,
             texture_aspect: None,
             last_frame: None,
             instant_exposure: false,
             photo: None,
             view_shift: None,
+            lens: None,
+            lens_res: None,
+            prev_view: None,
             overlay_pipeline_1x,
             xr_ui_pipeline,
             started: std::time::Instant::now(),
@@ -5037,6 +5325,215 @@ impl Renderer {
         self.scale_targets
             .insert((w, h), (view.clone(), bg.clone()));
         (view, bg)
+    }
+
+    /// The lens pass's pipeline (lens.wgsl), made the first time a lens is asked for.
+    fn ensure_lens(&mut self) {
+        if self.lens_res.is_some() {
+            return;
+        }
+        let device = &self.device;
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("lens"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("lens.wgsl").into()),
+        });
+        let texture = |binding: u32, sample_type: wgpu::TextureSampleType| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture { sample_type, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+            count: None,
+        };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("lens"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                texture(1, wgpu::TextureSampleType::Float { filterable: true }),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                texture(3, wgpu::TextureSampleType::Depth),
+                texture(4, wgpu::TextureSampleType::Float { filterable: true }),
+            ],
+        });
+        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("lens"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("lens"),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), buffers: &[], compilation_options: Default::default() },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_lens"),
+                targets: &[Some(wgpu::ColorTargetState { format: self.format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: Default::default(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lens params"),
+            size: std::mem::size_of::<LensUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // (a texel of each where the picture has no depth or no high-range glow: cleared to
+        // 0, the depth reads as sky and the glow as nothing)
+        let one = |label: &str, format: wgpu::TextureFormat| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default())
+        };
+        let no_depth = one("lens: no depth", DEPTH_FORMAT);
+        let no_highlight = one("lens: no glow", wgpu::TextureFormat::Rgba16Float);
+        let probe_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("depth probe"),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), buffers: &[], compilation_options: Default::default() },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_probe"),
+                targets: &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::R32Float, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: Default::default(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth probe"),
+            size: wgpu::Extent3d { width: PROBE_W, height: PROBE_H, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let probe = ProbeRes {
+            pipeline: probe_pipeline,
+            view: texture.create_view(&Default::default()),
+            texture,
+            buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("depth probe readback"),
+                size: (PROBE_W * 4 * PROBE_H) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }),
+            state: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            view_proj: Mat4::IDENTITY,
+            origin: DVec3::ZERO,
+        };
+        self.lens_res = Some(LensRes { pipeline, layout, buf, no_depth, no_highlight, probe });
+    }
+
+    /// The last depth probe drawn (`LensFx::probe`), once it is back from the card; it is
+    /// handed over once.
+    pub fn depth_probe(&mut self) -> Option<DepthProbe> {
+        let p = &mut self.lens_res.as_mut()?.probe;
+        if p.state.load(std::sync::atomic::Ordering::Acquire) != 3 {
+            return None;
+        }
+        let metres: Vec<f32> = {
+            let data = p.buffer.slice(..).get_mapped_range();
+            bytemuck::cast_slice::<u8, f32>(&data).to_vec()
+        };
+        p.buffer.unmap();
+        p.state.store(0, std::sync::atomic::Ordering::Release);
+        Some(DepthProbe { width: PROBE_W, height: PROBE_H, metres, view_proj: p.view_proj, origin: p.origin })
+    }
+
+    /// The lens pass's uniform for this frame: `vp` and `ro` the picture's view-projection and
+    /// render origin, `src` the picture's size and `out` the window's, `sun_ndc` where the sun
+    /// is on the picture (z 1: in front), `depth` and `highlight` whether those are bound.
+    #[allow(clippy::too_many_arguments)]
+    fn lens_uniform(
+        &self,
+        fx: &LensFx,
+        vp: Mat4,
+        ro: DVec3,
+        camera: &Camera,
+        aspect: f32,
+        sun_ndc: Vec3,
+        lighting: &Lighting,
+        src: (u32, u32),
+        out: (u32, u32),
+        depth: bool,
+        highlight: bool,
+    ) -> LensUniform {
+        let (sw, sh) = (src.0.max(1) as f32, src.1.max(1) as f32);
+        let (ow, oh) = (out.0.max(1) as f32, out.1.max(1) as f32);
+        let half_v = (camera.fov_deg.clamp(1.0, 170.0) * 0.5).to_radians().tan();
+        let tan_diag = half_v * (1.0 + aspect * aspect).sqrt();
+        // the letterbox: the share of the height a wider picture keeps
+        let keep = if fx.aspect > 0.0 { ((ow / oh) / fx.aspect).min(1.0) } else { 1.0 };
+        // depth of field: a full-frame lens of this field of view at this f-number, the
+        // circle of confusion in pixels per (1/focus - 1/distance)
+        let dof_on = depth && fx.focus > 0.0 && fx.dof > 0.0;
+        let coc_scale = LENS_SENSOR * sh / (4.0 * fx.aperture.max(0.7) * half_v * half_v) * fx.dof;
+        // motion blur: the shutter's share of the frame's motion
+        let blur = if depth && fx.shutter > 0.0 && !fx.cut && fx.frame_dt > 1e-4 { (fx.shutter / fx.frame_dt).min(3.0) } else { 0.0 };
+        let inv_vp = vp.inverse();
+        let (prev_vp, prev_ro) = self.prev_view.unwrap_or((vp, ro));
+        let shift = (ro - prev_ro).as_vec3();
+        let reproject = prev_vp * Mat4::from_translation(shift) * inv_vp;
+        let (reproject_box, box_rows) = match fx.moving {
+            Some(b) => {
+                // a point of the box: from where the box is now back to where it was
+                let turn = b.prev_rotation * b.rotation.transpose();
+                let t = (turn.as_dmat3() * (ro - b.center) + (b.prev_center - prev_ro)).as_vec3();
+                let carried = Mat4::from_translation(t) * Mat4::from_mat3(turn);
+                let c = (b.center - ro).as_vec3();
+                let row = |i: usize| {
+                    let axis = b.rotation.col(i) / b.half[i].max(0.05);
+                    [axis.x, axis.y, axis.z, -axis.dot(c)]
+                };
+                (prev_vp * carried * inv_vp, [row(0), row(1), row(2), [0.0, 0.0, 0.0, 1.0]])
+            }
+            None => (reproject, [[0.0; 4]; 4]),
+        };
+        let sun_in = sun_ndc.z > 0.5 && lighting.sun_dir.z > 0.0;
+        LensUniform {
+            a: [fx.fisheye.clamp(0.0, 1.0), tan_diag, fx.chroma.max(0.0), fx.vignette.max(0.0)],
+            b: [fx.noise.max(0.0), fx.smear.clamp(0.0, 1.0), fx.sharpen.max(0.0), fx.seed],
+            c: [fx.skew, fx.wobble[0], fx.wobble[1], fx.wobble[2]],
+            d: [keep, fx.grain.max(0.0), fx.star.max(0.0), fx.streak.max(0.0)],
+            e: [fx.look as f32, fx.look_amount.clamp(0.0, 1.0), 2f32.powf(fx.ev), fx.saturation.max(0.0)],
+            f: [fx.contrast.max(0.0), fx.flare.max(0.0), if highlight { 1.0 } else { 0.0 }, lighting.night.clamp(0.0, 1.0)],
+            g: [fx.focus.max(0.1), coc_scale, LENS_COC_MAX * sh, if dof_on { 1.0 } else { 0.0 }],
+            h: [blur, LENS_BLUR_MAX * sh, camera.near, camera.far],
+            size: [ow, oh, sw, sh],
+            sun: [sun_ndc.x * 0.5 + 0.5, 0.5 - sun_ndc.y * 0.5, if sun_in { 1.0 } else { 0.0 }, if depth { 1.0 } else { 0.0 }],
+            inv_vp: inv_vp.to_cols_array_2d(),
+            reproject: reproject.to_cols_array_2d(),
+            reproject_box: reproject_box.to_cols_array_2d(),
+            box_rows,
+            k: [fx.glare.max(0.0) * (1.0 - lighting.night.clamp(0.0, 1.0)), fx.soften.max(0.0) * sh / 1080.0, fx.bleed.clamp(0.0, 1.0) * (1.0 - lighting.night.clamp(0.0, 1.0)), 0.0],
+        }
     }
 
     fn picture_group(&self, view: &wgpu::TextureView) -> wgpu::BindGroup {
@@ -7450,7 +7947,7 @@ impl Renderer {
         // instead of a lit city's average: on a dark country road under a full moon it
         // takes to the moonlight, and the moon's shadows show)
         let e_rest = match self.view_lamps {
-            Some(v) => (st.e_rest - st.e_artificial + v).max(1e-6),
+            Some(v) => (st.e_rest - st.e_artificial + v + self.lamp_glare.1 * GLARE_ADAPT).max(1e-6),
             None => st.e_rest,
         };
         let full = atmosphere::exposure_for(st.e_sun + e_rest).max(1e-6).ln();
@@ -7459,7 +7956,10 @@ impl Renderer {
         // the player's night brightness (`Lighting::night_brightness`), by the natural light:
         // the street lamps and the headlights the eye adapts to do not take it away
         let natural = st.e_sun + (st.e_rest - st.e_artificial).max(0.0);
-        target += lighting.night_brightness.clamp(0.05, 4.0).ln() * night_exposure_weight(natural);
+        let night_weight = night_exposure_weight(natural);
+        self.night_offset = lighting.night_brightness.clamp(0.05, 4.0).ln() * night_weight;
+        target += self.night_offset;
+        self.weather_ev = lighting.weather_ev.clamp(-3.0, 1.0) * (1.0 - night_weight);
         let log_exposure = match self.exposure {
             // (the eye takes to brighter light within a second, to the dark over several:
             // the cones' light adaptation is fast, their dark adaptation slow)
@@ -7563,8 +8063,14 @@ impl Renderer {
             eye: eye_off.extend(0.0).to_array(),
             // x how bright an LED panel's dots burn (see `MaterialExtra::led`; the settings'
             // 16 levels give 0 = off .. 3.75), y whether the LED panels' `\S:n` masks keep
-            // their mip chain (0: at full resolution, the dots stay visible when small)
-            led: [lighting.led_glow, lighting.led_mips, 0.0, 0.0],
+            // their mip chain (0: at full resolution, the dots stay visible when small), z
+            // and w the cab's own lights at night (`cab_dimmer`)
+            led: {
+                let (lamps, screens) = cab_dimmer(night_weight, lighting.night_brightness, self.exposure_log.as_ref().map(|l| l.ev).unwrap_or(0.0));
+                // (the driver's own dimmer on top, as far as it is night)
+                let dimmer = (lighting.cab_dimmer.clamp(0.05, 4.0).ln() * night_weight.clamp(0.0, 1.0)).exp();
+                [lighting.led_glow, lighting.led_mips, lamps * dimmer, screens * dimmer]
+            },
             moon: lighting.moon_dir.normalize_or_zero().extend(MOON_RADIUS).to_array(),
             // (w of the first: the veil's optical depth, which the sky draws as the high
             // layer; of the second: how far the veil spreads the sun, which softens shadows)
@@ -7590,6 +8096,21 @@ impl Renderer {
                 ]
             }),
             moon_disc: st.moon_disc.extend((1.0 - 0.18 * (st.input.haze - 1.0).max(0.0)).clamp(0.2, 1.0) * 0.55).to_array(),
+            saloon: {
+                let mut rows = [[0.0; 4]; SALOON_LAMPS + 1];
+                let total: f32 = lighting.saloon.iter().map(|l| l.2.max(0.0)).sum();
+                if total > 0.0 {
+                    let mut c = Vec3::ZERO;
+                    for l in &lighting.saloon {
+                        c += Vec3::from(l.1) * l.2.max(0.0) / total;
+                    }
+                    rows[0] = c.extend(total).to_array();
+                    for (row, l) in rows[1..].iter_mut().zip(lighting.saloon.iter().filter(|l| l.2 > 0.0)) {
+                        *row = (l.0 - ro).as_vec3().extend(l.2).to_array();
+                    }
+                }
+                rows
+            },
         };
         self.queue
             .write_buffer(&self.enh_buf, 0, bytemuck::bytes_of(&u));
@@ -7993,7 +8514,11 @@ impl Renderer {
             gpu_lights.push(gpu_light(l, (l.position - ro).as_vec3()));
         }
         let mut grid = vec![u32::MAX; side * side * LIGHT_CELL_CAP];
-        for l in &scene.lights {
+        // (the headlamps that share a shadow map first, one after another in the buffer: the
+        // map names them by the first's index and their number)
+        let headlamps_on = lamp_shadows && enhanced;
+        let mut headlamps: Vec<(u32, Vec3, Vec3, f32)> = Vec::new();
+        for l in scene.lights.iter().filter(|l| l.shadow).chain(scene.lights.iter().filter(|l| !l.shadow)) {
             if !drawn_by(l, enhanced) {
                 continue;
             }
@@ -8017,11 +8542,14 @@ impl Renderer {
                 g.color[3] *= street_lamp_gain();
             }
             gpu_lights.push(g);
+            if headlamps_on && l.shadow && l.beam != 0.0 && l.intensity > 0.0 {
+                headlamps.push((idx, p, l.direction, l.radius));
+            }
             if lamp_shadows && enhanced && l.housed && l.intensity > 0.0 {
                 let d = (p - cam_rel).length();
                 if d < reach + LAMP_SHADOW_REACH {
                     let score = l.intensity * (l.color[0] + l.color[1] + l.color[2]) * l.core * l.core / (d * d + 25.0);
-                    chosen.push((score, LampShadow { index: idx, position: p, range: reach, fade: 1.0 }));
+                    chosen.push((score, LampShadow { index: idx, position: p, range: reach, fade: 1.0, look: None, count: 1 }));
                 }
             }
             for y in (y0.max(0.0) as usize)..=(y1.min(side as f32 - 1.0) as usize) {
@@ -8082,18 +8610,34 @@ impl Renderer {
         if rebuilt {
             self.rebuild_camera_bind_group(scene);
         }
-        let lamps = if lamp_shadows && enhanced { self.hold_lamp_shadows(chosen, ro, dt) } else { Vec::new() };
+        // the headlamps' map: from between them, the way they look, as far as they reach
+        let headlamp_map = headlamps.first().map(|&(first, ..)| {
+            let n = headlamps.len() as f32;
+            let position = headlamps.iter().map(|h| h.1).sum::<Vec3>() / n;
+            let look = headlamps.iter().map(|h| h.2.truncate()).sum::<glam::Vec2>().normalize_or(glam::Vec2::Y).extend(0.0);
+            let range = headlamps.iter().map(|h| h.3).fold(0.0f32, f32::max).min(HEADLAMP_SHADOW_REACH);
+            LampShadow { index: first, position, range, fade: 1.0, look: Some(look), count: headlamps.len() as u32 }
+        });
+        let lamps = if lamp_shadows && enhanced { self.hold_lamp_shadows(chosen, ro, dt, headlamp_map) } else { Vec::new() };
         ([origin[0], origin[1], LIGHT_CELL, side as f32], lamps)
     }
 
-    /// The street lamps whose shadow maps are drawn this frame, from the candidates and
-    /// their scores (`hold_lamp_slots`).
-    fn hold_lamp_shadows(&self, mut chosen: Vec<(f32, LampShadow)>, ro: DVec3, dt: f32) -> Vec<LampShadow> {
+    /// The lamps whose shadow maps are drawn this frame: the headlamps' (`headlamps`) in
+    /// the first tile, and the street lamps from the candidates and their scores
+    /// (`hold_lamp_slots`) in the others.
+    fn hold_lamp_shadows(&self, mut chosen: Vec<(f32, LampShadow)>, ro: DVec3, dt: f32, headlamps: Option<LampShadow>) -> Vec<LampShadow> {
         chosen.sort_by(|a, b| b.0.total_cmp(&a.0));
         let at: Vec<(f32, DVec3)> = chosen.iter().map(|(s, l)| (*s, ro + l.position.as_dvec3())).collect();
-        hold_lamp_slots(&mut self.lamp_slots.borrow_mut(), &at, dt)
+        let mut slots = self.lamp_slots.borrow_mut();
+        let street = if headlamps.is_some() {
+            slots[LAMP_SHADOWS - 1] = None;
+            LAMP_SHADOWS - 1
+        } else {
+            LAMP_SHADOWS
+        };
+        headlamps
             .into_iter()
-            .map(|(c, fade)| LampShadow { fade, ..chosen[c].1 })
+            .chain(hold_lamp_slots(&mut slots[..street], &at, dt).into_iter().map(|(c, fade)| LampShadow { fade, ..chosen[c].1 }))
             .collect()
     }
 
@@ -8912,7 +9456,14 @@ impl Renderer {
             && scene.glass_slot.is_some()
             && (lighting.rain > 0.001 || lighting.wetness > 0.02)
             && omsi_cfg::env::var_os("OMSI_NO_GLASS_PICTURE").is_none();
-        let scaled = (width, height) != (full_w, full_h) || vanilla_fxaa || (glass_on && !enhanced_view);
+        // the cinematic camera's or the dashcam's lens (`LensFx`): the window's own picture
+        // only, drawn into a texture of its own and laid onto the window by the lens pass
+        let main_view = with_overlays && projection.is_none() && !second_eye && self.triple_targets.is_none();
+        let lens = self.lens.filter(|_| main_view);
+        if lens.is_some() {
+            self.ensure_lens();
+        }
+        let scaled = (width, height) != (full_w, full_h) || vanilla_fxaa || (glass_on && !enhanced_view) || lens.is_some();
         let scene_target: Option<(wgpu::TextureView, wgpu::BindGroup)> = if scaled {
             Some(self.scale_target(width, height))
         } else {
@@ -9224,7 +9775,7 @@ impl Renderer {
             light_view_proj_close: light_view_proj_close.to_cols_array_2d(),
             wind: [lighting.glass_wind.x, lighting.glass_wind.y, lighting.glass_wind.z, 1.0],
             lamp_view_proj: std::array::from_fn(|k| lamp_shadows.get(k).map_or(Mat4::IDENTITY, |l| l.view_proj()).to_cols_array_2d()),
-            lamp_shadow: std::array::from_fn(|k| lamp_shadows.get(k).map_or(-1.0, |l| l.index as f32)),
+            lamp_shadow: std::array::from_fn(|k| lamp_shadows.get(k).map_or(-1.0, |l| l.lights_code())),
             blockers: blocker_rows(&scene.light_blockers, ro),
             lamp_fade: std::array::from_fn(|k| lamp_shadows.get(k).map_or(0.0, |l| l.fade)),
         };
@@ -9239,8 +9790,9 @@ impl Renderer {
         // unless it comes before the window's first frame)
         if enhanced && lead_view {
             self.view_lamps = Some(view_lamp_light(scene, cam_rel, camera.forward()));
+            self.lamp_glare = lamp_glare(scene, cam_rel, camera.forward());
             if omsi_cfg::env::var_os("OMSI_DEBUG_VIEW_LAMPS").is_some() {
-                log::info!("view lamps: {:.6}", self.view_lamps.unwrap_or(0.0));
+                log::info!("view lamps: {:.6}, headlamp glare at the eye {:.6}", self.view_lamps.unwrap_or(0.0), self.lamp_glare.1);
             }
         }
         // the night sky's glow from the lamps round the camera (the window's view leads), in
@@ -9270,8 +9822,10 @@ impl Renderer {
         let mut items: Vec<DrawItem> = Vec::new();
         // near, far, close
         // (3: the street lamps' maps, every caster within a chosen lamp's reach under its head)
-        let mut shadow_batches: [Vec<Batch>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-        let lamp_reach = |c: Vec3, r: f32| lamp_shadows.iter().any(|l| c.z - r < l.position.z && (c - l.position).length() < l.range + r);
+        // (4: the headlamps' map, every caster in their view)
+        let mut shadow_batches: [Vec<Batch>; 5] = Default::default();
+        let lamp_reach = |c: Vec3, r: f32| lamp_shadows.iter().any(|l| l.look.is_none() && l.reaches(c, r));
+        let headlamp_reach = |c: Vec3, r: f32| lamp_shadows.iter().any(|l| l.look.is_some() && l.reaches(c, r));
         let kind_of = |alpha: AlphaMode| -> u8 {
             match alpha {
                 AlphaMode::Opaque => PIPE_OPAQUE,
@@ -9294,8 +9848,8 @@ impl Renderer {
             .ok()
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(3.0);
-        let casters = |span: std::ops::Range<usize>| -> [Vec<DrawItem>; 4] {
-            let mut out: [Vec<DrawItem>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        let casters = |span: std::ops::Range<usize>| -> [Vec<DrawItem>; 5] {
+            let mut out: [Vec<DrawItem>; 5] = Default::default();
             let mut ranges: Vec<(u8, u32, u32, usize, u32)> = Vec::new();
             for inst in &scene.instances[span] {
                 if !inst.visible || !inst.casts_shadow || (self.options.omsi_shadow_casters && !inst.omsi_caster) {
@@ -9338,11 +9892,16 @@ impl Renderer {
                     }
                     ranges.push((kind, ri as u32, *slot, mat_id, mat.look));
                 }
-                if !lamp_shadows.is_empty() && !(m.bounds_radius > 0.0 && m.bounds_radius < 0.1) && lamp_reach(c, r) {
-                    for &(kind, ri, slot, mat_id, look) in &ranges {
-                        let kind = if kind == PIPE_KINDS { PIPE_OPAQUE } else { kind };
-                        let (material, look) = depth_only_material(kind, mat_id, look);
-                        out[3].push(DrawItem { pipe: kind, mesh: inst.mesh as u32, range: ri, material, look, entry: inst.base + slot });
+                if !lamp_shadows.is_empty() && !(m.bounds_radius > 0.0 && m.bounds_radius < 0.1) {
+                    for (map, reach) in [(3, lamp_reach(c, r)), (4, headlamp_reach(c, r))] {
+                        if !reach {
+                            continue;
+                        }
+                        for &(kind, ri, slot, mat_id, look) in &ranges {
+                            let kind = if kind == PIPE_KINDS { PIPE_OPAQUE } else { kind };
+                            let (material, look) = depth_only_material(kind, mat_id, look);
+                            out[map].push(DrawItem { pipe: kind, mesh: inst.mesh as u32, range: ri, material, look, entry: inst.base + slot });
+                        }
                     }
                 }
                 for (cascade, &(range, lvp, min_radius)) in boxes.iter().enumerate() {
@@ -9399,16 +9958,16 @@ impl Renderer {
             let lit = |b: usize| {
                 blocks.as_ref().is_none_or(|bl| {
                     let (c, r) = bl[b];
-                    lamp_reach(c, r) || boxes.iter().enumerate().any(|(k, &(range, lvp, _))| {
+                    lamp_reach(c, r) || headlamp_reach(c, r) || boxes.iter().enumerate().any(|(k, &(range, lvp, _))| {
                         let lc = lvp.project_point3(c);
                         let rr = r / range;
                         active[k] && lc.x.abs() <= 1.0 + rr && lc.y.abs() <= 1.0 + rr
                     })
                 })
             };
-            let mut found: [Vec<DrawItem>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+            let mut found: [Vec<DrawItem>; 5] = Default::default();
             for part in run_parts(self.encoding_pool.as_ref(), parts, |p| {
-                let mut out: [Vec<DrawItem>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+                let mut out: [Vec<DrawItem>; 5] = Default::default();
                 let end = ((p + 1) * chunk).min(n);
                 let mut b = p * chunk;
                 while b < end {
@@ -9426,7 +9985,7 @@ impl Renderer {
                     a.extend(b);
                 }
             }
-            for cascade in 0..4 {
+            for cascade in 0..5 {
                 if cascade < 3 && !active[cascade] {
                     continue;
                 }
@@ -10356,7 +10915,8 @@ impl Renderer {
                 pass.set_pipeline(&self.shadow_clear_pipeline);
                 pass.draw(0..3, 0..1);
                 pass.set_bind_group(0, scene.shadow_bind_group.as_ref().unwrap(), &[]);
-                encode_batches(&mut pass, scene, &shadow_batches[3], |pipe| {
+                let casters = if lamp_shadows[k].look.is_some() { &shadow_batches[4] } else { &shadow_batches[3] };
+                encode_batches(&mut pass, scene, casters, |pipe| {
                     &self.shadow_pipelines[6 + 2 * k + pipe as usize]
                 });
             }
@@ -10877,7 +11437,10 @@ impl Renderer {
         // go without)
         let fog_lamps = enhanced_weather_fog(lighting) >= 2e-4 && !scene.lights.is_empty();
         let shafts = lighting.shadows && lighting.sun_dir.z > 0.0;
-        let glare = lighting.sun_dir.z > -0.01 && lighting.sun_intensity > 0.0 && omsi_cfg::env::var_os("OMSI_NO_GLARE").is_none();
+        let no_glare = omsi_cfg::env::var_os("OMSI_NO_GLARE").is_some();
+        let sun_glare = lighting.sun_dir.z > -0.01 && lighting.sun_intensity > 0.0 && !no_glare;
+        let lamp_glare = self.lamp_glare.1 > GLARE_FLOOR && !no_glare;
+        let glare = sun_glare || lamp_glare;
         if omsi_cfg::env::var_os("OMSI_DEBUG_FOG_LAMPS").is_some() {
             log::info!("fog lamps: enhanced {enhanced} prepass {prepass_on} overlays {with_overlays} masked {masked_frame} fog {:.5} lights {} shafts {shafts} glare {glare}", enhanced_weather_fog(lighting), scene.lights.len());
         }
@@ -10893,7 +11456,11 @@ impl Renderer {
                     let fog_all = enhanced_weather_fog(lighting);
                     let rain_part = if lighting.rain > 0.0 && lighting.snowfall <= 0.0 { 2.3 / (2500.0 - 1800.0 * lighting.rain.clamp(0.0, 1.0)) } else { 0.0 };
                     let droplets = if fog_all > 0.0 { ((fog_all - rain_part) / fog_all).clamp(0.0, 1.0) } else { 0.0 };
-                    let u = FogLampUniform { inv_view_proj: vp_mat.inverse().to_cols_array_2d(), size: [width as f32, height as f32, if glare { 1.0 } else { 0.0 }, droplets] };
+                    let u = FogLampUniform {
+                        inv_view_proj: vp_mat.inverse().to_cols_array_2d(),
+                        size: [width as f32, height as f32, if sun_glare { 1.0 } else { 0.0 }, droplets],
+                        glare: if lamp_glare { self.lamp_glare.0 } else { [[0.0; 4]; GLARE_LAMPS] },
+                    };
                     self.queue.write_buffer(&self.fog_lamps_buf, 0, bytemuck::bytes_of(&u));
                     let h = &self.hdr_targets[&(width, height)];
                     let view = h.puddles.as_ref().filter(|_| puddles_on).map_or(&h.view, |p| &p.view);
@@ -10997,7 +11564,10 @@ impl Renderer {
             // adaptation to it is the light model's already: lifted by the meter on top, a
             // lamp-lit street came out most of a stop brighter than any eye sees it)
             let mut m = meter_tuning();
-            m[3] *= 1.0 - atmosphere::smoothstep(3.0, 7.0, self.exposure.unwrap_or(0.0) / std::f32::consts::LN_2);
+            // (by the night's own exposure: the night brightness setting's darker night is
+            // not one for the meter to brighten - lifted, it took a dark setting back most of
+            // the way, and the cab's lamps and screens with it, bright in the dark)
+            m[3] *= 1.0 - atmosphere::smoothstep(3.0, 7.0, (self.exposure.unwrap_or(0.0) - self.night_offset) / std::f32::consts::LN_2);
             // (photo mode's grade, for the window's picture and the photo's)
             let photo = self.photo.filter(|_| with_overlays);
             let pg = photo.unwrap_or_default();
@@ -11017,7 +11587,7 @@ impl Renderer {
                     },
                 ],
                 // darker: the eye takes a few seconds; brighter: under one
-                b: [secs(2.5), secs(0.6), m[1], m[4] + pg.ev],
+                b: [secs(2.5), secs(0.6), m[1], m[4] + pg.ev + self.weather_ev],
                 // (w: an LED panel's dots count for this much in the glow's source. The mix
                 // the glow lands with is a few per cent - a lamp a hundred times brighter
                 // than white spreads, a white wall does not - so the dots are multiplied up
@@ -11147,7 +11717,85 @@ impl Renderer {
                 }
             }
         }
-        if let Some((_, bg)) = &scene_target {
+        // (the lens's motion blur goes from this frame's view to the one before)
+        let prev_view = main_view.then_some((vp_mat, ro));
+        let mut probe_view: Option<(Mat4, DVec3)> = None;
+        if let (Some(fx), Some((picture, _)), Some(res)) = (lens.as_ref(), scene_target.as_ref(), self.lens_res.as_ref()) {
+            // --- the camera's lens: the picture laid onto the window through it, the HUD on top
+            let gl = GL_BACKEND.load(std::sync::atomic::Ordering::Relaxed);
+            let depth = self.ao.as_ref().filter(|a| prepass_on && !gl && a.size == (width, height)).map(|a| &a.depth_view);
+            let highlight = self.hdr_targets.get(&(width, height)).filter(|_| enhanced).and_then(|h| h.down.first());
+            let u = self.lens_uniform(fx, vp_mat, ro, camera, aspect, sun_ndc, lighting, (width, height), (full_w, full_h), depth.is_some(), highlight.is_some());
+            self.queue.write_buffer(&res.buf, 0, bytemuck::bytes_of(&u));
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("lens"),
+                layout: &res.layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: res.buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(picture) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.post_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(depth.unwrap_or(&res.no_depth)) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(highlight.unwrap_or(&res.no_highlight)) },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("lens"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: pass_timer(tset.as_ref(), &mut timed, "lens"),
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&res.pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+            if !overlays.is_empty() {
+                pass.set_pipeline(&self.overlay_pipeline_1x);
+                for (k, _) in overlays.iter().enumerate() {
+                    if let Some((_, _, bg, _)) = scene.overlay_res.get(k) {
+                        pass.set_bind_group(0, bg, &[]);
+                        pass.draw(0..6, 0..1);
+                    }
+                }
+            }
+            drop(pass);
+            // the depth probe, small, copied out to be read once the card is done with it
+            let probe = &res.probe;
+            if fx.probe && depth.is_some() && probe.state.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("depth probe"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &probe.view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&probe.pipeline);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.draw(0..3, 0..1);
+                drop(pass);
+                encoder.copy_texture_to_buffer(
+                    wgpu::TexelCopyTextureInfo { texture: &probe.texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &probe.buffer,
+                        layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(PROBE_W * 4), rows_per_image: Some(PROBE_H) },
+                    },
+                    wgpu::Extent3d { width: PROBE_W, height: PROBE_H, depth_or_array_layers: 1 },
+                );
+                probe.state.store(1, std::sync::atomic::Ordering::Release);
+                probe_view = Some((vp_mat, ro));
+            }
+        } else if let Some((_, bg)) = &scene_target {
             // --- the smaller picture scaled up to the window, the HUD on top at full size;
             // the smaller the picture, the more it is sharpened
             let sharpen = (1.0 - width as f32 / full_w as f32) * 2.0;
@@ -11184,6 +11832,9 @@ impl Renderer {
                     }
                 }
             }
+        }
+        if prev_view.is_some() {
+            self.prev_view = prev_view;
         }
         stage(self, "encode", "mirror.encode");
         // Turning the recorded passes into Metal commands is the costliest CPU step of a
@@ -11271,6 +11922,17 @@ impl Renderer {
         self.queue
             .submit([shadow_commands, prepass_commands].into_iter().chain(part_commands).chain([commands]));
         stage(self, "submit", "mirror.submit");
+        // (the depth probe drawn this frame: mapped now that it is submitted)
+        if let (Some((vp, origin)), Some(res)) = (probe_view, self.lens_res.as_mut()) {
+            let p = &mut res.probe;
+            p.view_proj = vp;
+            p.origin = origin;
+            p.state.store(2, std::sync::atomic::Ordering::Release);
+            let state = p.state.clone();
+            p.buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                state.store(if r.is_ok() { 3 } else { 0 }, std::sync::atomic::Ordering::Release);
+            });
+        }
         if let (Some(t), false) = (
             self.gpu_timers[with_overlays as usize].as_mut(),
             timed.is_empty(),
@@ -12141,6 +12803,36 @@ fn lamp_sky_glow(scene: &Scene, cam_rel: Vec3) -> f32 {
     sum / SKY_GLOW_REF
 }
 
+/// The cab's own lights at night - its tell-tales, its lit switches and instruments, its
+/// screens - as the shaders take them: the most its lamps are drawn at against a self-lit
+/// surface's daylight level (`enh.led.z`), and what its screens are shown at in place of
+/// `enh.exposure.y` (`enh.led.w`). A bus's instrument lights are dimmed when its lights are
+/// switched on, and its screens dim themselves in the dark: shown at their daylight level
+/// over a night's dark cab, and lifted again by the metering's correction (`ev`, see
+/// `ExposureLog`), the tell-tales and the switches' lights burned like lamps. At night
+/// (`night_weight` 1, see `night_exposure_weight`) `CAB_NIGHT_LEVEL` of the day's with the
+/// metering undone, less with a darker night brightness setting (`night_brightness`, 0.1 =
+/// a tenth); by day as they were.
+fn cab_dimmer(night_weight: f32, night_brightness: f32, ev: f32) -> (f32, f32) {
+    let w = night_weight.clamp(0.0, 1.0);
+    // (`OMSI_CAB_NIGHT=<level>`: another level, for trying)
+    static LEVEL: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    let base = *LEVEL.get_or_init(|| {
+        omsi_cfg::env::var("OMSI_CAB_NIGHT").ok().and_then(|v| v.trim().parse::<f32>().ok()).filter(|v| v.is_finite() && *v > 0.0).unwrap_or(CAB_NIGHT_LEVEL)
+    });
+    let night = base * night_brightness.clamp(0.05, 4.0).min(1.0).powf(CAB_NIGHT_BRIGHTNESS_POWER);
+    let level = (night.ln() * w).exp();
+    let unmeter = 2f32.powf(-ev).clamp(0.25, 4.0).ln();
+    // (a screen by day: as every display, `exposure.y`)
+    let shown = 2f32.powf(-ev).clamp(0.7, 1.6).ln();
+    ((level.ln() + unmeter * w).exp(), (level.ln() + shown + (unmeter - shown) * w).exp())
+}
+
+/// The cab's lights at night against the day (see `cab_dimmer`), and how much a darker night
+/// brightness setting takes them down with it (its power).
+const CAB_NIGHT_LEVEL: f32 = 0.8;
+const CAB_NIGHT_BRIGHTNESS_POWER: f32 = 0.35;
+
 /// How much of the night brightness setting the exposure takes (`Lighting::night_brightness`)
 /// in this natural light (irradiance, 1 = 10 000 lux): all of it under 10 lux (deep dusk,
 /// the night), none over 1000 (the sun just set and brighter), in between by the light's
@@ -12210,6 +12902,96 @@ fn view_lamp_light(scene: &Scene, cam_rel: Vec3, forward: Vec3) -> f32 {
     (log_sum / per_point.len() as f32).exp() - floor
 }
 
+/// A headlamp's light at the eye under which its glare is not drawn (irradiance: a
+/// hundredth of a lux, a low beam's from beyond some 300 m).
+const GLARE_FLOOR: f32 = 1e-6;
+
+/// The headlamps that shine into the eye at `cam_rel`: each beam's light at the eye by its
+/// profile (`headlamp_profile` - an oncoming low beam's little over its cut-off, a full
+/// beam's all of it), unless a vehicle's body stands between (`Scene::light_blockers`); the
+/// brightest `GLARE_LAMPS` of those in front of the eye, as where they are from the eye and
+/// their light, and the light of all of them. A full beam a hundred metres off blinds: the
+/// eye's own scattered light veils the road round it (fog_lamps.wgsl `lamp_glare`) and the
+/// eye closes down to it (`GLARE_ADAPT`).
+fn lamp_glare(scene: &Scene, cam_rel: Vec3, forward: Vec3) -> ([[f32; 4]; GLARE_LAMPS], f32) {
+    let ro = scene.render_origin;
+    let mut found: Vec<[f32; 4]> = Vec::new();
+    let mut total = 0.0;
+    for l in &scene.lights {
+        if l.beam == 0.0 || l.intensity <= 0.0 || l.mode != LightMode::Enhanced {
+            continue;
+        }
+        let p = (l.position - ro).as_vec3();
+        let to_eye = cam_rel - p;
+        let d2 = to_eye.length_squared();
+        if !(1.0..GLARE_REACH * GLARE_REACH).contains(&d2) {
+            continue;
+        }
+        let d = d2.sqrt();
+        let t = to_eye / d;
+        let lum = 0.2126 * l.color[0] + 0.7152 * l.color[1] + 0.0722 * l.color[2];
+        let e = LAMP_E * l.intensity * lum * headlamp_profile(t, l.direction, l.beam) / d2;
+        if e <= GLARE_FLOOR * 0.1 || blocked(&scene.light_blockers, l.blockers, ro, p, cam_rel) {
+            continue;
+        }
+        // (behind the eye or far off to the side: in no picture, and in no eye)
+        let towards = -t;
+        let ahead = towards.dot(forward);
+        if ahead <= 0.0 {
+            continue;
+        }
+        let e = e * atmosphere::smoothstep(0.0, 0.5, ahead);
+        total += e;
+        found.push([-to_eye.x, -to_eye.y, -to_eye.z, e]);
+    }
+    found.sort_by(|a, b| b[3].total_cmp(&a[3]));
+    let mut out = [[0.0; 4]; GLARE_LAMPS];
+    for (o, f) in out.iter_mut().zip(found) {
+        *o = f;
+    }
+    (out, total)
+}
+
+/// How far a headlamp is still taken as shining into the eye (m).
+const GLARE_REACH: f32 = 600.0;
+
+/// Whether one of the vehicles in a beam's `mask` (`PointLight::blockers`) stands between
+/// its lamp at `from` and `to` (both render-origin relative).
+fn blocked(blockers: &[LightBlocker], mask: u32, ro: DVec3, from: Vec3, to: Vec3) -> bool {
+    for (j, b) in blockers.iter().enumerate().take(32) {
+        if mask & (1 << j) == 0 {
+            continue;
+        }
+        let c = (b.center - ro).as_vec3();
+        let inv = b.rotation.transpose();
+        let (a, z) = (inv * (from - c), inv * (to - c));
+        let dir = z - a;
+        let (mut t0, mut t1) = (0.0f32, 1.0f32);
+        let mut hit = true;
+        for k in 0..3 {
+            let (o, dd, h) = (a[k], dir[k], b.half[k]);
+            if dd.abs() < 1e-6 {
+                if o.abs() > h {
+                    hit = false;
+                    break;
+                }
+            } else {
+                let (u, v) = ((-h - o) / dd, (h - o) / dd);
+                t0 = t0.max(u.min(v));
+                t1 = t1.min(u.max(v));
+                if t0 > t1 {
+                    hit = false;
+                    break;
+                }
+            }
+        }
+        if hit {
+            return true;
+        }
+    }
+    false
+}
+
 /// A headlamp's intensity towards `t` (unit, from the lamp) for its `beam` mode:
 /// lamp_air.wgsl `headlamp`.
 fn headlamp_profile(t: Vec3, dir: Vec3, mode: f32) -> f32 {
@@ -12217,6 +12999,15 @@ fn headlamp_profile(t: Vec3, dir: Vec3, mode: f32) -> f32 {
     let ahead = t.truncate().dot(fwd);
     if ahead <= 0.0 {
         return 0.0;
+    }
+    if mode > 2.9 {
+        let fh = (t.x * fwd.y - t.y * fwd.x).atan2(ahead).to_degrees();
+        let fv = (t.z.atan2(t.truncate().length()) - dir.z.atan2(dir.truncate().length().max(1e-4))).to_degrees();
+        let fsoft = if mode.fract() > 0.1 { 0.45 } else { 0.25 };
+        let fedge = 0.003 + 0.997 * atmosphere::smoothstep(-fsoft, fsoft, -1.5 - fv);
+        let fover = (-1.5 - fv - 5.0).max(0.0) / 5.0;
+        let fq = fh / 32.0;
+        return 0.45 * (-fq.powi(4)).exp() * fedge / (1.0 + fover * fover);
     }
     let side = if mode > 1.9 { -1.0 } else { 1.0 } * (t.x * fwd.y - t.y * fwd.x);
     let soft = if mode.abs().fract() > 0.1 { 0.35 } else { 0.15 };
@@ -12276,7 +13067,10 @@ fn enhanced_sky_input(lighting: &Lighting, city_glow: f32) -> (atmosphere::SkyIn
     if let Some([haze, angstrom, height]) = lighting.air {
         day.haze = haze;
         day.angstrom = angstrom;
-        day.aerosol_height = height;
+        // (0: the day's own layer, growing with the sun - a weather preset's)
+        if height > 0.0 {
+            day.aerosol_height = height;
+        }
     }
     let haze = (8000.0 / visibility).clamp(1.0, 6.0) * day.haze + 2.0 * lighting.rain;
     // rain and snow fall from a closed deck: whatever the cloud type says, the sun is
@@ -13793,6 +14587,31 @@ mod tests {
         // a bus climbing 4 deg: its beam's hot spot climbs with it
         let climb = Vec3::new(0.0, 4f32.to_radians().cos(), 4f32.to_radians().sin());
         assert!((headlamp_profile(at(1.5, 3.3), climb, 1.0) - hot).abs() < 1e-3);
+    }
+
+    /// A front fog lamp: a flat cut-off on both sides with next to nothing over it (the fog
+    /// at the driver's eyes stays dark), wide across, and the near road lit.
+    #[test]
+    fn a_fog_lamp_lights_low_and_wide() {
+        let at = |h: f32, v: f32| {
+            let (h, v) = (h.to_radians(), v.to_radians());
+            Vec3::new(h.sin() * v.cos(), h.cos() * v.cos(), v.sin())
+        };
+        let level = Vec3::Y;
+        let core = headlamp_profile(at(0.0, -3.0), level, 3.0);
+        assert!(core > 0.4, "{core}");
+        // over the cut-off, either side: dark
+        assert!(headlamp_profile(at(-10.0, 0.0), level, 3.0) < 0.01 * core);
+        assert!(headlamp_profile(at(10.0, 0.0), level, 3.0) < 0.01 * core);
+        assert!(headlamp_profile(at(0.0, 2.0), level, 3.0) < 0.01 * core);
+        // 25 deg to either side still more than half of it, 50 deg nearly nothing
+        assert!(headlamp_profile(at(25.0, -3.0), level, 3.0) > 0.5 * core);
+        assert!(headlamp_profile(at(-25.0, -3.0), level, 3.0) > 0.5 * core);
+        assert!(headlamp_profile(at(50.0, -3.0), level, 3.0) < 0.05 * core);
+        // a halogen fog lamp: the same, a softer edge
+        assert!((headlamp_profile(at(0.0, -3.0), level, 3.25) - core).abs() < 0.01);
+        // the low beam over the fog lamp's cut-off still lights the road ahead
+        assert!(headlamp_profile(at(1.5, -0.7), level, 1.0) > 10.0 * headlamp_profile(at(1.5, -0.7), level, 3.0));
     }
 
     /// A headlamp goes into the light grid's cells ahead of it only.
@@ -15529,6 +16348,28 @@ mod tests {
         assert_eq!(w(0.0), 1.0);
     }
 
+    /// The headlamps' shadow map takes what stands in front of the bus - not its own nose,
+    /// not what is behind it or far off to the side - and names all its lamps to the shaders.
+    #[test]
+    fn the_headlamps_map_looks_along_the_road() {
+        use super::{LampShadow, HEADLAMP_SHADOW_NEAR};
+        let map = LampShadow { index: 7, position: Vec3::new(0.0, 0.0, 0.8), range: 100.0, fade: 1.0, look: Some(Vec3::Y), count: 4 };
+        assert!(map.reaches(Vec3::new(3.0, 30.0, 2.0), 0.3), "a pole ahead");
+        assert!(map.reaches(Vec3::new(-20.0, 25.0, 4.0), 2.0), "a tree ahead to the left");
+        assert!(!map.reaches(Vec3::new(0.0, -5.0, 1.5), 3.0), "the bus itself");
+        assert!(!map.reaches(Vec3::new(0.0, 0.5, 1.0), 0.2), "the nose, nearer than {HEADLAMP_SHADOW_NEAR} m");
+        assert!(!map.reaches(Vec3::new(40.0, 5.0, 2.0), 1.0), "far off to the side");
+        assert!(!map.reaches(Vec3::new(0.0, 150.0, 2.0), 1.0), "beyond the beams");
+        assert_eq!(map.lights_code(), (7 + 4 * 65536) as f32);
+        let lamp = LampShadow { look: None, count: 1, ..map };
+        assert_eq!(lamp.lights_code(), 7.0);
+        // a point ahead on the road lands inside the map, one behind does not
+        let ndc = map.view_proj().project_point3(Vec3::new(1.0, 30.0, 0.0));
+        assert!(ndc.x.abs() < 1.0 && ndc.y.abs() < 1.0 && ndc.z > 0.0 && ndc.z < 1.0, "{ndc:?}");
+        let q = map.view_proj() * Vec3::new(0.0, -10.0, 0.0).extend(1.0);
+        assert!(q.w < 0.0);
+    }
+
     #[test]
     fn a_street_lamp_keeps_its_shadow_map_until_a_clearly_stronger_one_comes() {
         use super::{hold_lamp_slots, LampSlot, LAMP_SHADOWS};
@@ -15585,6 +16426,7 @@ mod tests {
             ("ssao", include_str!("ssao.wgsl").to_string()),
             ("puddles", puddles::shader_source()),
             ("upscale", include_str!("upscale.wgsl").to_string()),
+            ("lens", include_str!("lens.wgsl").to_string()),
             ("mip", include_str!("mip.wgsl").to_string()),
             ("xr_ui", include_str!("xr_ui.wgsl").to_string()),
             // Enhanced+: the scene's pass with its reflection targets, the ray tracing
@@ -15596,6 +16438,7 @@ mod tests {
         let sizes: &[(&str, usize)] = &[
             ("Enhanced", std::mem::size_of::<EnhancedUniform>()),
             ("PostParams", std::mem::size_of::<PostUniform>()),
+            ("Lens", std::mem::size_of::<LensUniform>()),
             ("FogLampParams", std::mem::size_of::<FogLampUniform>()),
             ("SnowParams", std::mem::size_of::<SnowUniform>()),
             ("PuddleParams", std::mem::size_of::<puddles::Uniform>()),

@@ -407,6 +407,8 @@ pub(crate) fn spawn_player(
         .map(|k| k.with_game_defaults().vehicles)
         .unwrap_or_default();
     static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    // (the adaptive cruise control is the autopilot's pedals alone: no bus has one of its own)
+    let acc: Option<crate::acc::Acc> = None;
     let mut p = Player {
         uid: NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         vehicle,
@@ -447,6 +449,8 @@ pub(crate) fn spawn_player(
         toggled_up: Default::default(),
         momentary_gears: crate::settings::Settings::load().momentary_gears,
         auto_shift: crate::settings::Settings::load().auto_shift,
+        acc,
+        autopilot: Default::default(),
         auto_shift_wait: 0.0,
         auto_shift_idle: 0.0,
         side_lights_by_l: false,

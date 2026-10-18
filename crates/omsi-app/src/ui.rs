@@ -477,6 +477,12 @@ pub struct Frame<'a> {
     /// The interface hidden (`interface_toggle`): nothing drawn but a menu that is open, and
     /// for a moment after it was hidden, how to bring it back (the key's name).
     pub ui_hidden: Option<(bool, String)>,
+    /// The dashcam's stamp in the picture: the date and time (bottom left), the speed (bottom
+    /// right), and the recording light lit (`crate::cinema::stamp`).
+    pub stamp: Option<(String, String, bool)>,
+    /// A line at the bottom of the picture for a moment, drawn whether the interface is
+    /// hidden or not (the cinematic camera's keys).
+    pub caption: Option<String>,
     /// The server's notifications, oldest first.
     pub notices: &'a [Notice],
     /// Where the navigator is on the screen (the notifications stand over it, or under it
@@ -686,6 +692,41 @@ impl Ui {
     /// and, with the panel hidden, how to bring it back. (Notes, the clock and the rest of
     /// the game's interface are not drawn.)
     /// For a moment after the interface was hidden: which key brings it back, bottom left.
+    /// The dashcam's stamp: white letters of a size by the picture's (as a camera burns them
+    /// in, whatever the interface's size), the date and time at the bottom left, the speed
+    /// at the bottom right, a red recording light at the top left that blinks.
+    fn draw_stamp(&mut self, r: &Renderer, scene: &mut Scene, f: &Frame, left: &str, right: &str, rec: bool) {
+        let px = (f.height * 0.03).clamp(12.0, 48.0);
+        let margin = (f.height * 0.035).max(10.0);
+        let white = [242, 242, 236, 200];
+        let l = self.text.label(r, scene, left, px as u32, white);
+        let y = f.height - margin - l.h as f32;
+        scene.overlays.push((l.tex, [margin, y, margin + l.w as f32, y + l.h as f32]));
+        let rl = self.text.label(r, scene, right, px as u32, white);
+        let x = f.width - margin - rl.w as f32;
+        scene.overlays.push((rl.tex, [x, y, x + rl.w as f32, y + rl.h as f32]));
+        let tag = self.text.label(r, scene, "REC", (px * 0.8) as u32, white);
+        let dot = px * 0.42;
+        let ty = margin;
+        if rec {
+            let red = self.text.solid(r, scene, [230, 30, 25, 235]);
+            let cy = ty + tag.h as f32 * 0.5;
+            scene.overlays.push((red, [margin, cy - dot * 0.5, margin + dot, cy + dot * 0.5]));
+        }
+        let tx = margin + dot * 1.6;
+        scene.overlays.push((tag.tex, [tx, ty, tx + tag.w as f32, ty + tag.h as f32]));
+    }
+
+    /// A line on a dim plate at the bottom middle of the picture.
+    fn draw_caption(&mut self, r: &Renderer, scene: &mut Scene, f: &Frame, text: &str, s: f32) {
+        let l = self.text.label(r, scene, &omsi_ui::tr(text), (14.0 * s) as u32, [255, 255, 255, 225]);
+        let plate = self.text.plate(r, scene, 7);
+        let x0 = ((f.width - l.w as f32) * 0.5).round();
+        let y0 = f.height - 56.0 * s - l.h as f32;
+        scene.overlays.push((plate, [x0 - 8.0 * s, y0 - 4.0 * s, x0 + l.w as f32 + 8.0 * s, y0 + l.h as f32 + 4.0 * s]));
+        scene.overlays.push((l.tex, [x0, y0, x0 + l.w as f32, y0 + l.h as f32]));
+    }
+
     fn draw_hidden_hint(&mut self, r: &Renderer, scene: &mut Scene, f: &Frame, key: &str, s: f32) {
         let text = omsi_ui::tr("Interface hidden  ·  %s shows it again").replace("%s", key);
         let l = self.text.label(r, scene, &text, (13.0 * s) as u32, [255, 255, 255, 220]);
@@ -754,6 +795,13 @@ impl Ui {
             self.draw_photo(r, scene, f, pv, s);
             self.draw_menu(r, scene, f);
             return;
+        }
+        // --- what is in the picture itself: the dashcam's stamp; a caption over it
+        if let Some((left, right, rec)) = &f.stamp {
+            self.draw_stamp(r, scene, f, left, right, *rec);
+        }
+        if let Some(c) = &f.caption {
+            self.draw_caption(r, scene, f, c, s);
         }
         // --- the interface hidden: the picture alone (a menu opened over it is still drawn)
         if let Some((hint, key)) = &f.ui_hidden {

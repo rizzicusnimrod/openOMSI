@@ -110,6 +110,24 @@ impl ControlNames {
         if event.eq_ignore_ascii_case("interface_toggle") {
             return "Hide or show the interface".to_string();
         }
+        for (action, name) in [
+            ("autopilot_toggle", "Autopilot on / off"),
+            ("autopilot_faster", "Autopilot: top speed +5 km/h"),
+            ("autopilot_slower", "Autopilot: top speed -5 km/h"),
+            ("autopilot_gap", "Autopilot: gap to the vehicle ahead"),
+            ("autopilot_style", "Autopilot: driving style"),
+            ("headlamp_range_up", "Headlamp range: beams up"),
+            ("headlamp_range_down", "Headlamp range: beams down"),
+            ("dash_brighter", "Instrument lights brighter"),
+            ("dash_darker", "Instrument lights darker"),
+            ("view_set_cinematic", "Cinematic camera (again: the next shot)"),
+            ("view_cinematic_hold", "Cinematic camera: hold the shot"),
+            ("view_set_dashcam", "Dashcam view"),
+        ] {
+            if event.eq_ignore_ascii_case(action) {
+                return name.to_string();
+            }
+        }
         // variants of a trigger the key dialog knows: the mouse version of a key, a second
         // button for the same job, the outside button of a door
         for (suffix, extra) in [("_mouse", ""), ("_external", " (outside)"), ("_2", " 2"), ("_sw", ""), ("_button", "")] {

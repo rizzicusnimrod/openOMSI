@@ -75,7 +75,8 @@ pub struct ModelSky {
     pub cumulus: f32,
     pub deck: f32,
     pub veil: f32,
-    /// aerosol amount relative to a clear day, its Ångström exponent, its layer depth (m)
+    /// aerosol amount relative to a clear day, its Ångström exponent, its layer depth (m;
+    /// 0 = the day's own, as the sun grows and settles it: a weather preset's)
     pub haze: f32,
     pub angstrom: f32,
     pub aerosol_height: f32,

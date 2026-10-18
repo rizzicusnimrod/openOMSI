@@ -35,6 +35,10 @@ const PULL_IN: f32 = 18.0;
 /// How far above the ground the camera stays (m).
 const GROUND_CLEARANCE: f64 = 0.6;
 
+/// A see-through type at least this tall and this wide in both directions is a veil (m).
+const VEIL_HEIGHT: f32 = 2.5;
+const VEIL_WIDTH: f32 = 1.2;
+
 /// Types smaller or lower than this never block the camera (m).
 const MIN_HEIGHT: f32 = 2.0;
 const MIN_WIDTH: f32 = 2.0;
@@ -61,6 +65,10 @@ pub fn debug() -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct BlockerShape {
     pub blocks: bool,
+    /// A big see-through object - a tree's crown, a hedge, a mast with its boards: the
+    /// outside camera passes through it, the cinematic camera neither stands in it nor
+    /// films through it (`sight_clear`). `lo`/`hi` are then its whole model's bounds.
+    pub veil: bool,
     /// Bounds of the solid triangles in the object's own frame.
     pub lo: Vec3,
     pub hi: Vec3,
@@ -216,9 +224,12 @@ pub fn classify(ot: &ObjectType) -> BlockerShape {
         hi: Vec3::splat(f32::MIN),
         ..Default::default()
     };
-    if ot.sco.tree.is_some() || ot.sco.only_editor || ot.sco.is_help_arrow {
+    if ot.sco.only_editor || ot.sco.is_help_arrow {
         return BlockerShape::default();
     }
+    let tree = ot.sco.tree.is_some();
+    // (every triangle, the see-through ones too: a veil's bounds)
+    let (mut all_lo, mut all_hi, mut see_through) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN), tree);
     let (mut area, mut tris) = (0.0f32, 0usize);
     for (mi, (mesh, o3d_mats, overrides)) in ot.meshes.iter().enumerate() {
         if ot.mesh_visible.get(mi).and_then(|v| v.as_ref()).is_some() {
@@ -237,12 +248,22 @@ pub fn classify(ot: &ObjectType) -> BlockerShape {
             })
             .collect();
         for &(first, count, slot) in &mesh.ranges {
-            if !slots.get(slot as usize).copied().unwrap_or(false) {
-                continue;
-            }
             let Some(ix) = mesh.indices.get(first as usize..(first + count) as usize) else {
                 continue;
             };
+            if !slots.get(slot as usize).copied().unwrap_or(false) {
+                let texture = o3d_mats.get(slot as usize).map(|m| m.texture.as_str()).unwrap_or("");
+                if !shadow && !crate::scene::is_null_texture(texture) {
+                    see_through = true;
+                    for &i in ix {
+                        if let Some(p) = mesh.positions.get(i as usize) {
+                            all_lo = all_lo.min(*p);
+                            all_hi = all_hi.max(*p);
+                        }
+                    }
+                }
+                continue;
+            }
             for t in ix.chunks_exact(3) {
                 let (Some(a), Some(b), Some(c)) = (
                     mesh.positions.get(t[0] as usize),
@@ -261,8 +282,13 @@ pub fn classify(ot: &ObjectType) -> BlockerShape {
         }
         shape.solid.push(slots);
     }
-    if tris == 0 {
-        return BlockerShape::default();
+    let veil = |lo: Vec3, hi: Vec3| {
+        let size = hi - lo;
+        see_through && size.z >= VEIL_HEIGHT && size.x.min(size.y) >= VEIL_WIDTH
+    };
+    if tris == 0 || tree {
+        let (lo, hi) = (all_lo.min(shape.lo), all_hi.max(shape.hi));
+        return BlockerShape { veil: veil(lo, hi), lo, hi, ..Default::default() };
     }
     let size = shape.hi - shape.lo;
     let shell = 2.0 * (size.x * size.z + size.y * size.z + size.x * size.y);
@@ -271,6 +297,14 @@ pub fn classify(ot: &ObjectType) -> BlockerShape {
         && size.x.max(size.y) >= MIN_WIDTH
         && size.x.min(size.y) >= 0.1
         && fill >= MIN_FILL;
+    if !shape.blocks {
+        let (lo, hi) = (all_lo.min(shape.lo), all_hi.max(shape.hi));
+        if veil(lo, hi) {
+            shape.veil = true;
+            shape.lo = lo;
+            shape.hi = hi;
+        }
+    }
     if debug() {
         log::info!(
             "camera: {} {} ({tris} solid triangles, {:.1} x {:.1} x {:.1} m, fill {fill:.2})",
@@ -531,6 +565,53 @@ pub fn free_length(
         }
     }
     free
+}
+
+/// Whether the line from `from` to `to` is clear (the cinematic camera's view of the bus):
+/// none of the buildings, walls and canopies the arm stops at in the way, and the ground (a
+/// hill, an embankment) nowhere over it. The last metre at either end is not looked at -
+/// the bus itself, the ground the camera stands on.
+pub fn sight_clear(world: &World, from: DVec3, to: DVec3) -> bool {
+    let d = to - from;
+    let len = d.length();
+    if len < 2.5 {
+        return true;
+    }
+    let dir = d / len;
+    let (lo, hi) = (from.min(to), from.max(to));
+    for (ot, b) in &world.camera_blockers(lo.truncate(), hi.truncate()) {
+        if let Some(shape) = ot.camera_veil() {
+            // (a tree's crown: its box, unless the bus itself stands in it)
+            let inv = b.xf.inverse();
+            let o = inv.transform_point3((from - b.pos).as_vec3());
+            let d = inv.transform_vector3(dir.as_vec3());
+            if let Some((t0, t1)) = slab(o, d, shape.lo, shape.hi) {
+                if t0 > 0.0 && (t0 as f64) < len - 0.5 && t1 > 0.0 {
+                    return false;
+                }
+            }
+            continue;
+        }
+        let Some(shape) = ot.camera_shape() else {
+            continue;
+        };
+        let (z0, z1) = (b.pos.z + shape.lo.z as f64 - 1.0, b.pos.z + shape.hi.z as f64 + 1.0);
+        if hi.z < z0 || lo.z > z1 {
+            continue;
+        }
+        if ray_object(ot, shape, b.pos, &b.xf, from, dir, len - 1.0).is_some_and(|t| t > 1.0) {
+            return false;
+        }
+    }
+    let mut t = 1.0;
+    while t < len - 1.0 {
+        let p = from + dir * t;
+        if world.ground_height(p.x, p.y).is_some_and(|g| p.z < g - 0.2) {
+            return false;
+        }
+        t += 2.0;
+    }
+    true
 }
 
 /// The length of the arm from frame to frame.

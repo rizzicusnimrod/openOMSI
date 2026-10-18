@@ -121,6 +121,9 @@ fn pass_time(dist: f32, creep: f32, st: &AiState, v_cap: f32) -> f32 {
 const ONCOMING_ROOM: f32 = 1.15;
 /// The player's box as `player_in_way` sees it is this much longer at each end (m).
 const PLAYER_BOX_MARGIN: f32 = 0.5;
+/// Room left between a car and the player's oncoming bus beside it that still counts as
+/// passing it (m between the two sides; see `player_on_way`).
+const ONCOMING_CLEARANCE: f32 = 0.05;
 /// Somebody on foot more than this far above or below a car's way is not in it (m).
 const PEOPLE_LEVEL: f64 = 2.5;
 /// A car that gave up and has stood this long (s) held by nothing anybody can see goes even
@@ -139,6 +142,22 @@ pub struct BusSetup {
     pub number: Option<(String, String)>,
     pub hof: Option<Arc<omsi_vehicle::Hof>>,
 }
+
+/// Overtaking (`Traffic::plan_overtake`): in town only round what goes at a tractor's pace
+/// (m/s); only round something going steadily (its acceleration under this, m/s²); the
+/// most the road may bend within the pass (degrees); the time to spare before an oncoming
+/// car could be there (s); and what a driver must see of the road ahead (`sight_along`):
+/// eye and object heights, how far to the side of the road the view may pass, the step it
+/// is looked at in and the most ever asked for (m).
+const TOWN_CRAWL: f32 = 15.0 / 3.6;
+const STEADY_ACCEL: f32 = 0.4;
+const MAX_PASS_BEND: f32 = 20.0;
+const PASS_MARGIN: f32 = 4.0;
+const SIGHT_EYE: f32 = 1.15;
+const SIGHT_OBJECT: f32 = 1.3;
+const SIGHT_CORRIDOR: f32 = 7.0;
+const SIGHT_STEP: f32 = 10.0;
+const SIGHT_MAX: f32 = 600.0;
 
 pub struct AiCar {
     /// Stable id for references from other systems (passengers).
@@ -347,6 +366,7 @@ pub struct Shown {
     pub lights: bool,
     pub blinker: i32,
     pub rear_fog: bool,
+    pub front_fog: bool,
     pub high_beam: bool,
     pub horns: u8,
     pub bulb: u8,
@@ -1098,7 +1118,7 @@ fn drive_driver(
     seen: crate::ai_drivers::Input,
 ) -> (bool, i32) {
     use crate::ai_drivers::{
-        Bulb, Driver, Input, TwoStroke, VAR_BRAKE_L, VAR_BRAKE_R, VAR_HEAD_L, VAR_HEAD_R, VAR_HIGH_BEAM, VAR_REAR_FOG,
+        Bulb, Driver, Input, TwoStroke, VAR_BRAKE_L, VAR_BRAKE_R, VAR_FRONT_FOG, VAR_HEAD_L, VAR_HEAD_R, VAR_HIGH_BEAM, VAR_REAR_FOG,
         VAR_SMOKE_ALPHA, VAR_SMOKE_FREQ, VAR_SMOKE_LIFE, VAR_SMOKE_SPEED,
     };
     if !car.driver_checked {
@@ -1126,7 +1146,7 @@ fn drive_driver(
         let v = &mut car.vehicle;
         if v.ty.ai_patch.lamps {
             let (lit, brake) = (night as i32 as f32, car.state.braking as i32 as f32);
-            for (n, x) in [(VAR_HEAD_L, lit), (VAR_HEAD_R, lit), (VAR_BRAKE_L, brake), (VAR_BRAKE_R, brake), (VAR_REAR_FOG, 0.0), (VAR_HIGH_BEAM, 0.0)] {
+            for (n, x) in [(VAR_HEAD_L, lit), (VAR_HEAD_R, lit), (VAR_BRAKE_L, brake), (VAR_BRAKE_R, brake), (VAR_REAR_FOG, 0.0), (VAR_FRONT_FOG, 0.0), (VAR_HIGH_BEAM, 0.0)] {
                 v.set_engine_var(n, x);
             }
         }
@@ -1142,13 +1162,15 @@ fn drive_driver(
     if v.ty.ai_patch.lamps {
         let on = |b: bool| b as i32 as f32;
         let brake = car.state.braking;
-        let head = out.lights || (out.flash && high_beam);
+        let high = (out.flash || out.high_beam) && high_beam;
+        let head = out.lights || high;
         v.set_engine_var(VAR_REAR_FOG, on(out.rear_fog));
+        v.set_engine_var(VAR_FRONT_FOG, on(out.front_fog));
         v.set_engine_var(VAR_HEAD_L, on(head && d.bulb != Bulb::HeadLeft));
         v.set_engine_var(VAR_HEAD_R, on(head && d.bulb != Bulb::HeadRight));
         v.set_engine_var(VAR_BRAKE_L, on(brake && d.bulb != Bulb::BrakeLeft));
         v.set_engine_var(VAR_BRAKE_R, on(brake && d.bulb != Bulb::BrakeRight));
-        v.set_engine_var(VAR_HIGH_BEAM, on(out.flash && high_beam));
+        v.set_engine_var(VAR_HIGH_BEAM, on(high));
     }
     if out.horn {
         v.host.fired_triggers.push("ev_AI_Horn".into());
@@ -1157,7 +1179,8 @@ fn drive_driver(
         lights: out.lights,
         blinker: out.blinker,
         rear_fog: out.rear_fog,
-        high_beam: out.flash,
+        front_fog: out.front_fog,
+        high_beam: out.flash || out.high_beam,
         horns: car.shown.horns.wrapping_add(out.horn as u8),
         bulb: match d.bulb {
             Bulb::None => 0,
@@ -1201,6 +1224,27 @@ fn dazzles_within(p: &PlayerBox, pos: DVec3, heading: f64, range: f32, cone: f64
     let ahead = |h: f64| DVec2::new(h.to_radians().sin(), h.to_radians().cos());
     let towards = d / dist;
     towards.dot(ahead(heading)) > cone && (-towards).dot(ahead(p.1)) > cone
+}
+
+/// The nearest of `lamps` (where each vehicle is, which way it faces) that comes towards a
+/// driver at `pos` facing `heading` within `range` m: ahead of the driver, within some 37
+/// degrees, its front towards them - the lamps one dips the high beams for. (Round a tight
+/// bend they are out of the cone, as they are out of the beam.)
+fn nearest_coming(lamps: &[(DVec3, f64)], pos: DVec3, heading: f64, range: f32) -> Option<f32> {
+    let ahead = |h: f64| DVec2::new(h.to_radians().sin(), h.to_radians().cos());
+    let mine = ahead(heading);
+    lamps
+        .iter()
+        .filter_map(|(q, h)| {
+            let d = q.truncate() - pos.truncate();
+            let dist = d.length();
+            if !(5.0..range as f64).contains(&dist) {
+                return None;
+            }
+            let towards = d / dist;
+            (towards.dot(mine) > 0.8 && (-towards).dot(ahead(*h)) > 0.8).then_some(dist as f32)
+        })
+        .reduce(f32::min)
 }
 
 /// The driver of a random car: how fast, how close, how patient (see `AiState`).
@@ -4439,6 +4483,63 @@ impl Traffic {
         }
     }
 
+    /// How far ahead a driver at car `st`'s place sees the road (m, up to `need`): the line
+    /// from their eye (`SIGHT_EYE` over the road) to the roof of a car (`SIGHT_OBJECT`) on
+    /// the road there must pass no point of the road between more than `SIGHT_CORRIDOR` to
+    /// the side (the inside of a bend: trees, houses, a cutting) nor under the ground (a
+    /// crest). Along the car's planned way, and on from its end along the straightest road;
+    /// where the known road ends, so does the sight.
+    fn sight_along(&self, st: &AiState, need: f32) -> f32 {
+        let mut way = self.way_lanes(st, need + 20.0);
+        // (on from the plan's end: the road straight on)
+        let mut end = way.last().map(|&(l, d)| d + self.net.lanes[l].length()).unwrap_or(0.0);
+        while end < need && way.len() < 64 {
+            let Some(&(last, _)) = way.last() else { break };
+            let h_end = self.net.lanes[last].end_heading();
+            let next = self.net.lanes[last]
+                .next
+                .iter()
+                .copied()
+                .filter(|&n| n < self.net.lanes.len() && self.net.lanes[n].kind == LaneKind::Street)
+                .min_by(|&a, &b| {
+                    let turn = |n: usize| ((self.net.lanes[n].at(self.net.lanes[n].length().min(20.0)).1 - h_end + 540.0).rem_euclid(360.0) - 180.0).abs();
+                    turn(a).total_cmp(&turn(b))
+                });
+            let Some(n) = next else { break };
+            way.push((n, end));
+            end += self.net.lanes[n].length();
+        }
+        let point = |d: f32| -> Option<DVec3> {
+            if d > end {
+                return None;
+            }
+            let &(l, start) = way.iter().rev().find(|w| w.1 <= d)?;
+            Some(self.net.lanes[l].at((d - start).min(self.net.lanes[l].length())).0)
+        };
+        let Some(eye) = point(0.0).map(|p| p + DVec3::Z * SIGHT_EYE as f64) else { return 0.0 };
+        let mut road: Vec<(f32, DVec3)> = Vec::new();
+        let mut d = SIGHT_STEP;
+        while d <= need + 0.1 {
+            let Some(p) = point(d) else { return road.last().map(|r| r.0).unwrap_or(0.0) };
+            let target = p + DVec3::Z * SIGHT_OBJECT as f64;
+            let chord = (target - eye).truncate();
+            let len = chord.length().max(1.0);
+            let dir = chord / len;
+            for &(_, q) in &road {
+                let rel = (q - eye).truncate();
+                let along = rel.dot(dir);
+                let off = rel.perp_dot(dir).abs();
+                let line_z = eye.z + (target.z - eye.z) * (along / len).clamp(0.0, 1.0);
+                if off > SIGHT_CORRIDOR as f64 || q.z > line_z {
+                    return d - SIGHT_STEP;
+                }
+            }
+            road.push((d, p));
+            d += SIGHT_STEP;
+        }
+        need
+    }
+
     /// On a road with one lane each way: overtake something going slowly ahead - a lorry at
     /// tractor speed, a learner, the player's bus - on the other half of the road, once the
     /// driver has followed it for a while (an emergency vehicle at once; three drivers in ten
@@ -4481,12 +4582,16 @@ impl Traffic {
         let v_o = l.speed.max(0.0);
         // going slowly: well under what this driver wants and the limit, 60 km/h at most (an
         // emergency vehicle: anything slower than itself), moving (what stands is gone round
-        // by `plan_pass`), close ahead; out of town, or a crawler in town
+        // by `plan_pass`), close ahead; out of town, or a real crawler in town (a tractor's
+        // pace - a car slowing down in a town street is turning, parking or stopping)
         let slow = v_o > 1.5
             && v_o < want - if emergency { 2.0 } else { 5.0 }
             && (emergency || (v_o < 0.7 * limit && v_o < 60.0 / 3.6))
             && l.gap < 45.0
-            && (emergency || lane.speed_limit_kmh >= 60.0 || v_o < 0.45 * limit);
+            && (emergency || lane.speed_limit_kmh >= 60.0 || v_o < TOWN_CRAWL);
+        // ... and steadily so: one slowing down is about to turn off or stop, one speeding
+        // up (pulling away from a stop or a junction) will soon be fast enough
+        let steady = emergency || l.acc.abs() < STEADY_ACCEL;
         // (one turning off to the left, or a bus about to stop, is not overtaken)
         let turning = match who {
             // (a LAN player's bus by its own indicators)
@@ -4497,14 +4602,20 @@ impl Traffic {
             Some(j) if j < self.cars.len() => self.cars[j].state.blinker & 1 != 0 || (self.cars[j].bus.is_some() && !emergency) || self.cars[j].give_way > 0.0,
             _ => true,
         };
-        if !slow || turning {
+        if !slow || turning || !steady {
             self.cars[i].slow_lead = 0.0;
             return;
         }
         let seed = car.seed;
         self.cars[i].slow_lead += dt;
-        let overtaker = emergency || (seed >> 17) % 10 < 7;
-        let patience = if emergency { 0.5 } else { 4.0 + ((seed >> 9) % 5) as f32 };
+        // (half the drivers ever do; they follow a while first, longer when what is ahead is
+        // not much slower than the road allows, and longer in town)
+        let overtaker = emergency || (seed >> 17) % 10 < 5;
+        let patience = if emergency {
+            0.5
+        } else {
+            7.0 + ((seed >> 9) % 7) as f32 + if v_o > 0.55 * limit { 6.0 } else { 0.0 } + if lane.speed_limit_kmh < 60.0 { 6.0 } else { 0.0 }
+        };
         if !overtaker || self.cars[i].slow_lead < patience || self.time < self.cars[i].pass_retry {
             return;
         }
@@ -4576,7 +4687,7 @@ impl Traffic {
                 Some((gap2, v2, next, len2)) if gap2 < room && v2 < v_o + 3.0 => {
                     // a column moving along together: past that one too (an emergency vehicle
                     // past a longer one, standing or not)
-                    if column < if emergency { 6 } else { 3 } && (v2 > 1.5 || emergency) && gap2 < 30.0 && next.is_some() {
+                    if column < if emergency { 6 } else { 2 } && (v2 > 1.5 || emergency) && gap2 < 30.0 && next.is_some() {
                         obstacle_len += gap2 + len2;
                         last = next;
                         column += 1;
@@ -4592,7 +4703,7 @@ impl Traffic {
         // a road free of lights and turn lanes, and nearly straight, for all of it - and of
         // junctions, unless what it overtakes crawls (a lorry at tractor speed is overtaken
         // past a field track or a side road, as drivers do)
-        let crawler = v_o < 10.0;
+        let crawler = v_o < 7.0 && lane.speed_limit_kmh >= 60.0;
         // (as far on as the whole manoeuvre: the way the car looks along otherwise ends sooner)
         let long_way = self.way_lanes(st, pass_len + 30.0);
         let way: &[(usize, f32)] = if long_way.len() > way.len() { &long_way } else { way };
@@ -4610,17 +4721,46 @@ impl Traffic {
             self.cars[i].pass_retry = self.time + 2.0;
             return;
         }
+        // a solid centre line anywhere along the pass (`Lane::no_overtaking`): not here
+        if !emergency
+            && way.iter().any(|&(wl, start)| start < pass_len && start + self.net.lanes[wl].length() > 0.0 && self.net.lanes[wl].no_overtaking)
+        {
+            skip("a solid centre line along the pass");
+            self.cars[i].pass_retry = self.time + 3.0;
+            return;
+        }
         let heading_at = |d: f32| way.iter().rev().find(|w| w.1 <= d).map(|w| self.net.lanes[w.0].at((d - w.1).min(self.net.lanes[w.0].length())).1);
         let h_now = lane.at(st.s).1;
         let bend = [0.25, 0.5, 0.75, 1.0].iter().filter_map(|k| heading_at(pass_len * k)).map(|h| ((h - h_now + 540.0).rem_euclid(360.0) - 180.0).abs()).fold(0.0, f32::max);
-        if bend > 40.0 && !emergency {
+        if bend > MAX_PASS_BEND && !emergency {
             skip(&format!("the road bends {bend:.0} deg within the pass"));
             self.cars[i].pass_retry = self.time + 2.0;
             return;
         }
         let probe = Passing { lane: opp, side, until: until_d, block: l.gap, back, aborted: false, hold: 0.0, creep: false };
         let clear_d = probe.clear_at(car.half_width);
-        let t_need = pass_time(clear_d, 0.0, st, v_pass) + 2.0;
+        let t_need = pass_time(clear_d, 0.0, st, v_pass) + if emergency { 2.0 } else { PASS_MARGIN };
+        // A driver goes out only where they can see the road free: the whole pass and the way
+        // an oncoming car covers meanwhile at the limit - round no bend that hides it, over no
+        // crest, in no fog. (The oncoming check below knows every car; without this the
+        // drivers went out blind into bends and over hills because nobody happened to come.)
+        if !emergency {
+            let v_opp = self.net.lanes[opp].speed_limit_kmh.max(60.0) / 3.6;
+            let need = (pass_len + v_opp * t_need).min(SIGHT_MAX);
+            if self.conditions.visibility_m < need {
+                skip(&format!("cannot see {need:.0} m in the fog ({:.0} m)", self.conditions.visibility_m));
+                self.cars[i].pass_retry = self.time + 5.0;
+                return;
+            }
+            let seen = self.sight_along(st, need);
+            if seen < need {
+                skip(&format!("sees {seen:.0} m of the road ahead, the pass needs {need:.0} m"));
+                self.cars[i].pass_retry = self.time + 3.0;
+                return;
+            }
+        }
+        let car = &self.cars[i];
+        let st = &car.state;
         let from = os - st.front - clear_d - 2.0;
         let to = os + st.rear + 8.0;
         if self.parked.get(&opp).is_some_and(|l| l.iter().any(|&(ps, lat)| lat.abs() <= 1.6 && ps >= from && ps <= to)) {
@@ -5205,6 +5345,51 @@ impl Traffic {
             }
         }
         self.cars[i].amber = amber;
+        stop
+    }
+
+    /// The traffic lights on the player's way for the autopilot (`crate::autopilot`): `way`
+    /// the lanes ahead, each with how far ahead of the bus's front it starts, `v` its speed.
+    /// The distance to the line it has to stop at, or None; as a car decides it (`light_stop`):
+    /// through on yellow when too close to stop gently, never on red unless it cannot stop.
+    /// `amber`: the light it went through on yellow, kept by the caller.
+    pub(crate) fn player_light_stop(&self, way: &[(usize, f32)], v: f32, amber: &mut Option<(usize, usize)>) -> Option<f32> {
+        let mut stop = None;
+        for (k, &(_, gap)) in way.iter().enumerate().skip(1) {
+            if gap > 150.0 {
+                break;
+            }
+            let Some((c, li)) = self.light_at_entry(way, k) else { continue };
+            let Some(ctl) = self.lights.get(c) else { continue };
+            let comfortable = v * v / (2.0 * 1.2 * 1.4) + 1.0;
+            let possible = v * v / (2.0 * 3.5 * 0.8);
+            let go = match TrafficLightController::aspect(ctl.state(li)) {
+                Aspect::Green | Aspect::Dark => {
+                    if gap < 3.0 {
+                        *amber = Some((c, li));
+                    }
+                    true
+                }
+                Aspect::Yellow | Aspect::GreenYellow => {
+                    if *amber == Some((c, li)) || gap < comfortable {
+                        *amber = Some((c, li));
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Aspect::Red | Aspect::RedYellow => (*amber == Some((c, li)) && gap < comfortable) || gap < possible - 0.5,
+            };
+            if !go {
+                stop = Some(gap);
+                break;
+            }
+        }
+        if let Some(a) = *amber {
+            if !way.iter().skip(1).any(|&(l, _)| self.net.lanes[l].traffic_light == Some(a)) {
+                *amber = None;
+            }
+        }
         stop
     }
 
@@ -5962,9 +6147,15 @@ impl Traffic {
         let half_w = half_w + (widen * 0.5) as f32;
         let horizon = if self.player_priority { 5.0 } else { 1.5 };
         let way_dir = (st.way_point(&self.net, 3.0) - st.way_point(&self.net, 0.0)).truncate();
-        let ahead = player_reach_ahead(half_len, speed, horizon, fwd, way_dir);
+        // A bus coming the other way (not one with the right of way): seen where it is, and in
+        // the way only where the two would touch. Stretched straight ahead along its heading,
+        // on a bend its box lay across the car's own lane; and with 35 cm to spare counted as
+        // in the way, a bus a little over the middle line had every oncoming car brake hard
+        // for it - drivers pass a bus with a hand's breadth between the mirrors.
+        let oncoming = !self.player_priority && way_dir.length() > 0.5 && way_dir.normalize().dot(fwd) < -0.7;
+        let ahead = if oncoming { half_len as f64 } else { player_reach_ahead(half_len, speed, horizon, fwd, way_dir) };
         let behind = half_len as f64 + ((-speed).max(0.0) * horizon) as f64;
-        let wide = (half_w + half_width + 0.35) as f64;
+        let wide = (half_w + half_width + if oncoming { ONCOMING_CLEARANCE } else { 0.35 }) as f64;
         let margin = PLAYER_BOX_MARGIN as f64;
         let inside = |p: DVec3| in_player_box(p, centre, fwd, right, wide, ahead + margin, behind + margin);
         let look = (st.speed * st.speed / (2.0 * st.decel) + st.speed * 2.0 + 15.0)
@@ -6395,6 +6586,19 @@ impl Traffic {
                 (c.vehicle.position, DVec2::new(h.sin(), h.cos()), c.state.speed)
             })
             .collect();
+        // whose lamps a driver on a dark road sees coming (`ai_drivers::Input::meets`): every
+        // car's, the player's bus's and the LAN players' - where and which way they face
+        let lamps_coming: Vec<(DVec3, f64)> = if self.dark && self.driver_cfg.high_beam > 0.0 {
+            self.cars
+                .iter()
+                .filter(|c| !c.gone)
+                .map(|c| (c.vehicle.position, c.vehicle.heading))
+                .chain(self.player.iter().map(|p| (p.0, p.1)))
+                .chain(others.iter().map(|(_, b)| (b.0, b.1)))
+                .collect()
+        } else {
+            Vec::new()
+        };
         // the time each car is driven on this frame (one not driven: none)
         let mut step_dt = vec![0.0f32; self.cars.len()];
         for i in 0..self.cars.len() {
@@ -7368,11 +7572,19 @@ impl Traffic {
                     .filter(|(g, _)| (*g < 40.0 || car.state.speed.abs() < 0.5) && first(*g))
                     .map(|(_, who)| who)
                     .or(merge_courtesy);
-                crate::ai_drivers::Input { wanted, ahead: ahead_seen, held_ahead, dazzled, courtesy, ..Default::default() }
+                // a dark road outside the towns: the high beams, dipped for whoever comes
+                let dark_road = self.dark && lane.speed_limit_kmh >= self.driver_cfg.high_beam_kmh;
+                let meets = if dark_road { nearest_coming(&lamps_coming, pos, heading, self.driver_cfg.high_beam_dip_m) } else { None };
+                let follows = lead_now.map(|l| l.gap);
+                crate::ai_drivers::Input { wanted, ahead: ahead_seen, held_ahead, dazzled, courtesy, dark_road, meets, follows, ..Default::default() }
             } else {
                 Default::default()
             };
+            let high_before = car.shown.high_beam;
             let (lights, blinker) = drive_driver(car, &self.driver_cfg, &self.conditions, self.night, self.dark, dt, seen);
+            if self.debug_drivers && car.shown.high_beam != high_before {
+                log::info!("t={:.1}: car {} high beams {} (dark road {}, coming {:?} m, ahead {:?} m)", self.time, car.id, if car.shown.high_beam { "on" } else { "off" }, seen.dark_road, seen.meets.map(|m| m.round()), seen.follows.map(|m| m.round()));
+            }
             if let Some(why) = car.driver.as_deref_mut().and_then(|d| d.take_flash_reason()).filter(|_| self.debug_drivers) {
                 let at = match (seen.ahead, seen.courtesy) {
                     (_, Some(c)) if why == "courtesy" => format!(": lets {} go first", if c == u64::MAX { "the player's bus".to_string() } else if c >> 48 == 0xFFFF { format!("LAN player {}'s bus", c & 0xFFFF_FFFF) } else { format!("car {c}") }),
@@ -8936,6 +9148,25 @@ fn reset_light_runtime(ctl: &mut TrafficLightController, day_time: f64) {
     fresh.stops = ctl.stops.clone();
     fresh.start(ctl.time - ctl.offset as f64);
     *ctl = fresh;
+}
+
+#[cfg(test)]
+mod high_beam_tests {
+    use glam::DVec3;
+
+    /// A driver dips for a vehicle coming towards it down the road, not for one driving
+    /// away ahead, one behind or one beyond the range.
+    #[test]
+    fn a_driver_dips_for_what_comes_towards_it() {
+        let me = (DVec3::ZERO, 0.0);
+        let coming = [(DVec3::new(3.5, 200.0, 0.0), 180.0)];
+        assert_eq!(super::nearest_coming(&coming, me.0, me.1, 450.0).map(|d| d.round()), Some(200.0));
+        assert_eq!(super::nearest_coming(&[(DVec3::new(0.0, 120.0, 0.0), 0.0)], me.0, me.1, 450.0), None);
+        assert_eq!(super::nearest_coming(&[(DVec3::new(-3.5, -100.0, 0.0), 180.0)], me.0, me.1, 450.0), None);
+        assert_eq!(super::nearest_coming(&[(DVec3::new(3.5, 600.0, 0.0), 180.0)], me.0, me.1, 450.0), None);
+        // (itself, in the list as well)
+        assert_eq!(super::nearest_coming(&[(DVec3::ZERO, 0.0), coming[0]], me.0, me.1, 450.0).map(|d| d.round()), Some(200.0));
+    }
 }
 
 #[cfg(test)]

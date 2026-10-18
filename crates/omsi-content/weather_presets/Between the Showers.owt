@@ -1,0 +1,59 @@
+openOMSI weather preset. OMSI 2 reads it too: it passes the openomsi_preset and
+openomsi_sky blocks by. The second number under temp is the dew point (C).
+
+The openomsi_sky block is the sky of openOMSI's Enhanced graphics:
+  cumulus cover 0..0.85, grey deck 0..1 (closed from 0.85), cirrus veil (optical depth
+  0..2), haze (aerosol against an ordinary clear day: 0.4 crisp .. 3 sultry), its
+  Angstrom exponent (1.6 a deep blue sky .. 0.6 a milky one), the hazy layer's depth in
+  metres (0 = growing and settling with the day's sun), and (optional) the day's
+  exposure in stops (-1.5 the gloom of a storm .. 0 as the eye adapts).
+
+[openomsi_preset]
+1
+
+[name]
+Between the Showers
+
+[description]
+Big showery clouds marching over, blue sky between them, the roads still wet from the last burst.
+[end]
+
+[fog]
+30000
+1
+
+[wind]
+280
+8
+
+[temp]
+10
+5
+
+[press]
+1010
+
+[clouds]
+Cumulus 3
+800
+
+[precip]
+0
+32
+0
+-2
+0
+
+[groundwet]
+210
+255
+0
+
+[openomsi_sky]
+0.68
+0.15
+0
+0.6
+1.5
+0
+0

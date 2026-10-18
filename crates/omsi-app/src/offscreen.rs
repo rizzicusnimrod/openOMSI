@@ -392,6 +392,15 @@ pub(crate) fn run_offscreen(
     let spray_wind = Vec3::new(weather.wind.0.to_radians().sin(), weather.wind.0.to_radians().cos(), 0.0) * weather.wind.1 * puddles::GROUND_WIND;
     let mut demo = args.demo.as_deref().and_then(crate::demo::Demo::new);
     let mut events = crate::events::Events::new(&world.map_dir, crate::events::Config::from_settings(&settings), 0x5eed);
+    // `--view cinema` / `--view dashcam`: the cinematic camera's director and the dashcam's
+    // mount run every frame, their camera and lens make the snapshots
+    let lens_cfg = crate::cinema::Config::from_settings(&settings);
+    let mut cinema = crate::cinema::Cinema::default();
+    let mut dashcam = crate::cinema::Dashcam::default();
+    let mut lens_cam: Option<Camera> = None;
+    let mut lens_prev: Option<Camera> = None;
+    let mut lens_fx: Option<omsi_render::LensFx> = None;
+
     for i in 0..total_frames {
         let t_s = i as f32 * dt;
         if server {
@@ -495,6 +504,7 @@ pub(crate) fn run_offscreen(
                         .into_iter()
                         .filter(|p| p.extension().map(|e| e.eq_ignore_ascii_case("owt")).unwrap_or(false))
                         .filter_map(|p| p.file_name().map(|n| format!("Weather/{}", n.to_string_lossy())))
+                        .filter(|f| omsi_content::weather::is_preset(f))
                         .collect();
                     files.sort();
                     files.dedup();
@@ -834,6 +844,93 @@ pub(crate) fn run_offscreen(
                         controls.steering = (alpha / 30.0).clamp(-1.0, 1.0);
                         controls.throttle = ((kmh - speed) / 10.0).clamp(0.0, 1.0);
                         controls.brake = ((speed - kmh - 3.0) / 10.0).clamp(0.0, 1.0);
+                    }
+                }
+                // OMSI_AUTOPILOT_TEST=1: the autopilot (`crate::autopilot`) drives, switched on
+                // once the bus is ready to go (once), logged each second
+                if omsi_cfg::env::var_os("OMSI_AUTOPILOT_TEST").is_some() {
+                    static TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if t_s > 3.0 && !player.autopilot.on && crate::acc::ready(&player.vehicle).is_ok() && !TRIED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        player.autopilot.toggle(&player.vehicle, traffic.as_ref().map(|t| &t.net));
+                    }
+                    // (the duty's route, as the window's `autopilot_route` makes it)
+                    if let (Some((key, name)), Some(sch), Some(t)) = (crate::navigator::duty_parts(duty.as_ref()).3, schedule.as_ref(), traffic.as_ref()) {
+                        let ap = &mut player.autopilot;
+                        if ap.route_key != key || ap.route_gen != t.lanes_generation {
+                            ap.route = sch.trip_route(&world, t, &name).0;
+                            ap.route_key = key;
+                            ap.route_gen = t.lanes_generation;
+                        }
+                    }
+                    let others = crate::acc::outlines(player.vehicle.position, traffic.iter().flat_map(|t| t.cars.iter().map(|c| (&c.vehicle, c.vehicle.physics.speed))));
+                    let indicator = crate::lan::indicator(&player.vehicle);
+                    if let Some(t) = traffic.as_ref() {
+                        player.autopilot.plan(&player.vehicle, t, &others, indicator, dt);
+                    }
+                    // (its indicator, as `Player::tick` works it)
+                    if let Some(side) = player.autopilot.signal_cmd.take() {
+                        let key = match side {
+                            1 => "blinker_left_set",
+                            2 => "blinker_right_set",
+                            _ => "blinker_off",
+                        };
+                        player.action(key, true);
+                        player.action(key, false);
+                    }
+                    if let Some((st, th, br)) = player.autopilot.control(dt, &player.vehicle, 0.0, 0.0, controls.steering, false, None) {
+                        controls.steering = st;
+                        controls.throttle = th;
+                        controls.brake = br;
+                    }
+                    if i % 50 == 0 {
+                        let v = &player.vehicle;
+                        log::info!(
+                            "autopilot: t {:.1} s at ({:.1}, {:.1}) heading {:.0}, {:.1} km/h, steer {:+.2} throttle {:.2} brake {:.2}, lane {:?} off {:.2} m, route {}, indicator {}: {}",
+                            t_s,
+                            v.position.x,
+                            v.position.y,
+                            v.heading,
+                            v.physics.speed * 3.6,
+                            controls.steering,
+                            controls.throttle,
+                            controls.brake,
+                            player.autopilot.lane_now,
+                            player.autopilot.off_lane,
+                            player.autopilot.route.len(),
+                            crate::lan::indicator(v),
+                            player.autopilot.status().unwrap_or_else(|| "off".into())
+                        );
+                    }
+                }
+                // OMSI_ACC_TEST=<km/h> (with OMSI_AUTOPILOT steering): the adaptive cruise
+                // control works the pedals at that speed (`crate::acc`), logged each second
+                if let Some(kmh) = omsi_cfg::env::var("OMSI_ACC_TEST").ok().and_then(|v| v.parse::<f32>().ok()) {
+                    let acc = player.acc.get_or_insert_with(crate::acc::Acc::test_unit);
+                    // (switched on once the bus is ready to go - the engine running, the doors shut)
+                    if !acc.on && t_s > 3.0 && crate::acc::ready(&player.vehicle).is_ok() {
+                        if acc.set_kmh == 0.0 {
+                            acc.toggle(kmh);
+                        } else {
+                            acc.step(true, kmh);
+                        }
+                    }
+                    acc.lead = crate::acc::lead_around(&player.vehicle, traffic.iter().flat_map(|t| t.cars.iter().map(|c| (&c.vehicle, c.vehicle.physics.speed))));
+                    let speed = player.vehicle.physics.speed;
+                    let ready = crate::acc::ready(&player.vehicle);
+                    let (t, b) = acc.pedals(dt, speed, 0.0, 0.0, ready);
+                    controls.throttle = t;
+                    controls.brake = b;
+                    if i % 50 == 0 {
+                        log::info!(
+                            "acc: t {:.1} s, {:.1} km/h (set {:.0}, on {}), lead {}, throttle {:.2} brake {:.2}",
+                            i as f32 * dt,
+                            speed * 3.6,
+                            acc.set_kmh,
+                            acc.on,
+                            acc.lead.map(|l| format!("{:.1} m at {:.1} km/h", l.dist, l.speed * 3.6)).unwrap_or_else(|| "-".into()),
+                            t,
+                            b
+                        );
                     }
                 }
                 player.tick_auto_shift(dt, controls.throttle, controls.brake);
@@ -1176,6 +1273,27 @@ pub(crate) fn run_offscreen(
             vehicles.extend(remotes_off.remotes.iter().map(|(id, r)| (puddles::REMOTE_KEY | *id as u64, r.vehicle())));
             spray.frame(dt, &vehicles, eye, spray_wind, &|x, y| puddles::water_at(x, y, world.wet_road_at(x, y, spray_wet)));
         }
+        if let (Some(p), true) = (player.as_ref(), crate::cinema::lens_view(&args.view)) {
+            let aspect = w as f32 / h.max(1) as f32;
+            if let Some(probe) = renderer.depth_probe() {
+                cinema.seen(&probe, &crate::cinema::Subject::of(&p.vehicle));
+            }
+            lens_prev = lens_cam;
+            lens_cam = Some(if args.view == crate::cinema::CINEMA {
+                let subject = crate::cinema::Subject::of(&p.vehicle);
+                let net = traffic.as_ref().map(|t| &t.net);
+                let (route, at, heading) = (&p.autopilot.route, p.vehicle.position, p.vehicle.heading);
+                let way = || crate::cinema::road_ahead(net, at, heading, route, 300.0);
+                cinema.update(&subject, &world, &way, dt, aspect, &lens_cfg)
+            } else {
+                dashcam.update(&p.vehicle, dt, aspect, &lens_cfg)
+            });
+            lens_fx = Some(if args.view == crate::cinema::CINEMA {
+                cinema.lens(&crate::cinema::Subject::of(&p.vehicle), &lens_cfg, dt, i as u32)
+            } else {
+                dashcam.lens(&lens_cfg, dt, aspect, 0.0, i as u32)
+            });
+        }
         // mid-run snapshots (relative to the first overtake with --follow auto)
         let auto_base = match args.follow.as_deref() {
             Some("auto") => traffic.as_ref().and_then(|t| t.last_overtaker).map(|o| o.1),
@@ -1207,10 +1325,12 @@ pub(crate) fn run_offscreen(
                     p.sync_transforms(
                         &renderer,
                         &mut scene,
-                        matches!(args.view.as_str(), "driver" | "pax"),
+                        matches!(args.view.as_str(), "driver" | "pax" | crate::cinema::DASHCAM) || (args.view == crate::cinema::CINEMA && cinema.inside),
                     );
                     p.sync_driver(&renderer, &mut scene, 1.0 / 30.0, settings.driver, args.view == "driver");
-                    if args.cam.is_none() && args.view != "free" && args.follow.is_none() {
+                    if let Some(c) = lens_cam {
+                        cam = c;
+                    } else if args.cam.is_none() && args.view != "free" && args.follow.is_none() {
                         // the head turned as --look says, like the final image
                         let look = crate::player::driver_head_look(
                             look_of(args),
@@ -1283,9 +1403,31 @@ pub(crate) fn run_offscreen(
                 lighting.puddle_normal = puddle_surface.map_or(glam::Vec3::Z, |(_, n)| n);
                 lighting.puddle_parts = player.as_ref().into_iter().flat_map(|p| &p.vehicle.trailers)
                     .filter_map(|t| t.ty.def.bounding_box.map(|bb| (t.position, t.heading, bb))).take(3).collect();
+                lighting.saloon = player.as_ref().map(|p| crate::lights::saloon_lamps(&p.vehicle)).unwrap_or_default();
                 lighting.detail = settings.detail_textures;
                 world.finish_texture_upgrades(&renderer, &mut scene);
+                if let Some(mut fx) = lens_fx {
+                    // (the dashcam's sensor: by the night of this moment)
+                    if args.view == crate::cinema::DASHCAM && lighting.night > 0.3 {
+                        fx.shutter = 1.0 / 30.0 * lighting.night.min(1.0);
+                    }
+                    // (the frame before, small, for the motion blur to go from)
+                    if let Some(prev) = lens_prev {
+                        renderer.render_to_image(&mut scene, (w / 8).max(16), (h / 8).max(9), &prev, &lighting)?;
+                    }
+                    // (and the cinematic camera's look at whether it shows the bus)
+                    if args.view == crate::cinema::CINEMA {
+                        cinema.probe_now();
+                        fx.probe = true;
+                    }
+                    renderer.lens = Some(fx);
+                }
                 let pixels = renderer.render_to_image(&mut scene, w, h, &cam, &lighting)?;
+                renderer.lens = None;
+                if crate::cinema::lens_view(&args.view) {
+                    // (the dashcam's stamp, as the window burns it in)
+                    log::info!("lens view {}: {}", args.view, crate::cinema::stamp(&snap_clock, player.as_ref().map(|p| p.vehicle.physics.velocity_kmh()).unwrap_or(0.0)).0);
+                }
                 // (to the hundredth where the times asked for are that close: frame after frame)
                 let fine = (ts * 10.0 - (ts * 10.0).round()).abs() > 0.01;
                 let path = out.with_file_name(format!(
@@ -2536,6 +2678,7 @@ pub(crate) fn run_offscreen(
     lighting.puddle_normal = puddle_surface.map_or(glam::Vec3::Z, |(_, n)| n);
     lighting.puddle_parts = player_ref.as_ref().or(player.as_ref()).into_iter().flat_map(|p| &p.vehicle.trailers)
         .filter_map(|t| t.ty.def.bounding_box.map(|bb| (t.position, t.heading, bb))).take(3).collect();
+    lighting.saloon = player_ref.as_ref().or(player.as_ref()).map(|p| crate::lights::saloon_lamps(&p.vehicle)).unwrap_or_default();
     lighting.detail = settings.detail_textures;
     lighting.glass_wind = player_ref.as_ref().or(player.as_ref()).map(|p| crate::lights::vehicle_velocity(&p.vehicle)).unwrap_or_default();
     // OMSI_GLASS_WIND=<m/s>: the rain on the glass as the bus would meet it at that speed
