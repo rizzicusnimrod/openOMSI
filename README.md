@@ -99,6 +99,15 @@ plain openOMSI's releases. *Settings → Install updates without asking* skips t
 
 ### Driving
 
+* **Autopilot** (**Alt+A**, beta): it steers and drives the bus for you - it keeps to its lane,
+  at junctions follows your duty's route (without one, the way your indicator points, else
+  straight on), slows for speed limits and bends, keeps its distance to the traffic ahead, stops
+  at red lights, gives way and pulls out of bus bays. Bus stops, doors and tickets stay yours:
+  brake for a stop and the bus is yours again (so is it when you steer); Alt+A hands it back.
+  The throttle drives faster while you hold it. **Alt+Q** / **Alt+E** top speed down / up,
+  **Alt+D** the distance it keeps, **Alt+C** calm, normal or brisk; more on the *Driving* page
+  of the options. Still rough: tight turns are not checked against kerbs, and articulated buses
+  only roughly turn like one.
 * **Realistic steering forces for wheels:** the force feedback is worked out from the front axle
   like a real bus - tyre load, caster and trail, grip running out, the power steering taking
   most of it away at speed, heavy with the engine off. Switch *Realistic steering forces* off in

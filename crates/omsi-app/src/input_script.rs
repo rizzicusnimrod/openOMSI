@@ -3652,12 +3652,11 @@ impl App {
                 log::info!("interface {}", if self.ui_hidden.is_some() { "hidden" } else { "shown" });
             }
             "quicksave" => self.quick_save(),
-            // (the autopilot only where it is switched on, `secret_autopilot=1`)
-            "autopilot_toggle" if self.settings.secret_autopilot => self.toggle_autopilot(),
-            "autopilot_faster" if self.settings.secret_autopilot => self.autopilot_key("faster"),
-            "autopilot_slower" if self.settings.secret_autopilot => self.autopilot_key("slower"),
-            "autopilot_gap" if self.settings.secret_autopilot => self.autopilot_key("gap"),
-            "autopilot_style" if self.settings.secret_autopilot => self.autopilot_key("style"),
+            "autopilot_toggle" => self.toggle_autopilot(),
+            "autopilot_faster" => self.autopilot_key("faster"),
+            "autopilot_slower" => self.autopilot_key("slower"),
+            "autopilot_gap" => self.autopilot_key("gap"),
+            "autopilot_style" => self.autopilot_key("style"),
             "headlamp_range_up" => self.lamp_key(1, 0),
             "headlamp_range_down" => self.lamp_key(-1, 0),
             "dash_brighter" => self.lamp_key(0, 1),

@@ -85,12 +85,6 @@ pub(crate) fn fatal_dialog(title: &str, text: &str) {
 /// The `Inputs/keyboard.cfg` the game follows: the content folder's once the launcher has
 /// saved key bindings there, else the original installation's (never written) - or, where
 /// that has none, its `keyboard_reset.cfg`, the standard keys OMSI falls back to as well.
-/// The key list with the autopilot's keys where it is switched on (`secret_autopilot`), and
-/// without them where it is not.
-pub(crate) fn autopilot_keys(cfg: omsi_content::KeyboardCfg, on: bool) -> omsi_content::KeyboardCfg {
-    if on { cfg.with_autopilot_keys() } else { cfg.without_autopilot_keys() }
-}
-
 pub(crate) fn keyboard_cfg(root: &Path) -> PathBuf {
     if let Some(own) = content_dir().map(|c| c.join("Inputs/keyboard.cfg")).filter(|p| p.exists()) {
         return own;

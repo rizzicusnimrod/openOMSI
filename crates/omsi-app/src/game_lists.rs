@@ -333,13 +333,10 @@ pub(crate) fn keyboard_actions(app: &App) -> Vec<String> {
 }
 
 fn keyboard_cfg(app: &App) -> omsi_content::KeyboardCfg {
-    crate::startup::autopilot_keys(
-        omsi_content::KeyboardCfg::load(&crate::startup::keyboard_cfg(&app.args.root))
-            .unwrap_or_default()
-            .with_game_defaults()
-            .with_vr_defaults(),
-        app.settings.secret_autopilot,
-    )
+    omsi_content::KeyboardCfg::load(&crate::startup::keyboard_cfg(&app.args.root))
+        .unwrap_or_default()
+        .with_game_defaults()
+        .with_vr_defaults()
 }
 
 fn write_keyboard_cfg(_app: &App, cfg: &omsi_content::KeyboardCfg) -> Result<(), String> {
@@ -355,7 +352,7 @@ fn write_keyboard_cfg(_app: &App, cfg: &omsi_content::KeyboardCfg) -> Result<(),
 
 impl App {
     fn install_keyboard_cfg(&mut self, cfg: omsi_content::KeyboardCfg) {
-        let runtime = crate::startup::autopilot_keys(cfg.with_game_defaults().with_vr_defaults(), self.settings.secret_autopilot);
+        let runtime = cfg.with_game_defaults().with_vr_defaults();
         self.game_keys = runtime.game.clone();
         if let Some(p) = self.player.as_mut() {
             p.bindings = runtime.vehicles;
@@ -2625,20 +2622,18 @@ fn options_pages(app: &App) -> Vec<Page> {
             "Three physical screen projections; OpenXR takes priority",
         ),
     ];
-    // (the autopilot, a secret feature: its options only where `secret_autopilot=1`)
-    if s.secret_autopilot {
-        game.extend([
-            slider_row(app, "autopilot_style", "Autopilot driving style", "How firmly it takes bends, slows down and pulls away", &|v| (if v < 0.25 { "Calm" } else if v > 0.75 { "Brisk" } else { "Normal" }).to_string()),
-            slider_row(app, "autopilot_max_kmh", "Autopilot top speed", "The fastest it drives, whatever the speed limit says", &|v| format!("{v:.0} km/h")),
-            slider_row(app, "autopilot_limit_pct", "Autopilot speed against the limit", "100% drives at the speed limit, less stays under it", &|v| format!("{v:.0}%")),
-            slider_row(app, "autopilot_gap", "Autopilot gap to the vehicle ahead", "How far behind the vehicle ahead it keeps", &|v| (if v < 1.5 { "Short (1.2 s)" } else if v > 2.5 { "Long (2.5 s)" } else { "Normal (1.8 s)" }).to_string()),
-            slider_row(app, "autopilot_stop_gap", "Autopilot stops behind a vehicle at", "How close it stops behind a vehicle standing in front", &|v| format!("{v:.1} m")),
-            switch_row(app, "autopilot_indicate", "Autopilot uses the indicators", "It indicates before it turns off at a junction"),
-            switch_row(app, "autopilot_steer_takeover", "Steering takes over from the autopilot", "A steering key or the wheel takes the bus back (off: only the brake does)"),
-        ]
-        .into_iter()
-        .flatten());
-    }
+    // (the autopilot, Alt+A)
+    game.extend([
+        slider_row(app, "autopilot_style", "Autopilot driving style", "How firmly it takes bends, slows down and pulls away", &|v| (if v < 0.25 { "Calm" } else if v > 0.75 { "Brisk" } else { "Normal" }).to_string()),
+        slider_row(app, "autopilot_max_kmh", "Autopilot top speed", "The fastest it drives, whatever the speed limit says", &|v| format!("{v:.0} km/h")),
+        slider_row(app, "autopilot_limit_pct", "Autopilot speed against the limit", "100% drives at the speed limit, less stays under it", &|v| format!("{v:.0}%")),
+        slider_row(app, "autopilot_gap", "Autopilot gap to the vehicle ahead", "How far behind the vehicle ahead it keeps", &|v| (if v < 1.5 { "Short (1.2 s)" } else if v > 2.5 { "Long (2.5 s)" } else { "Normal (1.8 s)" }).to_string()),
+        slider_row(app, "autopilot_stop_gap", "Autopilot stops behind a vehicle at", "How close it stops behind a vehicle standing in front", &|v| format!("{v:.1} m")),
+        switch_row(app, "autopilot_indicate", "Autopilot uses the indicators", "It indicates before it turns off at a junction"),
+        switch_row(app, "autopilot_steer_takeover", "Steering takes over from the autopilot", "A steering key or the wheel takes the bus back (off: only the brake does)"),
+    ]
+    .into_iter()
+    .flatten());
     // (the rig's own settings only while it is on)
     let triple = vec![
         switch_row(

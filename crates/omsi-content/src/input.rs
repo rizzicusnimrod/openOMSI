@@ -148,24 +148,14 @@ impl KeyboardCfg {
                 self.game.push(KeyBinding { action: action.into(), scan_code, modifier: KEY_CTRL });
             }
         }
-        self
-    }
-
-    /// The autopilot's keys (openOMSI's; a secret feature, added only where it is switched
-    /// on), all on Alt (OMSI's own file has no Alt keys) round the left hand's home: A on and
-    /// off, Q and E its top speed down and up, D the distance it keeps, C its driving style.
-    pub fn with_autopilot_keys(mut self) -> Self {
+        // the autopilot's keys, all on Alt (OMSI's own file has no Alt keys) round the left
+        // hand's home: A on and off, Q and E its top speed down and up, D the distance it
+        // keeps, C its driving style
         for (action, scan_code) in [("autopilot_toggle", 30), ("autopilot_slower", 16), ("autopilot_faster", 18), ("autopilot_gap", 32), ("autopilot_style", 46)] {
             if !self.game.iter().any(|b| b.action.eq_ignore_ascii_case(action)) {
                 self.game.push(KeyBinding { action: action.into(), scan_code, modifier: KEY_ALT });
             }
         }
-        self
-    }
-
-    /// Without the autopilot's keys (a key file written while it was shown keeps them).
-    pub fn without_autopilot_keys(mut self) -> Self {
-        self.game.retain(|b| !b.action.to_ascii_lowercase().starts_with("autopilot_"));
         self
     }
 
@@ -314,6 +304,31 @@ mod tests {
         assert_eq!(key(&cfg, "gear_down"), vec![(208, KEY_CTRL)]);
         let cleared = KeyboardCfg { game: vec![KeyBinding { action: "gear_up".into(), scan_code: 0, modifier: 0 }], ..Default::default() }.with_game_defaults();
         assert_eq!(key(&cleared, "gear_up"), vec![(0, 0)]);
+    }
+
+    /// The autopilot's keys are everyone's (Alt+A, Alt+Q/E, Alt+D, Alt+C), and a key the
+    /// player moved or cleared stays as they left it.
+    #[test]
+    fn the_autopilot_keys_are_in_the_list_and_can_be_moved() {
+        let key = |c: &KeyboardCfg, a: &str| c.game.iter().filter(|b| b.action == a).map(|b| (b.scan_code, b.modifier)).collect::<Vec<_>>();
+        let cfg = KeyboardCfg::default().with_game_defaults().with_game_defaults();
+        for (action, scan_code) in [("autopilot_toggle", 30), ("autopilot_slower", 16), ("autopilot_faster", 18), ("autopilot_gap", 32), ("autopilot_style", 46)] {
+            assert_eq!(key(&cfg, action), vec![(scan_code, KEY_ALT)], "{action}");
+        }
+        let cleared = KeyboardCfg { game: vec![KeyBinding { action: "autopilot_toggle".into(), scan_code: 0, modifier: 0 }], ..Default::default() }.with_game_defaults();
+        assert_eq!(key(&cleared, "autopilot_toggle"), vec![(0, 0)]);
+    }
+
+    /// No two of openOMSI's own default keys are on the same key and modifiers.
+    #[test]
+    fn the_default_keys_do_not_share_a_key() {
+        let cfg = KeyboardCfg::default().with_game_defaults().with_vr_defaults();
+        let mut seen = std::collections::HashMap::new();
+        for b in cfg.game.iter().chain(cfg.vehicles.iter()).filter(|b| b.scan_code != 0) {
+            if let Some(other) = seen.insert((b.scan_code, b.chord()), &b.action) {
+                panic!("{} and {other} are both on key {} with modifiers {}", b.action, b.scan_code, b.chord());
+            }
+        }
     }
 
     #[test]
