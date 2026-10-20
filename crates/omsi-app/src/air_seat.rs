@@ -54,11 +54,16 @@ const STOP: f32 = 60.0;
 const BODY_FREQUENCY: f32 = 4.5;
 const BODY_DAMPING: f32 = 0.4;
 const BODY_TRAVEL: f32 = 0.02;
-/// The levelling valve: how fast it brings the seat back (1/s), how far the seat must be off
-/// before it acts (m), and how slowly it looks (s: it does not answer every bump).
+/// The levelling valve: how fast it brings the seat back (1/s), how far the seat must sit off
+/// on average before it opens and how near it must be to close (m), how slowly it looks (s:
+/// it does not answer every bump), how long the seat must stay off to one side before it opens
+/// (s: its delay, which a bob never outlasts) and how long it stays shut once closed (s).
 const LEVEL_RATE: f32 = 2.0;
-const LEVEL_DEADBAND: f32 = 0.003;
+const LEVEL_OPEN: f32 = 0.008;
+const LEVEL_CLOSE: f32 = 0.002;
 const LEVEL_LAG: f32 = 0.25;
+const LEVEL_DELAY: f32 = 0.45;
+const VALVE_REST: f32 = 2.0;
 /// The driver's height range (m), and how fast the air raises and lowers it (m/s).
 pub(crate) const HEIGHT_RANGE: f32 = 0.08;
 pub(crate) const RAISE_SPEED: f32 = 0.035;
@@ -97,6 +102,10 @@ pub(crate) struct AirSeat {
     /// What the valve sees of the seat's place (lagging behind it).
     seen: f32,
     valve_open: bool,
+    /// How long the valve stays shut yet (s), and how long the seat has been off to one side
+    /// (s, up positive).
+    valve_rest: f32,
+    off_for: f32,
     /// The upper body on the seat (m) and its speed.
     body: f32,
     body_vel: f32,
@@ -170,7 +179,18 @@ impl AirSeat {
             // the levelling valve: brings the seat back to its ride height, letting air in
             // (with air enough) or out
             self.seen += (self.pos - self.seen) * (h / LEVEL_LAG);
-            let open = self.seen.abs() > LEVEL_DEADBAND;
+            self.valve_rest = (self.valve_rest - h).max(0.0);
+            self.off_for = if self.seen.abs() <= LEVEL_OPEN {
+                0.0
+            } else if self.seen * self.off_for >= 0.0 {
+                self.off_for + h * self.seen.signum()
+            } else {
+                h * self.seen.signum()
+            };
+            let open = if self.valve_open { self.seen.abs() > LEVEL_CLOSE } else { self.valve_rest <= 0.0 && self.off_for.abs() >= LEVEL_DELAY };
+            if self.valve_open && !open {
+                self.valve_rest = VALVE_REST;
+            }
             if open {
                 let raise = self.seen < 0.0;
                 if !raise || pressure >= RAISE_PRESSURE {
@@ -410,6 +430,33 @@ mod tests {
             t.step(1.0 / 60.0, Kind::Normal, Input { floor: 1.5, height: 0.0, pressure: Some(4.0e5) });
         }
         assert!(t.pos < -0.008, "{}", t.pos);
+    }
+
+    #[test]
+    fn an_ordinary_rough_road_does_not_keep_the_valve_and_the_stops_busy() {
+        // a minute of driving on a worn road: the floor shakes at the seat's own bob and well
+        // above it, with a rattle of noise on top - the seat bobs, but the valve only acts on
+        // where the seat sits on average, and the stops are not reached
+        let mut s = AirSeat::default();
+        let mut noise = 0x1234_5678u32;
+        let (mut clicks, mut fills, mut releases, mut thumps) = (0, 0, 0, 0);
+        let (mut filling, mut releasing) = (false, false);
+        for i in 0..3600 {
+            let t = i as f32 / 60.0;
+            noise ^= noise << 13;
+            noise ^= noise >> 17;
+            noise ^= noise << 5;
+            let white = (noise as f32 / u32::MAX as f32) * 2.0 - 1.0;
+            let tau = std::f32::consts::TAU;
+            let floor = 1.0 * (t * 1.3 * tau).sin() + 0.8 * (t * 2.1 * tau + 1.0).sin() + 1.0 * (t * 3.7 * tau).sin() + 1.5 * (t * 11.0 * tau).sin() + 3.0 * white;
+            let o = s.step(1.0 / 60.0, Kind::Normal, input(floor));
+            clicks += o.click as u32;
+            fills += (o.filling && !filling) as u32;
+            releases += (o.releasing && !releasing) as u32;
+            thumps += (o.thump > 0.0) as u32;
+            (filling, releasing) = (o.filling, o.releasing);
+        }
+        assert!(clicks <= 3 && fills <= 3 && releases <= 3 && thumps == 0, "a minute: {clicks} clicks, {fills} fills, {releases} releases, {thumps} thumps");
     }
 
     #[test]
