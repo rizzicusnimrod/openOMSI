@@ -2575,6 +2575,10 @@ impl ApplicationHandler for App {
                 }
                 // the trees through the year
                 lighting.foliage = crate::foliage::season(self.clock.day_of_year.max(1) as u32, crate::startup::SEASONAL_FOLIAGE.load(std::sync::atomic::Ordering::Relaxed));
+                // the lanes whose tyre tracks show on drying and snowy roads
+                if let Some(cam) = self.camera.as_ref() {
+                    lighting.tracks = crate::tracks::for_frame(self.traffic.as_ref().map(|t| &t.net), cam.position);
+                }
                 lighting.wetness = omsi_cfg::env::var("OMSI_WETNESS")
                     .ok()
                     .and_then(|v| v.parse().ok())

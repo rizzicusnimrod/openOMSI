@@ -911,7 +911,13 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
     // (not under snow: a snowy road took the rain's gloss and the snow on it shone like
     // plastic in every headlight)
     let dry_snow = 1.0 - clamp(enh.weather.y, 0.0, 1.0);
-    let wet_road = camera.shadow.w * material.params2.z * outside * dry_snow;
+    // tyre tracks (tracks.wgsl, `enh.looks.w`): the wheel lines along the lanes - dry first
+    // on a drying road, pressed to grey slush in the snow - on the roads near the eye
+    var track = 0.0;
+    if (enh.looks.w > 0.5 && material.params2.z > 0.0 && !terrain && dist < TRACK_REACH && outside > 0.5) {
+        track = track_at(in.world.xy) * (1.0 - smoothstep(TRACK_REACH * 0.7, TRACK_REACH, dist));
+    }
+    let wet_road = camera.shadow.w * material.params2.z * outside * dry_snow * (1.0 - 0.7 * track * enh.track_info.y);
     let wet_any = camera.shadow.w * outside * select(0.35, 0.0, glass) * dry_snow;
     var puddle = 0.0;
     if (wet_road > 0.0) {
@@ -971,13 +977,21 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
     if (snow > 0.0) {
         let up = clamp(n.z, 0.0, 1.0);
         let ground = select(0.0, 1.0, terrain || material.params2.z > 0.0);
-        let cover = snow * clamp(max(ground, smoothstep(0.78, 0.95, up) * 0.8), 0.0, 1.0) * (0.55 + 0.35 * tex.a);
+        // (the tyres' lines in it are pressed down: less of the white, `track`)
+        let cover = snow * clamp(max(ground, smoothstep(0.78, 0.95, up) * 0.8), 0.0, 1.0) * (0.55 + 0.35 * tex.a) * (1.0 - 0.75 * track);
         albedo = mix(albedo, vec3<f32>(0.82, 0.84, 0.88), cover);
         ambient_albedo = mix(ambient_albedo, vec3<f32>(0.82, 0.84, 0.88), cover);
         // fresh snow is all but matte: it scatters the light and shows no highlight
         rough = mix(rough, 0.95, cover);
         f0 = mix(f0, vec3<f32>(0.02), cover);
         metal = metal * (1.0 - cover);
+        // the slush in the tracks: grey-brown, wet and a little glossy
+        let slush = track * snow;
+        if (slush > 0.0) {
+            albedo = mix(albedo, vec3<f32>(0.3, 0.29, 0.27), slush * 0.6);
+            ambient_albedo = mix(ambient_albedo, vec3<f32>(0.3, 0.29, 0.27), slush * 0.6);
+            rough = mix(rough, 0.3, slush);
+        }
     }
     // specular antialiasing: where the normal turns quickly across a pixel (a low-poly
     // bonnet close up, a curved body far away) the surface cannot reflect sharper than that

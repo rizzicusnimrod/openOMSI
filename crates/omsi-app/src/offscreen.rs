@@ -1396,6 +1396,7 @@ pub(crate) fn run_offscreen(
                 );
                 lightning.apply(&mut lighting);
                 lighting.foliage = crate::foliage::season(snap_clock.day_of_year.max(1) as u32, settings.seasonal_foliage);
+                lighting.tracks = crate::tracks::for_frame(traffic.as_ref().map(|t| &t.net), cam.position);
                 lighting.inside = player.as_ref().and_then(|p| {
                     p.vehicle
                         .ty

@@ -53,6 +53,7 @@ mod foliage;
 mod lightning;
 mod relief;
 mod retro;
+mod tracks;
 mod launcher;
 mod menu;
 mod mirror_hud;

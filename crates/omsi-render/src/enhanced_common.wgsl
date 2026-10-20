@@ -58,6 +58,10 @@ struct Enhanced {
     // phase two's looks (lib.rs `Looks::row`): x the vehicles' screen-space reflections,
     // y relief from the textures' brightness, z the sunlit cab, w tyre tracks (1 on each)
     looks: vec4<f32>,
+    // the lanes near the camera (lib.rs `tracks::rows`): xy one end of a segment of a lane's
+    // centre line, zw the other; `track_info.x` of them, y how far the road is drying
+    tracks: array<vec4<f32>, 48>,
+    track_info: vec4<f32>,
 };
 @group(0) @binding(11) var<uniform> enh: Enhanced;
 @group(0) @binding(13) var s_lin: sampler;

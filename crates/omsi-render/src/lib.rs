@@ -6,6 +6,7 @@ mod cab;
 mod looks;
 mod puddles;
 mod relief;
+pub mod tracks;
 mod rt;
 pub mod shafts;
 pub use looks::Looks;
@@ -363,6 +364,11 @@ struct EnhancedUniform {
     /// Phase two's looks (`Looks::row`): x the vehicles' screen-space reflections, y relief,
     /// z the sunlit cab, w tyre tracks.
     looks: [f32; 4],
+    /// The lanes' segments near the camera (`tracks::rows`): xy one end, zw the other,
+    /// render-origin relative.
+    tracks: [[f32; 4]; tracks::TRACK_SEGMENTS],
+    /// x how many of `tracks` there are, y how far the road is drying (`tracks::drying`).
+    track_info: [f32; 4],
 }
 
 /// A lightning flash as the picture shows it this frame (`Lighting::flash`, enhanced only):
@@ -1201,6 +1207,9 @@ pub struct Lighting {
     /// Phase two's looks of the enhanced picture (`looks.rs`): the vehicles' screen-space
     /// reflections, relief, the sunlit cab, tyre tracks, temporal anti-aliasing.
     pub looks: Looks,
+    /// The lanes of the road traffic near the camera (world, metres; each a segment of a
+    /// lane's centre line): the tyres' lines either side of them (`tracks.rs`).
+    pub tracks: Vec<[glam::DVec2; 2]>,
     pub fog_base: Option<f64>,
     pub envir_tint: [Vec3; 3],
     /// How bright an LED panel's dots burn (`MaterialExtra::led`; the settings' 16 levels
@@ -1298,6 +1307,7 @@ impl Default for Lighting {
             shafts: 2,
             ground_mist: 0.0,
             looks: Looks::default(),
+            tracks: Vec::new(),
             lamp_shadows: false,
             wetness: 0.0,
             snow: 0.0,
@@ -8192,6 +8202,12 @@ impl Renderer {
             }
             None => Vec3::ZERO,
         };
+        // the lanes the tyres run along (tracks.rs), the nearest to the camera
+        let (track_rows, track_count) = if lighting.looks.effective().road_tracks {
+            tracks::rows(&lighting.tracks, (ro + cam_rel.as_dvec3()).truncate(), ro)
+        } else {
+            ([[0.0; 4]; tracks::TRACK_SEGMENTS], 0)
+        };
         let u = EnhancedUniform {
             // (self-lit surfaces at their own brightness after the metering, see ExposureLog)
             exposure: [pre, 2f32.powf(-self.exposure_log.as_ref().map(|l| l.ev).unwrap_or(0.0)).clamp(0.7, 1.6), pre * WINDOW_RADIANCE, 1.6],
@@ -8277,6 +8293,8 @@ impl Renderer {
                 None => [[0.0; 4]; 2],
             },
             looks: lighting.looks.effective().row(),
+            tracks: track_rows,
+            track_info: [track_count as f32, tracks::drying(lighting.wetness, lighting.rain), 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.enh_buf, 0, bytemuck::bytes_of(&u));
@@ -13495,6 +13513,7 @@ fn scene_shader_text(gl: bool) -> String {
         include_str!("blockers.wgsl"),
         include_str!("relief.wgsl"),
         include_str!("cab.wgsl"),
+        include_str!("tracks.wgsl"),
         include_str!("enhanced.wgsl"),
     ]
     .join("\n");
