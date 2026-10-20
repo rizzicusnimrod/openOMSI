@@ -2010,6 +2010,8 @@ pub struct World {
     /// How much of each loaded tile's ground is grass (`crate::grass`); a tile with none has
     /// no entry.
     pub grass_maps: RwLock<HashMap<(i32, i32), Arc<crate::grass::GrassMap>>>,
+    /// Counts the tiles' surfaces as they come (the grass checks its clumps again).
+    pub surfaces_version: std::sync::atomic::AtomicU64,
     /// Per `[groundtex]`: whether grass grows on it and its colour (sRGB), worked out when
     /// first asked.
     grass_layers: std::sync::OnceLock<Vec<(bool, [u8; 3])>>,
@@ -2812,14 +2814,13 @@ impl World {
         Some(terrain.sample((x - key.0 as f64 * tile_size()) as f32, (y - key.1 as f64 * tile_size()) as f32) as f64)
     }
 
-    /// Whether something lies over the ground at a world point at height `z`: a road, a
-    /// pavement, a platform (`surfaces`) - no grass grows there.
+    /// Whether something lies over the ground at a world point at height `z` or close beside
+    /// it, or takes the ground away: a road, a pavement, a platform, a cutting, a terrain
+    /// hole (`TileSurface::no_grass`) - no grass grows there.
     pub(crate) fn ground_covered(&self, x: f64, y: f64, z: f64) -> bool {
         let key = tile_key(x, y);
         let (lx, ly) = ((x - key.0 as f64 * tile_size()) as f32, (y - key.1 as f64 * tile_size()) as f32);
-        self.surfaces.read().get(&key).is_some_and(|s| {
-            s.sample(lx, ly).is_some_and(|h| h as f64 > z - 1.0) || s.sample_road(lx, ly).is_some_and(|h| (h as f64 - z).abs() < 1.5)
-        })
+        self.surfaces.read().get(&key).is_some_and(|s| s.no_grass(lx, ly, z as f32))
     }
 
     /// The ground painting of one tile: `texture/map/<tile>.map.<layer>.dds`, one 8-bit
@@ -3023,6 +3024,7 @@ impl World {
             terrains: Arc::new(RwLock::new(HashMap::new())),
             surfaces: Arc::new(RwLock::new(HashMap::new())),
             grass_maps: RwLock::new(HashMap::new()),
+            surfaces_version: std::sync::atomic::AtomicU64::new(0),
             grass_layers: std::sync::OnceLock::new(),
             vehicle_gpu: Mutex::new(HashMap::new()),
             vehicle_textures: Default::default(),
@@ -5898,6 +5900,7 @@ impl World {
             wheel_meshes += wheels;
             // the wheel surfaces come and go with the tile (World::unload_tile)
             self.surfaces.write().insert((p.tx, p.ty), ts);
+            self.surfaces_version.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             holes += check.0;
             cells += check.1;
             where_.extend(check.2);

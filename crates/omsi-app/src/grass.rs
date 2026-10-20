@@ -170,6 +170,8 @@ pub(crate) fn cell_clumps(
 pub(crate) struct Field {
     cells: HashMap<(i32, i32), Vec<Clump>>,
     spacing: Option<f64>,
+    /// The roads' version the clumps were checked against (`Field::recheck`).
+    roads: u64,
     /// Cells filled this many per frame at most (the rest the next frames).
     pub per_frame: usize,
 }
@@ -231,6 +233,21 @@ impl Field {
             changed = true;
         }
         changed
+    }
+
+    /// The roads (`World::surfaces_version`) changed since the clumps were placed - a tile's
+    /// roads and pavements come after its ground: take away the clumps they now cover.
+    /// Whether any went.
+    pub(crate) fn recheck(&mut self, roads: u64, covered: &dyn Fn(f64, f64, f64) -> bool) -> bool {
+        if roads == self.roads {
+            return false;
+        }
+        self.roads = roads;
+        let before = self.len();
+        for c in self.cells.values_mut() {
+            c.retain(|c| !covered(c.pos.x, c.pos.y, c.pos.z));
+        }
+        self.len() != before
     }
 
     /// Every clump kept.
@@ -327,6 +344,26 @@ mod tests {
         assert!(!g.update(DVec3::ZERO, 2, &grass, &|_, _| None, &covered));
         assert!(g.update(DVec3::ZERO, 2, &grass, &ground, &covered));
         assert!(g.len() > 0);
+    }
+
+    #[test]
+    fn grass_placed_before_the_roads_loaded_goes_when_they_come() {
+        let mut f = Field::new();
+        let grass = |_: f64, _: f64| (1.0, 0u8);
+        let ground = |_: f64, _: f64| Some(0.0);
+        for _ in 0..100 {
+            f.update(DVec3::ZERO, 1, &grass, &ground, &|_, _, _| false);
+        }
+        let before = f.len();
+        // the same roads as when it was placed: nothing to do
+        assert!(!f.recheck(0, &|_, _, _| true));
+        assert_eq!(f.len(), before);
+        // the tile's roads arrive: a road along x < 4 m
+        let road = |x: f64, _: f64, _: f64| (0.0..4.0).contains(&x);
+        assert!(f.recheck(1, &road));
+        assert!(f.len() < before && f.len() > 0);
+        assert!(f.clumps().all(|c| !(0.0..4.0).contains(&c.pos.x)));
+        assert!(!f.recheck(1, &road));
     }
 
     #[test]

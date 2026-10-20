@@ -1321,6 +1321,32 @@ mod tests {
     }
 
     #[test]
+    fn no_grass_grows_under_a_road_at_its_edge_or_in_its_cutting_but_under_a_bridge_it_does() {
+        let quad = |x0: f32, x1: f32, z: f32| MeshData {
+            positions: vec![Vec3::new(x0, 50.0, z), Vec3::new(x1, 50.0, z), Vec3::new(x1, 250.0, z), Vec3::new(x0, 250.0, z)],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            ..Default::default()
+        };
+        let mut ts = TileSurface::new(512);
+        // a road on the ground, a road 3.5 m down in a cutting, a bridge 9 m up
+        ts.rasterize_kind(&quad(100.0, 107.0, 10.0), &Mat4::IDENTITY, DVec3::ZERO, 0, 0, true);
+        ts.rasterize_kind(&quad(150.0, 157.0, 6.5), &Mat4::IDENTITY, DVec3::ZERO, 0, 0, true);
+        ts.rasterize_kind(&quad(200.0, 207.0, 19.0), &Mat4::IDENTITY, DVec3::ZERO, 0, 0, true);
+        let bare = |x: f32| ts.no_grass(x, 150.0, 10.0);
+        assert!(bare(103.0) && bare(100.05) && bare(106.95), "on the road");
+        // (the texel whose middle lies just off the road still has asphalt over part of it)
+        assert!(bare(99.8) && bare(107.2), "at its edge");
+        assert!(!bare(98.5) && !bare(108.5), "a metre and a half off it");
+        assert!(bare(153.0), "in the cutting");
+        assert!(!bare(203.0), "under the bridge");
+        assert!(!bare(50.0), "a meadow");
+        // a terrain hole takes the ground away: nothing to grow on
+        let mut hole = TileSurface::new(512);
+        hole.rasterize_hole(&quad(10.0, 20.0, 9.0), &Mat4::IDENTITY, DVec3::ZERO, 0, 0);
+        assert!(hole.no_grass(15.0, 150.0, 10.0) && !hole.no_grass(30.0, 150.0, 10.0));
+    }
+
+    #[test]
     fn a_terrain_hole_is_cut_along_its_rim_not_by_texel() {
         let side = tile_size() as f32;
         let cell = side / 64.0;
@@ -2553,6 +2579,33 @@ impl TileSurface {
             best = Some(best.map_or(d, |b: f32| b.min(d)));
         }
         best.filter(|d| *d < OUTLINE_EDGE)
+    }
+
+    /// Whether no grass may grow at tile point (x, y) on ground at height `z`: a surface lies
+    /// over it or close beside it (the raster's texel is most of a metre, so its neighbours
+    /// within `GRASS_MARGIN` are asked too - a clump at the edge came up through the
+    /// asphalt), a road runs below it in a cutting the ground is cut away for, or a
+    /// `[terrainhole]` or an aligned spline takes the ground away. A bridge high over it does
+    /// not count.
+    pub fn no_grass(&self, x: f32, y: f32, z: f32) -> bool {
+        const GRASS_MARGIN: f32 = 0.6;
+        const ABOVE: f32 = 2.5;
+        const BELOW: f32 = 4.5;
+        if self.in_outlines(x, y) {
+            return true;
+        }
+        let side = tile_size() as f32;
+        let off = [-GRASS_MARGIN, 0.0, GRASS_MARGIN];
+        off.iter().any(|dx| {
+            off.iter().any(|dy| {
+                let (px, py) = (x + dx, y + dy);
+                if px < 0.0 || py < 0.0 || px >= side || py >= side {
+                    return false;
+                }
+                let k = self.texel(px, py);
+                self.hole_height(k).is_some() || (self.covered(k) && self.low_height(k) <= z + ABOVE && self.height(k) >= z - BELOW)
+            })
+        })
     }
 
     /// Is tile point (x, y) inside an aligned spline's outline?

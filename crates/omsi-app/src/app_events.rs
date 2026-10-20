@@ -2587,7 +2587,9 @@ impl ApplicationHandler for App {
                 // the grass round the camera, a few cells a frame as it moves on
                 if let (Some(world), Some(cam), Some(r)) = (self.world.as_ref(), self.camera.as_ref(), self.renderer.as_mut()) {
                     let density = if crate::grass::off() || !lighting.enhanced { 0 } else { crate::startup::GRASS.load(std::sync::atomic::Ordering::Relaxed).min(3) as u8 };
-                    if self.grass.update(cam.position, density, &|x, y| world.grass_at(x, y), &|x, y| world.bare_ground(x, y), &|x, y, z| world.ground_covered(x, y, z)) {
+                    let roads = world.surfaces_version.load(std::sync::atomic::Ordering::Relaxed);
+                    let rechecked = self.grass.recheck(roads, &|x, y, z| world.ground_covered(x, y, z));
+                    if self.grass.update(cam.position, density, &|x, y| world.grass_at(x, y), &|x, y| world.bare_ground(x, y), &|x, y, z| world.ground_covered(x, y, z)) | rechecked {
                         r.set_grass(self.grass.clumps().map(|c| omsi_render::GrassClump { pos: c.pos, seed: c.seed, size: c.size, colour: world.grass_colour(c.layer) }).collect());
                         if crate::grass::debug() {
                             log::info!("grass: {} clumps round the camera", self.grass.len());
