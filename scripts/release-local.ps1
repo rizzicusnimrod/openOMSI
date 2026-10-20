@@ -28,13 +28,20 @@ $env:OPENOMSI_VERSION = $version
 cmd /c scripts\build-windows.cmd
 if ($LASTEXITCODE) { throw "The build failed." }
 
+# The zip is put together in out\windows from the build's own files only: on this PC
+# dist\windows is also the folder the game is played from (settings, screenshots, mods...)
+Remove-Item -Recurse -Force out -ErrorAction SilentlyContinue
+$stage = "out/windows"
+New-Item -ItemType Directory -Force $stage | Out-Null
+Copy-Item dist/windows/openomsi.exe, dist/windows/openomsi-launcher.exe, dist/windows/steam_api64.dll $stage
+
 # DirectX 12's shader compiler and the Visual C++ runtime beside the program
 try {
     Remove-Item -Recurse -Force dxc -ErrorAction SilentlyContinue
     gh release download -R microsoft/DirectXShaderCompiler --pattern "dxc_*.zip" -D dxc
     $zip = Get-ChildItem dxc/*.zip | Where-Object { $_.Name -notmatch "linux|pdb" } | Select-Object -First 1
     Expand-Archive $zip.FullName -DestinationPath dxc/x
-    Copy-Item "dxc/x/bin/x64/dxcompiler.dll", "dxc/x/bin/x64/dxil.dll" dist/windows/
+    Copy-Item "dxc/x/bin/x64/dxcompiler.dll", "dxc/x/bin/x64/dxil.dll" $stage
 } catch { Write-Warning "No DirectX shader compiler: $_" }
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 $crt = $null
@@ -43,12 +50,10 @@ if (Test-Path $vswhere) {
     $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory -ErrorAction SilentlyContinue | Sort-Object FullName | Select-Object -Last 1
 }
 $dir = if ($crt) { $crt.FullName } else { "$env:SystemRoot\System32" }
-foreach ($dll in "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll") { Copy-Item (Join-Path $dir $dll) dist/windows/ }
+foreach ($dll in "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll") { Copy-Item (Join-Path $dir $dll) $stage }
 
-Remove-Item -Recurse -Force out -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force out | Out-Null
-Copy-Item README.md, LICENSE dist/windows/
-Compress-Archive -Path dist/windows/* -DestinationPath "out/openOMSI-$version-windows-x64.zip"
+Copy-Item README.md, LICENSE $stage
+Compress-Archive -Path "$stage/*" -DestinationPath "out/openOMSI-$version-windows-x64.zip"
 Compress-Archive -Path addons/TH_Wald/* -DestinationPath "out/TH_Wald-traffic-addon.zip"
 Compress-Archive -Path "addons/Budapest 181/*" -DestinationPath "out/Budapest181-traffic-addon.zip"
 Get-ChildItem out
@@ -58,7 +63,9 @@ git fetch --no-tags -q https://github.com/openOMSI-Project/openOMSI.git main
 $upstream = git rev-parse FETCH_HEAD
 git fetch --tags -q origin
 $prev = git tag -l "v*-custom" --sort=-creatordate | Where-Object { $_ -ne $tag } | Select-Object -First 1
-$repo = "https://github.com/rizzicusnimrod/openOMSI"
+# (-R everywhere: with no default set, gh picks the upstream remote for this clone)
+$slug = "rizzicusnimrod/openOMSI"
+$repo = "https://github.com/$slug"
 $notes = @(
     "**openOMSI $version** - a custom fork of [openOMSI](https://github.com/openOMSI-Project/openOMSI).",
     "",
@@ -87,12 +94,16 @@ git tag -f $tag HEAD
 git push -f origin $tag
 if ($LASTEXITCODE) { throw "Pushing the tag failed." }
 $zips = (Get-ChildItem out/*.zip).FullName
-gh release view $tag 2>$null | Out-Null
-if ($LASTEXITCODE -eq 0) {
-    gh release upload $tag @zips --clobber
-    gh release edit $tag --title "openOMSI $version" --notes-file out/notes.md --latest
+# (Windows PowerShell turns a redirected "release not found" into a stopping error under "Stop")
+$ErrorActionPreference = "Continue"
+gh release view $tag -R $slug 2>$null | Out-Null
+$exists = $LASTEXITCODE -eq 0
+$ErrorActionPreference = "Stop"
+if ($exists) {
+    gh release upload $tag @zips -R $slug --clobber
+    gh release edit $tag -R $slug --title "openOMSI $version" --notes-file out/notes.md --latest
 } else {
-    gh release create $tag @zips --verify-tag --latest --title "openOMSI $version" --notes-file out/notes.md
+    gh release create $tag @zips -R $slug --verify-tag --latest --title "openOMSI $version" --notes-file out/notes.md
 }
 if ($LASTEXITCODE) { throw "Publishing the release failed." }
 Write-Host "== Published: $repo/releases/tag/$tag" -ForegroundColor Green
