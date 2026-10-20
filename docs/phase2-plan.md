@@ -87,3 +87,25 @@ jump for the effort), then the rest.
   (`OMSI_PROFILE=1`, `OMSI_GPU_TIMERS=1`), not fps.
 - "Beautiful" is judged by the user in the game: before/after screenshots,
   then a live check.
+
+## Status (2026-10-20, cloud session): all seven built, not yet seen in the game
+
+Built test-first on Linux. Unit tests, shader validation for every module, and GPU tests on
+lavapipe (software Vulkan: `apt-get install mesa-vulkan-drivers`, then
+`cargo test -p omsi-render --lib -- --ignored`). Nothing has been looked at in the game
+or benchmarked on the RX 6700 XT yet: before/after shots and `OMSI_GPU_TIMERS=1` stage
+times are the next step. Each item has its setting and an `OMSI_NO_<X>` switch for A/B.
+
+| # | What was built | Switches | Known limits / follow-ups |
+|---|---|---|---|
+| 2.1 | `shafts.rs`: steps/reach per quality (16 steps / 180 m = old "Medium"); shafts sample the close cascade near the eye; a calm, damp dawn's ground mist (`ground_mist`: RH > 85 %, wind < 5 m/s, sun < 17°) in-scattered in the fog-lamps pass | `sun_shafts` 0-3, `OMSI_NO_SUN_SHAFTS`, `OMSI_NO_GROUND_MIST`, `OMSI_DEBUG_SUN_SHAFTS` | Mist strength (`MIST_MAX` 0.012/m, 12 m high) untuned; its extinction is not applied to the scene behind it |
+| 2.2 | Vehicle paint/chrome/panes write an SSR weight into the screen mask's r (< 0.5); the puddle rays also start there (receiver from the pane-depth); puddle passes run in dry weather when a reflective vehicle material is in view, the planar bus capture only when wet | `ssr`, `OMSI_NO_SSR` | **Not built:** the local reflection snapshot around the bus (what's off-screen still falls back to the sky probe). Enhanced+ unchanged (traces its own) |
+| 2.3 | `grass.cfg` picks grassy `[groundtex]`; per-tile 128² grass map from the base ground and paint masks; clumps in 16 m cells round the camera (not on roads/pavements); 3 crossed blades per clump, wind + gusts as the trees, faded 28-45 m, gone under snow, straw in autumn/winter | `grass` 0-3, `OMSI_NO_GRASS`, `OMSI_DEBUG_GRASS` | Not in the depth prepass (no SSAO/contact shadows on it, TAA reprojects the ground under it); grass can stand inside open buildings on grass ground; no grass in mirrors; GPU cost unmeasured (~25k clumps × 54 vertices at Normal) |
+| 2.4 | `relief.cfg` picks textures (cobbles, brick, stone, bark, gravel); `MaterialExtra::relief` (params2.w bit 64) on objects and splines; surface-gradient bump from luminance, faded 12-40 m | `relief`, `OMSI_NO_RELIEF`, `OMSI_DEBUG_RELIEF` | Terrain layers not covered (built by `add_terrain_*_material`); bright mortar reads as raised |
+| 2.5 | `taa.rs`: Halton jitter folded into the view shift; reprojection by the prepass depth with last frame's unjittered camera (floating origin folded in), the player's vehicle by its last transform; Catmull-Rom history, YCoCg variance clip, 10 % blend; result copied back into the HDR picture | `taa` (off by default), `OMSI_NO_TAA`, `OMSI_DEBUG_TAA` | AI cars still have no motion vectors (held by clipping, may soften); off for mirrors, VR, photo mode, stills (`render_to_image`), GLES. Try MSAA 2-4 + TAA against MSAA 8 |
+| 2.6 | `cab.rs`: cab surfaces lit through the windows from the side they face (sky SH, level), less facing up/down; same average as the old flat `cab_e`. Sun patches already came through the shadow maps (panes don't cast); a GPU test now guards that | `sunlit_cab`, `OMSI_NO_SUNLIT_CAB` | No bounce light from a sun patch |
+| 2.7 | Lane segments near the camera (traffic network, street lanes in use) into the Enhanced uniform (48 nearest); wheel lines ±0.85 m off each lane centre: drier on a drying road, grey slush in snow, within 60 m | `road_tracks`, `OMSI_NO_ROAD_TRACKS` | Lines follow the lanes, not real wheels (no dynamic tracks); Enhanced only |
+
+Settings for all of them are in the four places (settings.rs, launcher-core, in-game rows
+under "Nature" / "Light and surfaces", launcher page). The new uniform rows: `Enhanced` got
+`looks`, `tracks[48]`, `track_info`; `FogLampParams` got `shafts`; the new `TaaParams`.

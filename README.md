@@ -98,6 +98,24 @@ plain openOMSI's releases. *Settings → Install updates without asking* skips t
   struck.
 * **Rainbows** opposite a low sun when it rains or showers are about, and short **contact
   shadows** where kerbs, posts and wheels meet the ground (Enhanced graphics).
+* **Grass** grows on the verges and meadows and sways with the trees, fading out with the
+  distance (*Grass* in the Graphics settings: Off, Sparse, Normal, Dense). Which ground
+  textures grow it is listed in `grass.cfg`.
+
+### Light and surfaces (Enhanced graphics)
+
+* **Sun shafts** through the trees and between the houses, in fog and in a calm, damp
+  morning's ground mist (*Sun shafts*: Off, Low, Medium, High).
+* **Street reflections on vehicles:** bus paint, chrome and windows mirror the street and the
+  cars round about, not only the sky.
+* **Sunlit cab:** the cab is lit through its windows, brighter on the sunny side, and the
+  sun's patches move over the dash and the floor.
+* **Relief on old textures:** cobbles, brick, stone and bark get a soft relief made from their
+  own pictures up close (`relief.cfg` lists which).
+* **Tyre tracks:** on a drying road the wheel lines dry first; in snow they are pressed to
+  grey slush.
+* **Temporal anti-aliasing** (off by default) steadies shimmering branches and wires, so a
+  lower MSAA setting can look as smooth.
 
 ### AI traffic and drivers
 
