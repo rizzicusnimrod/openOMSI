@@ -1991,7 +1991,8 @@ fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static str, String
             if app.spanned {
                 log::info!("triple screen: the window spans three monitors, fullscreen is left alone");
             } else if let Some(w) = app.window.as_ref() {
-                w.set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
+                // (at the window size setting's resolution, `crate::display`)
+                crate::display::apply(w, on, crate::settings::Settings::resolution());
             }
             Some(("fullscreen", bit))
         }
@@ -2390,6 +2391,12 @@ pub(crate) fn dropdown_apply(app: &mut App, action: &str) {
             if let Some((key, value)) = arg.split_once(' ') {
                 remember_setting(key, value);
                 reload_settings(app);
+                // (the window takes its new size at once, see `crate::display`)
+                if key == "resolution" && !app.spanned {
+                    if let Some(w) = app.window.as_ref() {
+                        crate::display::apply(w, app.settings.fullscreen, crate::settings::Settings::resolution());
+                    }
+                }
             }
         }
         "preset" => {
@@ -2679,7 +2686,7 @@ fn options_pages(app: &App) -> Vec<Page> {
         .collect();
     let mut display = vec![
         switch_row(app, "fullscreen", "Fullscreen", "Switches the window between windowed and fullscreen"),
-        pick("resolution", "Window size", later),
+        pick("resolution", "Window size", "The window's size; in fullscreen the screen's resolution. Applies at once"),
         switch_row(
             app,
             "triple_screen",

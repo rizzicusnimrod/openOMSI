@@ -506,6 +506,11 @@ impl App {
                 }
             },
         };
+        // (fullscreen at the window size setting's resolution: the screen's own mode of it,
+        // `crate::display`)
+        if self.settings.fullscreen && !self.spanned && !gamescope && resolution.is_some() {
+            crate::display::apply(&window, true, resolution);
+        }
         let mut renderer = match window_renderer(&mut self.instance, &window, self.settings.render_options()) {
             Ok(r) => r,
             Err(e) => {

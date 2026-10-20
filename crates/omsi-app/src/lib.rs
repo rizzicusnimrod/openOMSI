@@ -40,6 +40,7 @@ mod game_controller_menu;
 mod rail_drive;
 mod driver;
 mod demo;
+mod display;
 mod events;
 mod export;
 mod hud;
