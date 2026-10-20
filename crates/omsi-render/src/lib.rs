@@ -3,6 +3,7 @@
 pub mod atmosphere;
 pub mod clouds;
 mod cab;
+mod grass;
 mod looks;
 mod puddles;
 mod relief;
@@ -10,6 +11,7 @@ pub mod tracks;
 mod rt;
 pub mod shafts;
 mod taa;
+pub use grass::GrassClump;
 pub use looks::Looks;
 mod triple;
 pub use triple::{panel_width, ScreenView, TripleScreen};
@@ -2645,6 +2647,8 @@ pub struct Renderer {
     /// Temporal anti-aliasing (`taa.rs`, the enhanced window's picture); not on GLES, which
     /// cannot read the depth prepass.
     taa: Option<taa::Taa>,
+    /// The grass round the camera (`grass.rs`, the enhanced main pass).
+    grass: Option<grass::Grass>,
     post: PostPipelines,
     post_layout: wgpu::BindGroupLayout,
     post_buf: wgpu::Buffer,
@@ -5249,6 +5253,7 @@ impl Renderer {
             puddles::Pipelines::new(&device, &shader, &camera_layout, &material_layout)
         });
         let taa = (!gl && !leave_out_enhanced).then(|| taa::Taa::new(&device));
+        let grass = (!gl && !leave_out_enhanced && !basic_pipelines()).then(|| grass::Grass::new(&device, &shader, &camera_layout, msaa));
         let rt = options.ray_tracing.then(|| rt::RayTracer::new(&device));
         Renderer {
             _device_poller: DevicePoller::start(&device),
@@ -5286,6 +5291,7 @@ impl Renderer {
             hdr_targets: HashMap::new(),
             puddles,
             taa,
+            grass,
             post,
             post_layout,
             post_buf,
@@ -7376,6 +7382,14 @@ impl Renderer {
     pub fn set_ordered(&self, scene: &mut Scene, instance: usize, on: bool) {
         if let Some(i) = scene.instances.get_mut(instance) {
             i.ordered = on;
+        }
+    }
+
+    /// The grass round the camera (enhanced; `grass.rs`): the clumps the app has placed,
+    /// drawn from the next frame on. None: no grass.
+    pub fn set_grass(&mut self, clumps: Vec<GrassClump>) {
+        if let Some(g) = self.grass.as_mut() {
+            g.set(clumps);
         }
     }
 
@@ -9886,6 +9900,11 @@ impl Renderer {
             }
         }
         let taa_jitter = taa_on.then(|| self.taa.as_mut().unwrap().next_jitter(width, height));
+        // the grass round the camera (grass.rs): the window's enhanced picture
+        let grass_on = enhanced && with_overlays && projection.is_none() && !second_eye && self.grass.as_ref().is_some_and(|g| g.any());
+        if grass_on {
+            self.grass.as_mut().unwrap().prepare(&self.device, &self.queue, ro, camera.position);
+        }
         let shift = shift.or(taa_jitter);
         let shifted = |m: Mat4| match shift {
             Some(s) => Mat4::from_cols(Vec4::X, Vec4::Y, Vec4::Z, Vec4::new(s[0], s[1], 0.0, 1.0)) * m,
@@ -11509,6 +11528,10 @@ impl Renderer {
                             pass.set_index_buffer(self.sky_mesh.1.slice(..), wgpu::IndexFormat::Uint32);
                             pass.draw_indexed(0..self.sky_mesh.2, 0, 0..1);
                         }
+                        // the grass, first after the sky (see grass.rs)
+                        if let Some(g) = self.grass.as_ref().filter(|_| grass_on) {
+                            g.draw(&mut pass);
+                        }
                     }
                     pass.execute_bundles(main_bundles[g * per_part..((g + 1) * per_part).min(main_bundles.len())].iter());
                 }
@@ -11580,6 +11603,10 @@ impl Renderer {
                 pass.set_vertex_buffer(0, self.sky_mesh.0.slice(..));
                 pass.set_index_buffer(self.sky_mesh.1.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.sky_mesh.2, 0, 0..1);
+            }
+            if let Some(g) = self.grass.as_ref().filter(|_| grass_on && parts == 1) {
+                g.draw(&mut pass);
+                pass.set_bind_group(0, scene.camera_bind_group.as_ref().unwrap(), &[]);
             }
             if main_bundles.is_empty() {
                 pass.set_bind_group(0, scene.camera_bind_group.as_ref().unwrap(), &[]);
@@ -13555,6 +13582,7 @@ fn scene_shader_text(gl: bool) -> String {
         include_str!("cab.wgsl"),
         include_str!("tracks.wgsl"),
         include_str!("enhanced.wgsl"),
+        include_str!("grass.wgsl"),
     ]
     .join("\n");
     // Enhanced+: the enhanced pass writes the reflections' surfaces as well (`GBUF_FORMAT`)

@@ -6,6 +6,9 @@
 //! gave. (The sun's own patches come through the panes by the shadow maps, which the panes
 //! do not cast into.) A CPU copy of the shader's math.
 
+// (the shader's math, copied here for the tests)
+#![cfg_attr(not(test), allow(dead_code))]
+
 use glam::Vec3;
 
 /// The share of a level window's light that a surface facing straight up (the dash's top,

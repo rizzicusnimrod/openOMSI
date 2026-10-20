@@ -54,11 +54,13 @@ impl Looks {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 /// The screen mask's r carries the bus's own screens as 1 (read as `step(0.5, r)`) and,
 /// below a half, how much of a vehicle's paint or glass reflection the screen-space rays
 /// replace: `VEHICLE_WEIGHT` times it (enhanced.wgsl `fs_enhanced`).
 pub(crate) const VEHICLE_WEIGHT: f32 = 0.49;
 
+#[cfg_attr(not(test), allow(dead_code))]
 /// What the main pass writes into r for a reflection weight `w` on a layer of `coverage`
 /// (the mask blends by it: a pane's weight is divided by its coverage beforehand, so that it
 /// lands whole) - the shader's `vehicle_mask`, here to be tested.
@@ -69,6 +71,7 @@ pub(crate) fn vehicle_mask(w: f32, coverage: f32) -> f32 {
     (w / coverage.max(1e-3)).clamp(0.0, 1.0) * VEHICLE_WEIGHT
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 /// The weight the rays read back from r (puddle_reflection.wgsl `vehicle_weight`): none on a
 /// screen.
 pub(crate) fn vehicle_weight(r: f32) -> f32 {

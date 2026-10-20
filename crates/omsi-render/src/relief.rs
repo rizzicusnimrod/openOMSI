@@ -5,6 +5,9 @@
 //! (Mikkelsen, "Bump Mapping Unparametrized Surfaces on the GPU", 2010). Which textures take
 //! it is the app's `relief.cfg` (`MaterialExtra::relief`). A CPU copy of the shader's math.
 
+// (the shader's math, copied here for the tests)
+#![cfg_attr(not(test), allow(dead_code))]
+
 use glam::Vec3;
 
 /// How deep the relief goes from black to white (m).

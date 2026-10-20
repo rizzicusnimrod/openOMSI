@@ -91,6 +91,8 @@ pub(crate) struct App {
     pub(crate) ambience: Option<ambience::Ambience>,
     /// Thunderstorms: the flashes and the thunder (`crate::lightning`).
     pub(crate) lightning: crate::lightning::Lightning,
+    /// The grass round the camera (`crate::grass`).
+    pub(crate) grass: crate::grass::Field,
     pub(crate) cursor: (f32, f32),
     /// Last Windows mouse position used for the unbounded VR cockpit pointer.
     #[cfg_attr(not(windows), allow(dead_code))]

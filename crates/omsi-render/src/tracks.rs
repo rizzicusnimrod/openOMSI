@@ -11,18 +11,22 @@ use glam::{DVec2, DVec3, Vec2};
 pub const TRACK_SEGMENTS: usize = 48;
 /// How far from the camera the tracks are drawn (m).
 pub const TRACK_REACH: f32 = 60.0;
+#[cfg_attr(not(test), allow(dead_code))]
 /// Where the wheel lines run either side of a lane's centre (m): a car's track is some 1.5
 /// m, a bus's 2.1 m - the lines of both together.
 const TRACK_HALF: f32 = 0.85;
+#[cfg_attr(not(test), allow(dead_code))]
 /// How wide a wheel line is (m, its half-width at half height).
 const TRACK_WIDTH: f32 = 0.3;
 
+#[cfg_attr(not(test), allow(dead_code))]
 /// How much of a wheel line a point `lateral` metres off a lane's centre is on (0..1).
 pub(crate) fn wheel_line(lateral: f32) -> f32 {
     let d = (lateral.abs() - TRACK_HALF) / TRACK_WIDTH;
     (1.0 - d * d).max(0.0).powi(2)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 /// How far a point is off the segment `a`-`b` sideways, and whether it lies along it.
 fn lateral(p: Vec2, a: Vec2, b: Vec2) -> Option<f32> {
     let ab = b - a;
@@ -37,6 +41,7 @@ fn lateral(p: Vec2, a: Vec2, b: Vec2) -> Option<f32> {
     Some((p - (a + ab * t)).length())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 /// The wheel lines at point `p` of the road, by the lanes' segments (render-origin
 /// relative, each `[a.x, a.y, b.x, b.y]`): the strongest line it is on.
 pub(crate) fn track_at(p: Vec2, segments: &[[f32; 4]]) -> f32 {

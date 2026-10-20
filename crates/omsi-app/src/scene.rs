@@ -2007,6 +2007,12 @@ pub struct World {
     pub terrains: Arc<RwLock<HashMap<(i32, i32), Arc<Terrain>>>>,
     /// Surface rasters (roads) by tile coordinate.
     pub surfaces: Arc<RwLock<HashMap<(i32, i32), Arc<TileSurface>>>>,
+    /// How much of each loaded tile's ground is grass (`crate::grass`); a tile with none has
+    /// no entry.
+    pub grass_maps: RwLock<HashMap<(i32, i32), Arc<crate::grass::GrassMap>>>,
+    /// Per `[groundtex]`: whether grass grows on it and its colour (sRGB), worked out when
+    /// first asked.
+    grass_layers: std::sync::OnceLock<Vec<(bool, [u8; 3])>>,
     /// GPU resources per vehicle type (by .bus path) and paint scheme, shared by AI vehicles.
     vehicle_gpu: Mutex<HashMap<VehicleKey, VehicleSet>>,
     /// GPU textures of vehicles by file: one bus spawned in twenty adverts used to upload
@@ -2735,6 +2741,87 @@ impl World {
         Some((height, normal))
     }
 
+    /// Per `[groundtex]`: whether grass grows on it (`grass.cfg`) and the mean colour of its
+    /// picture, for the grass's blades.
+    fn grass_layers(&self) -> &[(bool, [u8; 3])] {
+        self.grass_layers.get_or_init(|| {
+            let dirs = [self.root.as_path()];
+            self.global
+                .ground_textures
+                .iter()
+                .enumerate()
+                .map(|(k, gt)| {
+                    // (the first one is the ground everything starts as: OMSI's own grass
+                    // when the map names none)
+                    let name = if k == 0 && gt.texture.trim().is_empty() { "Texture/gras.bmp" } else { gt.texture.as_str() };
+                    let grows = crate::grass::grows_on(name);
+                    let colour = grows
+                        .then(|| omsi_texture::find_texture(name, &dirs))
+                        .flatten()
+                        .and_then(|p| omsi_texture::decode_file(&p).ok())
+                        .map(|img| {
+                            let n = (img.rgba.len() / 4).max(1) as u64;
+                            let sum = img.rgba.chunks_exact(4).fold([0u64; 3], |a, p| [a[0] + p[0] as u64, a[1] + p[1] as u64, a[2] + p[2] as u64]);
+                            [(sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8]
+                        })
+                        .unwrap_or([78, 104, 46]);
+                    if grows && crate::grass::debug() {
+                        log::info!("grass: grows on ground texture {k} ({name}), colour {colour:?}");
+                    }
+                    (grows, colour)
+                })
+                .collect()
+        })
+    }
+
+    /// Work out tile `key`'s grass map from its painted ground (`load_ground_paint`).
+    fn set_grass_map(&self, key: (i32, i32), paint: &[(usize, Image)]) {
+        let grassy: Vec<bool> = self.grass_layers().iter().map(|l| l.0).collect();
+        let alphas: Vec<(usize, Vec<u8>, usize, usize)> = paint
+            .iter()
+            .map(|(l, img)| (*l, img.rgba.chunks_exact(4).map(|p| p[3]).collect(), img.width as usize, img.height as usize))
+            .collect();
+        let refs: Vec<(usize, &[u8], usize, usize)> = alphas.iter().map(|(l, a, w, h)| (*l, a.as_slice(), *w, *h)).collect();
+        let mut maps = self.grass_maps.write();
+        match crate::grass::GrassMap::compose(&grassy, &refs) {
+            Some(m) => {
+                maps.insert(key, Arc::new(m));
+            }
+            None => {
+                maps.remove(&key);
+            }
+        }
+    }
+
+    /// How much of the ground is grass at a world point (0..1) and which ground texture.
+    pub(crate) fn grass_at(&self, x: f64, y: f64) -> (f32, u8) {
+        let key = tile_key(x, y);
+        self.grass_maps.read().get(&key).map_or((0.0, 0), |m| m.at(x - key.0 as f64 * tile_size(), y - key.1 as f64 * tile_size(), tile_size()))
+    }
+
+    /// The colour (sRGB) of the grass growing on ground texture `layer`.
+    pub(crate) fn grass_colour(&self, layer: u8) -> [u8; 3] {
+        self.grass_layers().get(layer as usize).map_or([78, 104, 46], |l| l.1)
+    }
+
+    /// The bare ground's height at a world point (the terrain, of a loaded tile).
+    pub(crate) fn bare_ground(&self, x: f64, y: f64) -> Option<f64> {
+        let key = tile_key(x, y);
+        let t = self.terrains.read();
+        let terrain = t.get(&key)?;
+        Some(terrain.sample((x - key.0 as f64 * tile_size()) as f32, (y - key.1 as f64 * tile_size()) as f32) as f64)
+    }
+
+    /// Whether something lies over the ground at a world point at height `z`: a road, a
+    /// pavement, a platform (`surfaces`) - no grass grows there.
+    pub(crate) fn ground_covered(&self, x: f64, y: f64, z: f64) -> bool {
+        let key = tile_key(x, y);
+        let (lx, ly) = ((x - key.0 as f64 * tile_size()) as f32, (y - key.1 as f64 * tile_size()) as f32);
+        self.surfaces.read().get(&key).is_some_and(|s| {
+            s.sample(lx, ly).is_some_and(|h| h as f64 > z - 1.0) || s.sample_road(lx, ly).is_some_and(|h| (h as f64 - z).abs() < 1.5)
+        })
+    }
+
     /// The ground painting of one tile: `texture/map/<tile>.map.<layer>.dds`, one 8-bit
     /// alpha mask per `[groundtex]` above the first that the editor's brush has touched on
     /// this tile. That is how OMSI puts asphalt under a car park, cobbles on a side street
@@ -2855,6 +2942,7 @@ impl World {
         crate::retro::set_map(&map_dir);
         crate::foliage::set_map(&map_dir);
         crate::relief::set_map(&map_dir);
+        crate::grass::set_map(&map_dir);
         log::info!(
             "tile size {:.1} m ({})",
             omsi_map::tile_size(),
@@ -2934,6 +3022,8 @@ impl World {
             object_dups: Mutex::new(HashMap::new()),
             terrains: Arc::new(RwLock::new(HashMap::new())),
             surfaces: Arc::new(RwLock::new(HashMap::new())),
+            grass_maps: RwLock::new(HashMap::new()),
+            grass_layers: std::sync::OnceLock::new(),
             vehicle_gpu: Mutex::new(HashMap::new()),
             vehicle_textures: Default::default(),
             vehicle_meshes: Default::default(),
@@ -5440,7 +5530,11 @@ impl World {
             ty,
             terrain: Some(build_terrain_mesh(terrain)),
             hole_walls: MeshData::default(),
-            paint_masks: self.load_ground_paint(&st.path),
+            paint_masks: {
+                let paint = self.load_ground_paint(&st.path);
+                self.set_grass_map((tx, ty), &paint);
+                paint
+            },
             paint: Vec::new(),
             wall_paint: Vec::new(),
             water: st.water,
@@ -8170,6 +8264,7 @@ impl World {
         self.drop_scripted(key, audio);
         self.terrains.write().remove(&key);
         self.surfaces.write().remove(&key);
+        self.grass_maps.write().remove(&key);
         freed > 0
     }
 

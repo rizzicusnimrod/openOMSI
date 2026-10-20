@@ -50,6 +50,7 @@ mod lan;
 mod lan_world;
 mod lights;
 mod foliage;
+mod grass;
 mod lightning;
 mod relief;
 mod retro;
@@ -525,6 +526,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         audio: None,
         ambience: None,
         lightning: crate::lightning::Lightning::new(),
+        grass: crate::grass::Field::new(),
         cursor: (0.0, 0.0),
         vr_cursor_physical: None,
         vr_cursor_warp_pending: None,

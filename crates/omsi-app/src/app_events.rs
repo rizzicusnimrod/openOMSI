@@ -2579,6 +2579,16 @@ impl ApplicationHandler for App {
                 if let Some(cam) = self.camera.as_ref() {
                     lighting.tracks = crate::tracks::for_frame(self.traffic.as_ref().map(|t| &t.net), cam.position);
                 }
+                // the grass round the camera, a few cells a frame as it moves on
+                if let (Some(world), Some(cam), Some(r)) = (self.world.as_ref(), self.camera.as_ref(), self.renderer.as_mut()) {
+                    let density = if crate::grass::off() || !lighting.enhanced { 0 } else { crate::startup::GRASS.load(std::sync::atomic::Ordering::Relaxed).min(3) as u8 };
+                    if self.grass.update(cam.position, density, &|x, y| world.grass_at(x, y), &|x, y| world.bare_ground(x, y), &|x, y, z| world.ground_covered(x, y, z)) {
+                        r.set_grass(self.grass.clumps().map(|c| omsi_render::GrassClump { pos: c.pos, seed: c.seed, size: c.size, colour: world.grass_colour(c.layer) }).collect());
+                        if crate::grass::debug() {
+                            log::info!("grass: {} clumps round the camera", self.grass.len());
+                        }
+                    }
+                }
                 lighting.wetness = omsi_cfg::env::var("OMSI_WETNESS")
                     .ok()
                     .and_then(|v| v.parse().ok())

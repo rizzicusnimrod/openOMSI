@@ -394,6 +394,9 @@ pub(crate) fn run_offscreen(
     let mut events = crate::events::Events::new(&world.map_dir, crate::events::Config::from_settings(&settings), 0x5eed);
     // a thunderstorm's flashes (`OMSI_LIGHTNING_AT` puts one where a snapshot is taken)
     let mut lightning = crate::lightning::Lightning::new();
+    // the grass round the camera (a snapshot takes all of it at once)
+    let mut grass_field = crate::grass::Field::new();
+    grass_field.per_frame = usize::MAX;
     // `--view cinema` / `--view dashcam`: the cinematic camera's director and the dashcam's
     // mount run every frame, their camera and lens make the snapshots
     let lens_cfg = crate::cinema::Config::from_settings(&settings);
@@ -1397,6 +1400,10 @@ pub(crate) fn run_offscreen(
                 lightning.apply(&mut lighting);
                 lighting.foliage = crate::foliage::season(snap_clock.day_of_year.max(1) as u32, settings.seasonal_foliage);
                 lighting.tracks = crate::tracks::for_frame(traffic.as_ref().map(|t| &t.net), cam.position);
+                let density = if crate::grass::off() || !lighting.enhanced { 0 } else { settings.grass.min(3) };
+                if grass_field.update(cam.position, density, &|x, y| world.grass_at(x, y), &|x, y| world.bare_ground(x, y), &|x, y, z| world.ground_covered(x, y, z)) {
+                    renderer.set_grass(grass_field.clumps().map(|c| omsi_render::GrassClump { pos: c.pos, seed: c.seed, size: c.size, colour: world.grass_colour(c.layer) }).collect());
+                }
                 lighting.inside = player.as_ref().and_then(|p| {
                     p.vehicle
                         .ty

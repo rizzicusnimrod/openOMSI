@@ -46,17 +46,20 @@ pub(crate) fn cut(prev_cam: DVec3, prev_fwd: Vec3, cam: DVec3, fwd: Vec3) -> boo
     prev_cam.distance(cam) > 10.0 || prev_fwd.normalize_or_zero().dot(fwd.normalize_or_zero()) < 0.866
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 /// A point's place in a vehicle's frame and back (taa.wgsl `to_vehicle`, `from_vehicle`;
 /// the heading in radians, as shader.wgsl `inside_vehicle` takes it).
 fn to_vehicle(d: Vec3, heading: f32) -> Vec3 {
     let (s, c) = heading.sin_cos();
     Vec3::new(d.x * c - d.y * s, d.x * s + d.y * c, d.z)
 }
+#[cfg_attr(not(test), allow(dead_code))]
 fn from_vehicle(l: Vec3, heading: f32) -> Vec3 {
     let (s, c) = heading.sin_cos();
     Vec3::new(l.x * c + l.y * s, -l.x * s + l.y * c, l.z)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 /// Where a point of the vehicle (origin and heading now and then) was the frame before
 /// (taa.wgsl `then_point`, without its box test).
 pub(crate) fn then_point(p: Vec3, now: (Vec3, f32), then: (Vec3, f32)) -> Vec3 {
