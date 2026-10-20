@@ -3,9 +3,19 @@
 # zips the traffic add-ons, tags the commit v<MAJOR.MINOR.COMMIT>-custom and publishes the
 # release with its notes. Needs what build-windows.cmd needs, plus the GitHub CLI signed in
 # to the fork (winget install GitHub.cli; gh auth login).
-#   powershell -ExecutionPolicy Bypass -File scripts\release-local.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts\release-local.ps1 [-NotesFile whats-new.md]
+param(
+    # What's new, written for players: "### " groups of "- " items, as the launcher's update
+    # offer lists them (its first 12). Without it the notes list the commits since the last
+    # release, less the [skip ci] ones.
+    # (not $Notes: PowerShell's names ignore case, and $notes is the text put together below)
+    [string]$NotesFile
+)
 $ErrorActionPreference = "Stop"
+if ($NotesFile) { $NotesFile = (Resolve-Path $NotesFile).Path }
 Set-Location (Join-Path $PSScriptRoot "..")
+# (git's output is UTF-8; Windows PowerShell would read it in the console's code page)
+[Console]::OutputEncoding = New-Object Text.UTF8Encoding $false
 
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     throw "Install the GitHub CLI (winget install GitHub.cli), run 'gh auth login', then run this again."
@@ -66,28 +76,30 @@ $prev = git tag -l "v*-custom" --sort=-creatordate | Where-Object { $_ -ne $tag 
 # (-R everywhere: with no default set, gh picks the upstream remote for this clone)
 $slug = "rizzicusnimrod/openOMSI"
 $repo = "https://github.com/$slug"
-$notes = @(
-    "**openOMSI $version** - a custom fork of [openOMSI](https://github.com/openOMSI-Project/openOMSI).",
+# What's new first, then how to install
+$notes = @("**openOMSI $version**: a custom fork of [openOMSI](https://github.com/openOMSI-Project/openOMSI).", "")
+if ($NotesFile) {
+    $notes += [IO.File]::ReadAllLines($NotesFile)
+} elseif ($prev) {
+    $notes += "### New since $prev", ""
+    # (not the commits that only touch docs, scripts or CI)
+    $notes += git log --no-merges --invert-grep --fixed-strings --grep="[skip ci]" --grep="[skip actions]" --format="- %s" "$prev..HEAD" "^$upstream" -- . ":!*.md" ":!docs" ":!scripts" ":!.github" ":!.claude" |
+        ForEach-Object { $_ -replace '\s*\(phase [^)]*\)$', '' }
+}
+$notes += @(
     "",
     "### Install",
     "",
-    "You need **OMSI 2** (Steam) installed: openOMSI uses its maps, buses and sounds.",
+    "You need **OMSI 2** (Steam): openOMSI uses its maps, buses and sounds.",
     "",
-    "1. Download ``openOMSI-$version-windows-x64.zip``, unzip it into a folder of its own and start ``openomsi.exe``.",
-    "2. Optional: ``TH_Wald-traffic-addon.zip`` gives the Thüringer Wald map realistic traffic by the hour, weekday and school holidays (1995-2003). Unzip it into the OMSI 2 folder (``...\steamapps\common\OMSI 2``); it replaces ``maps\TH_Wald\unsched_trafficdens.txt`` and ``Holidays*.txt``, so back those up first if you want to go back. It also adds ``maps\TH_Wald\retroreflective.cfg`` (which signs shine back in the headlights).",
-    "3. Optional: ``Budapest181-traffic-addon.zip`` gives the Budapest 181 map traffic by the hour, weekday and school holidays (the map itself keeps it the same day and night). Unzip it into the OMSI 2 folder; it adds ``maps\Budapest 181\unsched_trafficdens.txt``.",
+    "1. **Already playing an older version?** The launcher offers this update by itself.",
+    "2. **New:** download ``openOMSI-$version-windows-x64.zip``, unzip it into a folder of its own and start ``openomsi.exe``.",
+    "3. **Optional traffic add-ons**, unzipped into the OMSI 2 folder (``...\steamapps\common\OMSI 2``):",
+    "   - ``TH_Wald-traffic-addon.zip``: Thüringer Wald traffic by the hour, weekday and school holidays. It replaces ``maps\TH_Wald\unsched_trafficdens.txt`` and ``Holidays*.txt``, so back those up first.",
+    "   - ``Budapest181-traffic-addon.zip``: Budapest 181 traffic by the hour, weekday and school holidays.",
     "",
-    "For multiplayer, everyone should run the same version. Newer versions: [the latest release]($repo/releases/latest).",
-    ""
+    "For multiplayer, everyone needs the same version. Older versions: [all releases]($repo/releases)."
 )
-if ($prev) {
-    $notes += "### New since $prev", ""
-    $notes += git log --no-merges --format="- %s" "$prev..HEAD" "^$upstream"
-    $notes += ""
-}
-$notes += "<details><summary>Everything this fork changes</summary>", ""
-$notes += git log --no-merges --format="- %s" "$upstream..HEAD"
-$notes += "", "</details>"
 [IO.File]::WriteAllLines("$PWD\out\notes.md", $notes, (New-Object Text.UTF8Encoding $false))
 
 git tag -f $tag HEAD
