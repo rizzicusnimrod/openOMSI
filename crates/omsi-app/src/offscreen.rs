@@ -1402,6 +1402,9 @@ pub(crate) fn run_offscreen(
                 lighting.tracks = crate::tracks::for_frame(traffic.as_ref().map(|t| &t.net), cam.position);
                 let density = if crate::grass::off() || !lighting.enhanced { 0 } else { settings.grass.min(3) };
                 let roads = world.surfaces_version.load(std::sync::atomic::Ordering::Relaxed);
+                let grass_far = settings.grass_distance as f32;
+                grass_field.reach = grass_far as f64 + 3.0;
+                renderer.set_grass_distance(grass_far);
                 let rechecked = grass_field.recheck(roads, &|x, y, z| world.ground_covered(x, y, z));
                 if grass_field.update(cam.position, density, &|x, y| world.grass_at(x, y), &|x, y| world.bare_ground(x, y), &|x, y, z| world.ground_covered(x, y, z)) | rechecked {
                     renderer.set_grass(grass_field.clumps().map(|c| omsi_render::GrassClump { pos: c.pos, seed: c.seed, size: c.size, colour: world.grass_colour(c.layer) }).collect());

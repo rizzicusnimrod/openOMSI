@@ -99,6 +99,7 @@ pub const OPTIONS: &[PageDef] = &[
             sec("Dashcam (Ctrl+F1)", &[
                 it("dashcam_fov", "Lens", "How wide the dashcam sees, across the picture's diagonal"),
                 it("dashcam_stamp", "Date, time and speed", "The dashcam's stamp in the picture"),
+                it("dashcam_lines", "Resolution", "The dashcam's picture, 240p to 1440p"),
                 it("dashcam_quality", "Camera quality", "A cheap camera has more noise, colour fringes and smear"),
             ]),
         ],
@@ -285,6 +286,7 @@ pub const OPTIONS: &[PageDef] = &[
                 it("seasonal_foliage", "Trees through the year", "Autumn colours, bare winter trees and fresh spring green"),
                 it("lightning", "Lightning and thunder", "Thunderstorms flash and rumble"),
                 it("grass", "Grass", "Grass on the verges and fields, swaying in the wind"),
+                it("grass_distance", "Grass distance", "How far away grass is drawn; it thins out beyond 45 m"),
             ]),
             sec("Light and surfaces", &[
                 it("sun_shafts", "Sun shafts", "Beams of sunlight through trees and between houses"),

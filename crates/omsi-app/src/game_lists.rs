@@ -1118,6 +1118,8 @@ fn steps_of(verb: &str) -> Option<Vec<f32>> {
         "night_brightness" => (2..=40).map(|v| v as f32 * 5.0).collect(),
         "wind_sway" => (0..=20).map(|v| v as f32 * 10.0).collect(),
         "sun_shafts" | "grass" => vec![0.0, 1.0, 2.0, 3.0],
+        "grass_distance" => vec![45.0, 80.0, 120.0, 180.0],
+        "dashcam_lines" => vec![240.0, 360.0, 480.0, 720.0, 1080.0, 1440.0],
         "headlamp_range" => (-4..=2).map(|v| v as f32).collect(),
         "dash_dimmer" => (2..=15).map(|v| v as f32 * 10.0).collect(),
         "autopilot_style" => vec![0.0, 0.5, 1.0],
@@ -1277,6 +1279,8 @@ fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
         "wind_sway" => s.wind_sway as f32,
         "sun_shafts" => s.sun_shafts as f32,
         "grass" => s.grass as f32,
+        "grass_distance" => s.grass_distance as f32,
+        "dashcam_lines" => s.dashcam_lines as f32,
         "headlamp_range" => s.headlamp_range as f32,
         "dash_dimmer" => s.dash_dimmer as f32,
         "autopilot_style" => s.autopilot_style,
@@ -1398,6 +1402,15 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
             app.settings.grass = v.round().clamp(0.0, 3.0) as u8;
             crate::startup::nature_settings(&app.settings);
             Some(("grass", app.settings.grass.to_string()))
+        }
+        "grass_distance" => {
+            app.settings.grass_distance = v.round().clamp(45.0, 180.0) as u16;
+            crate::startup::nature_settings(&app.settings);
+            Some(("grass_distance", app.settings.grass_distance.to_string()))
+        }
+        "dashcam_lines" => {
+            app.settings.dashcam_lines = v.round().clamp(240.0, 1440.0) as u16;
+            Some(("dashcam_lines", app.settings.dashcam_lines.to_string()))
         }
         "headlamp_range" => {
             app.settings.headlamp_range = v.round().clamp(-4.0, 2.0) as i8;
@@ -2629,6 +2642,7 @@ fn options_pages(app: &App) -> Vec<Page> {
         slider_row(app, "cinematic_streaks", "Cinematic camera: light streaks", "The streaks through headlights and lamps", &|v| if v <= 0.0 { "Off".to_string() } else { format!("{:.0}%", v * 100.0) }),
         slider_row(app, "dashcam_fov", "Dashcam: lens", "How wide the dashcam sees, across the picture's diagonal", &|v| format!("{v:.0}°")),
         switch_row(app, "dashcam_stamp", "Dashcam: date, time and speed", "The dashcam's stamp in the picture"),
+        slider_row(app, "dashcam_lines", "Dashcam: resolution", "The dashcam's picture: fewer lines look softer, like real footage scaled up", &|v| format!("{}p", v as i64)),
         slider_row(app, "dashcam_quality", "Dashcam: camera quality", "A cheap camera has more noise, colour fringes and smear", &|v| (if v < 0.25 { "Cheap" } else if v > 0.75 { "Good" } else { "Normal" }).to_string()),
         switch_row(app, "coll_objects", "Collisions with objects", "Enables/disables collisions with objects such as buildings, streetlights, etc."),
         switch_row(app, "coll_vehicles", "Collisions with vehicles", "Enables/Disables Collisions with Other Vehicles"),
@@ -2677,6 +2691,7 @@ fn options_pages(app: &App) -> Vec<Page> {
         slider_row(app, "sun_shafts", "Sun shafts", "Beams of sunlight through the trees and between the houses, in fog and a calm morning's mist", &quality_name),
         switch_row(app, "ssr", "Street reflections on vehicles", "Bus paint and windows mirror the street and the cars round about, not only the sky"),
         slider_row(app, "grass", "Grass", "Grass grows on the verges and fields and sways in the wind", &|v| ["Off", "Sparse", "Normal", "Dense"][(v.round() as usize).min(3)].to_string()),
+        slider_row(app, "grass_distance", "Grass distance", "How far away grass is drawn; beyond 45 m it thins out (further costs more)", &|v| format!("{} m", v as i64)),
         switch_row(app, "relief", "Relief on old textures", "Cobbles, brick and bark get a soft relief made from their pictures"),
         switch_row(app, "taa", "Temporal anti-aliasing", "Steadies shimmering branches and wires; lets a lower MSAA look as smooth"),
         switch_row(app, "sunlit_cab", "Sunlit cab", "Sun patches move over the dash and the floor, the cab is lit from its windows"),

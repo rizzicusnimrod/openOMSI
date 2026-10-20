@@ -11,7 +11,7 @@ pub mod tracks;
 mod rt;
 pub mod shafts;
 mod taa;
-pub use grass::GrassClump;
+pub use grass::{GrassClump, GRASS_DISTANCE};
 pub use looks::Looks;
 mod triple;
 pub use triple::{panel_width, ScreenView, TripleScreen};
@@ -204,6 +204,20 @@ pub struct LensFx {
     pub glare: f32,
     pub soften: f32,
     pub bleed: f32,
+    /// The camera sensor's lines (lens.wgsl `src`): a picture of fewer lines than the window
+    /// has, scaled up to it - 0 (or more lines than the window has) the window's own.
+    pub lines: f32,
+}
+
+/// How many of a sensor's pixels of `lines` make one of an output `height` px tall
+/// (lens.wgsl `sensor_scale`).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn sensor_scale(lines: f32, height: f32) -> f32 {
+    if lines <= 0.0 || lines >= height {
+        1.0
+    } else {
+        lines / height.max(1.0)
+    }
 }
 
 impl Default for LensFx {
@@ -239,6 +253,7 @@ impl Default for LensFx {
             glare: 0.0,
             soften: 0.0,
             bleed: 0.0,
+            lines: 0.0,
         }
     }
 }
@@ -5685,7 +5700,7 @@ impl Renderer {
             reproject: reproject.to_cols_array_2d(),
             reproject_box: reproject_box.to_cols_array_2d(),
             box_rows,
-            k: [fx.glare.max(0.0) * (1.0 - lighting.night.clamp(0.0, 1.0)), fx.soften.max(0.0) * sh / 1080.0, fx.bleed.clamp(0.0, 1.0) * (1.0 - lighting.night.clamp(0.0, 1.0)), 0.0],
+            k: [fx.glare.max(0.0) * (1.0 - lighting.night.clamp(0.0, 1.0)), fx.soften.max(0.0) * sh / 1080.0, fx.bleed.clamp(0.0, 1.0) * (1.0 - lighting.night.clamp(0.0, 1.0)), fx.lines.max(0.0)],
         }
     }
 
@@ -7390,6 +7405,14 @@ impl Renderer {
     pub fn set_grass(&mut self, clumps: Vec<GrassClump>) {
         if let Some(g) = self.grass.as_mut() {
             g.set(clumps);
+        }
+    }
+
+    /// How far the grass reaches (m; `GRASS_DISTANCE` unless set): it thins out beyond 45 m
+    /// and fades out over the last part of it.
+    pub fn set_grass_distance(&mut self, far: f32) {
+        if let Some(g) = self.grass.as_mut() {
+            g.set_distance(far);
         }
     }
 
@@ -14843,6 +14866,16 @@ fn snap_rect(r: [f32; 4]) -> [f32; 4] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_camera_sensor_of_fewer_lines_than_the_window_is_scaled_up() {
+        use super::sensor_scale;
+        assert_eq!(sensor_scale(0.0, 1080.0), 1.0);
+        assert_eq!(sensor_scale(1440.0, 1080.0), 1.0);
+        assert_eq!(sensor_scale(1080.0, 1080.0), 1.0);
+        assert!((sensor_scale(240.0, 1080.0) - 0.2222).abs() < 1e-3);
+        assert!((sensor_scale(720.0, 1440.0) - 0.5).abs() < 1e-6);
+    }
+
     use super::*;
 
     /// The low beam as an ECE lamp sends it: towards the kerb brighter and higher than

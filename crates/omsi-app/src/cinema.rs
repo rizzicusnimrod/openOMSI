@@ -65,6 +65,8 @@ pub(crate) struct Config {
     /// camera .. 1 a good one).
     pub dash_fov: f32,
     pub dash_quality: f32,
+    /// The dashcam sensor's lines (`Settings::dashcam_lines`).
+    pub dash_lines: f32,
 }
 
 impl Default for Config {
@@ -85,6 +87,7 @@ impl Default for Config {
             streaks: 0.3,
             dash_fov: 130.0,
             dash_quality: 0.5,
+            dash_lines: 1080.0,
         }
     }
 }
@@ -107,6 +110,7 @@ impl Config {
             streaks: s.cinematic_streaks.clamp(0.0, 1.0),
             dash_fov: s.dashcam_fov.clamp(90.0, 160.0),
             dash_quality: s.dashcam_quality.clamp(0.0, 1.0),
+            dash_lines: s.dashcam_lines.clamp(240, 1440) as f32,
         }
     }
 }
@@ -512,18 +516,24 @@ impl Cinema {
         self.note = Some((if self.held { "Cinematic camera: shot held (Ctrl+F2 lets it go)".into() } else { "Cinematic camera: cuts again".into() }, 3.0));
     }
 
+    /// Count the caption's time down (`dt` s) and take it away when it is up: in either lens
+    /// view - the dashcam's ran no cinematic shots, and its caption stayed for good.
+    pub(crate) fn tick_note(&mut self, dt: f32) {
+        if let Some((_, left)) = self.note.as_mut() {
+            *left -= dt.clamp(0.0, 0.1);
+        }
+        self.note = self.note.take().filter(|n| n.1 > 0.0);
+    }
+
     /// The camera this frame. `way` gives the road ahead of the bus (asked for only when a
     /// shot by the road is placed), `aspect` the window's.
     pub(crate) fn update(&mut self, s: &Subject, world: &World, way: &dyn Fn() -> Vec<(DVec3, f64)>, dt: f32, aspect: f32, cfg: &Config) -> Camera {
         let dt = dt.clamp(0.0, 0.1);
-        if let Some((_, left)) = self.note.as_mut() {
-            *left -= dt;
-        }
+        self.tick_note(dt);
         for spot in self.bad_spots.iter_mut() {
             spot.1 += dt;
         }
         self.bad_spots.retain(|b| b.1 < BAD_SPOT_SECS);
-        self.note = self.note.take().filter(|n| n.1 > 0.0);
         // (back from photo mode, `resume`: this picture is a cut as well)
         self.cut = self.last.is_none() && self.shot.is_some();
         // (the bus put somewhere else: a new shot there)
@@ -1247,6 +1257,7 @@ impl Dashcam {
             shutter: if night > 0.3 { 1.0 / 30.0 * night.min(1.0) } else { 0.0 },
             frame_dt: dt,
             seed: (frame % 4096) as f32,
+            lines: cfg.dash_lines,
             ..Default::default()
         }
     }
@@ -1325,6 +1336,28 @@ mod tests {
         let (left, right) = stamp(&clock, 51.6);
         assert_eq!(left, "2004/06/21  14:32:07");
         assert_eq!(right, "052 KM/H");
+    }
+
+    #[test]
+    fn the_dashcam_records_at_the_resolution_set() {
+        let s = crate::settings::Settings { dashcam_lines: 480, ..Default::default() };
+        let cfg = Config::from_settings(&s);
+        assert_eq!(Dashcam::default().lens(&cfg, 1.0 / 30.0, 16.0 / 9.0, 0.0, 0).lines, 480.0);
+        let s = crate::settings::Settings { dashcam_lines: 9000, ..Default::default() };
+        assert_eq!(Config::from_settings(&s).dash_lines, 1440.0);
+    }
+
+    #[test]
+    fn the_view_caption_goes_after_its_few_seconds() {
+        let mut c = Cinema { note: Some(("Dashcam  ·  F1 back to the cab".into(), 4.0)), ..Default::default() };
+        for _ in 0..(3.9 * 60.0) as usize {
+            c.tick_note(1.0 / 60.0);
+        }
+        assert!(c.note.is_some());
+        for _ in 0..12 {
+            c.tick_note(1.0 / 60.0);
+        }
+        assert!(c.note.is_none());
     }
 
     #[test]

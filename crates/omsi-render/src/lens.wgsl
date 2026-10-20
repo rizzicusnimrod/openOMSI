@@ -41,7 +41,8 @@ struct Lens {
     // world (render origin) to the moving box's unit cube, a row each; w of the 4th: on
     box_rows: array<vec4<f32>, 4>,
     // x the windscreen's glare (the dashboard lit by the day, mirrored in the glass), y a
-    // small sensor's softness (px), z how much of the highlights bleed to white
+    // small sensor's softness (px), z how much of the highlights bleed to white, w the
+    // sensor's lines (0: the screen's own)
     k: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Lens;
@@ -85,8 +86,31 @@ fn hash2(p: vec2<f32>) -> f32 {
     return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
 }
 
+// The camera's sensor: how many of its pixels make one of the output's (1: the screen's own,
+// else a sensor of fewer lines than the window has; lib.rs `sensor_scale`).
+fn sensor_scale() -> f32 {
+    if (u.k.w <= 0.0 || u.k.w >= u.size.y) {
+        return 1.0;
+    }
+    return u.k.w / max(u.size.y, 1.0);
+}
+
+// The picture at `uv` as the camera recorded it: a sensor of `u.k.w` lines sees a point in
+// the middle of each of its pixels, and its footage scaled up to the window blends them.
 fn src(uv: vec2<f32>) -> vec3<f32> {
-    return textureSampleLevel(t_src, s_lin, uv, 0.0).rgb;
+    let s = sensor_scale();
+    if (s >= 1.0) {
+        return textureSampleLevel(t_src, s_lin, uv, 0.0).rgb;
+    }
+    let grid = u.size.xy * s;
+    let p = uv * grid - vec2<f32>(0.5);
+    let i = floor(p);
+    let f = p - i;
+    let a = textureSampleLevel(t_src, s_lin, (i + vec2<f32>(0.5, 0.5)) / grid, 0.0).rgb;
+    let b = textureSampleLevel(t_src, s_lin, (i + vec2<f32>(1.5, 0.5)) / grid, 0.0).rgb;
+    let c = textureSampleLevel(t_src, s_lin, (i + vec2<f32>(0.5, 1.5)) / grid, 0.0).rgb;
+    let d = textureSampleLevel(t_src, s_lin, (i + vec2<f32>(1.5, 1.5)) / grid, 0.0).rgb;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
 // --- the lens's geometry
@@ -116,15 +140,15 @@ fn fringed(uv: vec2<f32>) -> vec3<f32> {
     let ca = u.a.z;
     // (a small sensor's picture, scaled up: softer than the screen's pixels)
     if (u.k.y > 0.0) {
-        let t = u.k.y / u.size.zw;
+        let t = u.k.y / u.size.zw / sensor_scale();
         let soft = (src(uv + vec2<f32>(t.x, t.y)) + src(uv + vec2<f32>(-t.x, t.y)) + src(uv + vec2<f32>(t.x, -t.y)) + src(uv + vec2<f32>(-t.x, -t.y))) * 0.25;
         if (ca <= 0.0) {
             return soft;
         }
         let d = uv - 0.5;
         let k = dot(d, d) * 2.0 * ca;
-        let r = textureSampleLevel(t_src, s_lin, 0.5 + d * (1.0 + k), 0.0).r;
-        let b = textureSampleLevel(t_src, s_lin, 0.5 + d * (1.0 - k), 0.0).b;
+        let r = src(0.5 + d * (1.0 + k)).r;
+        let b = src(0.5 + d * (1.0 - k)).b;
         let c = src(uv);
         return soft + vec3<f32>(r - c.r, 0.0, b - c.b);
     }
@@ -133,9 +157,9 @@ fn fringed(uv: vec2<f32>) -> vec3<f32> {
     }
     let d = uv - 0.5;
     let k = dot(d, d) * 2.0 * ca;
-    let r = textureSampleLevel(t_src, s_lin, 0.5 + d * (1.0 + k), 0.0).r;
-    let g = textureSampleLevel(t_src, s_lin, uv, 0.0).g;
-    let b = textureSampleLevel(t_src, s_lin, 0.5 + d * (1.0 - k), 0.0).b;
+    let r = src(0.5 + d * (1.0 + k)).r;
+    let g = src(uv).g;
+    let b = src(0.5 + d * (1.0 - k)).b;
     return vec3<f32>(r, g, b);
 }
 
@@ -456,9 +480,10 @@ fn fs_lens(in: VsOut) -> @location(0) vec4<f32> {
     }
     // a video codec's smear: flat areas lose their fine detail to the block they are in
     if (u.b.y > 0.0) {
-        let t = 1.0 / u.size.zw;
+        let t = 1.0 / u.size.zw / sensor_scale();
         let near = (src(suv + vec2<f32>(1.5, 1.5) * t) + src(suv + vec2<f32>(-1.5, 1.5) * t) + src(suv + vec2<f32>(1.5, -1.5) * t) + src(suv + vec2<f32>(-1.5, -1.5) * t)) * 0.25;
-        let block_uv = fisheye((floor(px / 8.0) * 8.0 + vec2<f32>(4.0)) / u.size.xy);
+        let blk = 8.0 / sensor_scale();
+        let block_uv = fisheye((floor(px / blk) * blk + vec2<f32>(blk * 0.5)) / u.size.xy);
         let block = (src(block_uv + vec2<f32>(2.0, 2.0) * t) + src(block_uv + vec2<f32>(-2.0, 2.0) * t) + src(block_uv + vec2<f32>(2.0, -2.0) * t) + src(block_uv + vec2<f32>(-2.0, -2.0) * t)) * 0.25;
         let detail = length(c - near);
         let flat_k = (1.0 - smoothstep(0.012, 0.05 + 0.04 * u.f.w, detail)) * u.b.y;
@@ -500,8 +525,10 @@ fn fs_lens(in: VsOut) -> @location(0) vec4<f32> {
     // colour noise in blotches of two pixels
     if (u.b.x > 0.0) {
         let seed = vec2<f32>(u.b.w * 37.0, u.b.w * 91.0);
-        let n = hash2(px + seed) + hash2(px + seed + vec2<f32>(5.3, 11.7)) - 1.0;
-        let cell = floor(px / 2.0) + seed;
+        // (in the sensor's pixels)
+        let spx = floor(px * sensor_scale());
+        let n = hash2(spx + seed) + hash2(spx + seed + vec2<f32>(5.3, 11.7)) - 1.0;
+        let cell = floor(spx / 2.0) + seed;
         let cn = vec3<f32>(hash2(cell + vec2<f32>(1.0, 0.0)), hash2(cell + vec2<f32>(0.0, 7.0)), hash2(cell + vec2<f32>(3.0, 3.0))) - vec3<f32>(0.5);
         let l = luma(e);
         let gain = u.b.x * (0.018 + 0.07 * u.f.w) * (0.35 + 1.4 * (1.0 - l) * (1.0 - l));

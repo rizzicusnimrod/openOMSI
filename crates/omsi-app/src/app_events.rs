@@ -1222,6 +1222,7 @@ impl ApplicationHandler for App {
                                 }
                                 (crate::cinema::DASHCAM, _) => {
                                     let cfg = crate::cinema::Config::from_settings(&self.settings);
+                                    self.cinema.tick_note(dt);
                                     self.dashcam.update(&p.vehicle, dt, aspect, &cfg)
                                 }
                                 _ => {
@@ -2588,6 +2589,9 @@ impl ApplicationHandler for App {
                 if let (Some(world), Some(cam), Some(r)) = (self.world.as_ref(), self.camera.as_ref(), self.renderer.as_mut()) {
                     let density = if crate::grass::off() || !lighting.enhanced { 0 } else { crate::startup::GRASS.load(std::sync::atomic::Ordering::Relaxed).min(3) as u8 };
                     let roads = world.surfaces_version.load(std::sync::atomic::Ordering::Relaxed);
+                    let grass_far = crate::startup::GRASS_DISTANCE.load(std::sync::atomic::Ordering::Relaxed) as f32;
+                    self.grass.reach = grass_far as f64 + 3.0;
+                    r.set_grass_distance(grass_far);
                     let rechecked = self.grass.recheck(roads, &|x, y, z| world.ground_covered(x, y, z));
                     if self.grass.update(cam.position, density, &|x, y| world.grass_at(x, y), &|x, y| world.bare_ground(x, y), &|x, y, z| world.ground_covered(x, y, z)) | rechecked {
                         r.set_grass(self.grass.clumps().map(|c| omsi_render::GrassClump { pos: c.pos, seed: c.seed, size: c.size, colour: world.grass_colour(c.layer) }).collect());

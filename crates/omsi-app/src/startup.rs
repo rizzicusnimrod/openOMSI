@@ -447,6 +447,7 @@ pub(crate) fn nature_settings(s: &crate::settings::Settings) {
     SUN_SHAFTS.store(s.sun_shafts as u32, Relaxed);
     SSR.store(s.ssr, Relaxed);
     GRASS.store(s.grass as u32, Relaxed);
+    GRASS_DISTANCE.store(s.grass_distance as u32, Relaxed);
     RELIEF.store(s.relief, Relaxed);
     TAA.store(s.taa, Relaxed);
     SUNLIT_CAB.store(s.sunlit_cab, Relaxed);
@@ -458,6 +459,8 @@ pub(crate) static SUN_SHAFTS: std::sync::atomic::AtomicU32 = std::sync::atomic::
 pub(crate) static SSR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 /// How much grass grows, 0 none .. 3 dense (`Settings::grass`).
 pub(crate) static GRASS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(2);
+/// How far the grass reaches (m, `Settings::grass_distance`).
+pub(crate) static GRASS_DISTANCE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(45);
 /// Relief made from the old textures' brightness (`Settings::relief`).
 pub(crate) static RELIEF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 /// Temporal anti-aliasing (`Settings::taa`).

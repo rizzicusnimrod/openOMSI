@@ -45,8 +45,9 @@ pub(crate) fn grows_on(texture: &str) -> bool {
     !texture.trim().is_empty() && rules().matches(texture, Path::new("Texture/map"))
 }
 
-/// The edge of a tile's grass map in texels.
-pub(crate) const MAP_SIZE: usize = 128;
+/// The edge of a tile's grass map in texels (0.6 m on a 300 m tile: at a quarter of that the
+/// grass came two metres onto the asphalt painted onto the ground).
+pub(crate) const MAP_SIZE: usize = 512;
 
 /// How much of a tile's ground is grass (0 .. 255 a texel, row 0 the south edge), and which
 /// ground texture is uppermost there (its colour, `Field::colours`).
@@ -59,6 +60,8 @@ pub(crate) struct GrassMap {
 impl GrassMap {
     /// The tile's ground from its first ground texture (`grassy[0]`) and the painted layers
     /// over it in their order: (layer, its mask's alpha, its width and height, row 0 south).
+    /// Each texel takes the most of a bare layer's paint over it and the least of a grassy
+    /// one's, and the grass then keeps a texel away from bare ground: none at a road's edge.
     pub(crate) fn compose(grassy: &[bool], paint: &[(usize, &[u8], usize, usize)]) -> Option<GrassMap> {
         let base = grassy.first().copied().unwrap_or(false);
         if !base && !paint.iter().any(|(l, ..)| grassy.get(*l).copied().unwrap_or(false)) {
@@ -72,10 +75,20 @@ impl GrassMap {
             if w == 0 || h == 0 || alpha.len() < w * h {
                 continue;
             }
-            let g = if grassy.get(l).copied().unwrap_or(false) { 1.0 } else { 0.0 };
+            let grows = grassy.get(l).copied().unwrap_or(false);
+            let g = if grows { 1.0 } else { 0.0 };
             for j in 0..n {
                 for i in 0..n {
-                    let a = alpha[(j * h / n) * w + i * w / n] as f32 / 255.0;
+                    // (3×3 points over the texel)
+                    let mut a = if grows { 1.0f32 } else { 0.0 };
+                    for sj in 0..3 {
+                        for si in 0..3 {
+                            let y = ((j * 3 + sj) * h / (n * 3)).min(h - 1);
+                            let x = ((i * 3 + si) * w / (n * 3)).min(w - 1);
+                            let v = alpha[y * w + x] as f32 / 255.0;
+                            a = if grows { a.min(v) } else { a.max(v) };
+                        }
+                    }
                     let k = j * n + i;
                     cover[k] = cover[k] * (1.0 - a) + g * a;
                     if a >= 0.5 && a >= top[k] * 0.5 {
@@ -85,7 +98,21 @@ impl GrassMap {
                 }
             }
         }
-        Some(GrassMap { cover: cover.into_iter().map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8).collect(), layer })
+        // a texel's grass is the least of its own and its neighbours'
+        let mut kept = cover.clone();
+        for j in 0..n {
+            for i in 0..n {
+                let mut c = cover[j * n + i];
+                for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)] {
+                    let (x, y) = (i as i32 + dx, j as i32 + dy);
+                    if x >= 0 && y >= 0 && (x as usize) < n && (y as usize) < n {
+                        c = c.min(cover[y as usize * n + x as usize]);
+                    }
+                }
+                kept[j * n + i] = c;
+            }
+        }
+        Some(GrassMap { cover: kept.into_iter().map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8).collect(), layer })
     }
 
     /// The grass (0..1) and the uppermost layer at `x`, `y` metres into a tile of `side` m.
@@ -109,7 +136,8 @@ pub(crate) struct Clump {
 
 /// The cells' edge (m).
 pub(crate) const CELL: f64 = 16.0;
-/// How far from the camera clumps are kept (m; the renderer fades them out before).
+/// How far from the camera clumps are kept unless set (m; `Field::reach`, the renderer fades
+/// them out before).
 pub(crate) const REACH: f64 = 48.0;
 
 /// The spacing of the clumps for a density (`Settings::grass`: 0 none .. 3 dense), m.
@@ -174,11 +202,13 @@ pub(crate) struct Field {
     roads: u64,
     /// Cells filled this many per frame at most (the rest the next frames).
     pub per_frame: usize,
+    /// How far from the camera clumps are kept (m: `Settings::grass_distance` and a little).
+    pub reach: f64,
 }
 
 impl Field {
     pub(crate) fn new() -> Self {
-        Self { per_frame: 6, ..Default::default() }
+        Self { per_frame: 6, reach: REACH, ..Default::default() }
     }
 
     /// Keep the cells within reach of `eye` and fill the missing ones (at most `per_frame`,
@@ -205,7 +235,8 @@ impl Field {
             let cy = (c.1 as f64 + 0.5) * CELL - eye.y;
             (cx * cx + cy * cy).sqrt()
         };
-        let reach = REACH + CELL;
+        let far = self.reach.max(REACH);
+        let reach = far + CELL;
         let before = self.cells.len();
         self.cells.retain(|c, _| near(*c) <= reach);
         changed |= self.cells.len() != before;
@@ -213,7 +244,7 @@ impl Field {
         for x in cell(eye.x - reach)..=cell(eye.x + reach) {
             for y in cell(eye.y - reach)..=cell(eye.y + reach) {
                 let d = near((x, y));
-                if d <= REACH + CELL * 0.75 && !self.cells.contains_key(&(x, y)) {
+                if d <= far + CELL * 0.75 && !self.cells.contains_key(&(x, y)) {
                     missing.push((d, (x, y)));
                 }
             }
@@ -347,6 +378,26 @@ mod tests {
     }
 
     #[test]
+    fn no_grass_on_asphalt_painted_onto_the_ground() {
+        // a 300 m tile of grass with a 4 m strip of asphalt painted over it at x 150..154
+        let side = 300.0;
+        let n = 1024;
+        let mask: Vec<u8> = (0..n * n).map(|k| if (150.0..154.0).contains(&(((k % n) as f64 + 0.5) * side / n as f64)) { 255 } else { 0 }).collect();
+        let m = GrassMap::compose(&[true, false], &[(1, &mask, n, n)]).unwrap();
+        let mut clumps = Vec::new();
+        for cy in 0..4 {
+            for cx in 8..11 {
+                clumps.extend(cell_clumps((cx, cy), 0.4, |x, y| m.at(x, y, side), |_, _| Some(0.0), |_, _, _| false));
+            }
+        }
+        let on = clumps.iter().filter(|c| (149.7..154.3).contains(&c.pos.x)).count();
+        assert_eq!(on, 0, "{on} clumps on the asphalt");
+        // the grass beside it is all there
+        let beside = clumps.iter().filter(|c| (146.0..149.0).contains(&c.pos.x)).count();
+        assert!(beside as f64 > 3.0 * 64.0 / 0.16 * 0.9, "{beside}");
+    }
+
+    #[test]
     fn grass_placed_before_the_roads_loaded_goes_when_they_come() {
         let mut f = Field::new();
         let grass = |_: f64, _: f64| (1.0, 0u8);
@@ -364,6 +415,24 @@ mod tests {
         assert!(f.len() < before && f.len() > 0);
         assert!(f.clumps().all(|c| !(0.0..4.0).contains(&c.pos.x)));
         assert!(!f.recheck(1, &road));
+    }
+
+    #[test]
+    fn a_longer_reach_keeps_the_grass_further_out() {
+        let grass = |_: f64, _: f64| (1.0, 0u8);
+        let ground = |_: f64, _: f64| Some(0.0);
+        let covered = |_: f64, _: f64, _: f64| false;
+        let furthest = |reach: f64| {
+            let mut f = Field::new();
+            f.reach = reach;
+            f.per_frame = usize::MAX;
+            f.update(DVec3::ZERO, 1, &grass, &ground, &covered);
+            f.clumps().map(|c| c.pos.x.hypot(c.pos.y)).fold(0.0, f64::max)
+        };
+        let near = furthest(REACH);
+        let far = furthest(180.0);
+        assert!(near >= REACH && near < 90.0, "{near}");
+        assert!(far >= 180.0, "{far}");
     }
 
     #[test]

@@ -7,14 +7,16 @@
 const GRASS_VERTICES: u32 = 54u;
 const GRASS_HEIGHT: f32 = 0.38;
 const GRASS_WIDTH: f32 = 0.07;
-const GRASS_NEAR: f32 = 28.0;
-const GRASS_FAR: f32 = 45.0;
+// the share of the reach over which it fades out (grass.rs `FADE`)
+const GRASS_FADE: f32 = 0.38;
 
 struct GrassIn {
     @location(0) pos: vec3<f32>,
     @location(1) seed: f32,
     @location(2) colour: vec4<f32>,
     @location(3) size: f32,
+    // how far the grass reaches (m)
+    @location(4) far: f32,
 };
 
 struct GrassOut {
@@ -26,9 +28,9 @@ struct GrassOut {
     @location(3) normal: vec3<f32>,
 };
 
-// How tall the grass stands at `dist` metres (grass.rs `grass_fade`).
-fn grass_fade(dist: f32) -> f32 {
-    return 1.0 - smoothstep(GRASS_NEAR, GRASS_FAR, dist);
+// How tall the grass stands at `dist` metres with a reach of `far` (grass.rs `fade`).
+fn grass_fade(dist: f32, far: f32) -> f32 {
+    return 1.0 - smoothstep(far * (1.0 - GRASS_FADE), far, dist);
 }
 
 // The wind's push on a blade at `place` (map metres): its lean along the wind, as a share of
@@ -68,7 +70,7 @@ fn vs_grass_enhanced(@builtin(vertex_index) vi: u32, g: GrassIn) -> GrassOut {
     let snow = clamp(enh.weather.y * 1.5, 0.0, 1.0);
     let winter = camera.season.y * camera.season.w;
     let bf = f32(blade);
-    let h = GRASS_HEIGHT * g.size * grass_fade(dist) * (1.0 - snow) * (1.0 - 0.4 * winter)
+    let h = GRASS_HEIGHT * g.size * grass_fade(dist, g.far) * (1.0 - snow) * (1.0 - 0.4 * winter)
         * (0.75 + 0.5 * fract(g.seed * 7.31 + bf * 0.37));
     let ang = g.seed * 6.2832 + bf * 2.094;
     let facing = vec2<f32>(cos(ang), sin(ang));
