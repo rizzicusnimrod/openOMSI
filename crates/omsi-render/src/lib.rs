@@ -9,6 +9,7 @@ mod relief;
 pub mod tracks;
 mod rt;
 pub mod shafts;
+mod taa;
 pub use looks::Looks;
 mod triple;
 pub use triple::{panel_width, ScreenView, TripleScreen};
@@ -2641,6 +2642,9 @@ pub struct Renderer {
     /// Enhanced path: the HDR targets per size, the post pipelines and their resources.
     hdr_targets: HashMap<(u32, u32), HdrTargets>,
     puddles: Option<puddles::Pipelines>,
+    /// Temporal anti-aliasing (`taa.rs`, the enhanced window's picture); not on GLES, which
+    /// cannot read the depth prepass.
+    taa: Option<taa::Taa>,
     post: PostPipelines,
     post_layout: wgpu::BindGroupLayout,
     post_buf: wgpu::Buffer,
@@ -5244,6 +5248,7 @@ impl Renderer {
         let puddles = (!gl && !leave_out_enhanced).then(|| {
             puddles::Pipelines::new(&device, &shader, &camera_layout, &material_layout)
         });
+        let taa = (!gl && !leave_out_enhanced).then(|| taa::Taa::new(&device));
         let rt = options.ray_tracing.then(|| rt::RayTracer::new(&device));
         Renderer {
             _device_poller: DevicePoller::start(&device),
@@ -5280,6 +5285,7 @@ impl Renderer {
             lm_place: std::cell::Cell::new((0.0, 0.0, 0.0)),
             hdr_targets: HashMap::new(),
             puddles,
+            taa,
             post,
             post_layout,
             post_buf,
@@ -7863,7 +7869,8 @@ impl Renderer {
             let usage = if samples > 1 {
                 wgpu::TextureUsages::RENDER_ATTACHMENT
             } else {
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC
+                // (COPY_DST: the temporal anti-aliasing puts its result back, `taa.rs`)
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST
             };
             self.device
                 .create_texture(&wgpu::TextureDescriptor {
@@ -9863,6 +9870,23 @@ impl Renderer {
         // since the light shafts were removed)
         // (photo mode's shift of the picture: the main view's alone, see `view_shift`)
         let shift = self.view_shift.filter(|_| with_overlays && projection.is_none() && !second_eye);
+        // temporal anti-aliasing (taa.rs): the window's enhanced picture, drawn a sub-pixel
+        // off each frame (not photo mode's, which averages its own steps; not a still)
+        let taa_on = enhanced
+            && with_overlays
+            && projection.is_none()
+            && !second_eye
+            && shift.is_none()
+            && !self.instant_exposure
+            && self.taa.is_some()
+            && lighting.looks.effective().taa;
+        if let Some(t) = self.taa.as_mut().filter(|_| with_overlays && !second_eye) {
+            if !taa_on {
+                t.reset();
+            }
+        }
+        let taa_jitter = taa_on.then(|| self.taa.as_mut().unwrap().next_jitter(width, height));
+        let shift = shift.or(taa_jitter);
         let shifted = |m: Mat4| match shift {
             Some(s) => Mat4::from_cols(Vec4::X, Vec4::Y, Vec4::Z, Vec4::new(s[0], s[1], 0.0, 1.0)) * m,
             None => m,
@@ -11770,6 +11794,22 @@ impl Renderer {
                         pass.draw(0..6, 0..1);
                     }
                 }
+            }
+        }
+        // the temporal anti-aliasing: this frame's picture with the history, put back where
+        // the post passes read it
+        if taa_on {
+            if let (Some(taa), Some(ao), Some(h)) = (self.taa.as_mut(), self.ao.as_ref(), self.hdr_targets.get(&(width, height))) {
+                let picture = h.puddles.as_ref().filter(|_| puddles_on).map_or(&h.view, |p| &p.view);
+                let frame = taa::Frame {
+                    vp: camera.view_proj(aspect, ro),
+                    vp_jittered: vp_mat,
+                    origin: ro,
+                    cam: camera.position,
+                    fwd: camera.forward(),
+                    vehicle: lighting.inside,
+                };
+                taa.encode(&self.device, &self.queue, &mut encoder, picture, &ao.depth_view, (width, height), frame);
             }
         }
         if enhanced {
@@ -16667,6 +16707,7 @@ mod tests {
             ("ray-traced lighting", rt::lighting_source()),
             ("ray-traced reflections", rt::reflect_source()),
             ("texture means", include_str!("rt_avg.wgsl").to_string()),
+            ("taa", taa::shader_source().to_string()),
         ];
         let sizes: &[(&str, usize)] = &[
             ("Enhanced", std::mem::size_of::<EnhancedUniform>()),
@@ -16680,6 +16721,7 @@ mod tests {
             ("Camera", std::mem::size_of::<CameraUniform>()),
             ("MaterialParams", std::mem::size_of::<MaterialUniform>()),
             ("RtParams", rt::PARAMS_SIZE),
+            ("TaaParams", std::mem::size_of::<taa::Uniform>()),
         ];
         let mut checked = std::collections::HashSet::new();
         for (name, src) in &modules {
