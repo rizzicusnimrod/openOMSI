@@ -429,6 +429,22 @@ pub(crate) static ENHANCED_PLUS: std::sync::atomic::AtomicBool = std::sync::atom
 pub(crate) static CLASSIC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// The night's brightness in per cent (`Settings::night_brightness`), for `weather_lighting`.
 pub(crate) static NIGHT_BRIGHTNESS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+/// How much the plants sway in the wind, in per cent (`Settings::wind_sway`), for
+/// `weather_lighting`.
+pub(crate) static WIND_SWAY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+/// Trees turn with the year (`Settings::seasonal_foliage`), for `weather_lighting`.
+pub(crate) static SEASONAL_FOLIAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Thunderstorms flash and rumble (`Settings::lightning`).
+pub(crate) static LIGHTNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Take the settings of the world's nature (the wind in the plants, the year's colours,
+/// thunderstorms) into the statics `weather_lighting` reads.
+pub(crate) fn nature_settings(s: &crate::settings::Settings) {
+    use std::sync::atomic::Ordering::Relaxed;
+    WIND_SWAY.store(s.wind_sway as u32, Relaxed);
+    SEASONAL_FOLIAGE.store(s.seasonal_foliage, Relaxed);
+    LIGHTNING.store(s.lightning, Relaxed);
+}
 /// The instrument dimmer in per cent (`Settings::dash_dimmer`), for `weather_lighting`.
 pub(crate) static DASH_DIMMER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
 /// Volume of the AI vehicles and of the scenery's own sounds (OMSI's `sound_ai` and

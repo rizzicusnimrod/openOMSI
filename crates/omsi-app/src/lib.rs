@@ -49,6 +49,8 @@ mod keys;
 mod lan;
 mod lan_world;
 mod lights;
+mod foliage;
+mod lightning;
 mod retro;
 mod launcher;
 mod menu;
@@ -228,6 +230,7 @@ pub(crate) fn launcher_statics() {
     ENHANCED.store(s.enhanced || omsi_cfg::env::var_os("OMSI_ENHANCED").is_some(), std::sync::atomic::Ordering::Relaxed);
     CLASSIC.store(s.classic(), std::sync::atomic::Ordering::Relaxed);
     NIGHT_BRIGHTNESS.store(s.night_brightness as u32, std::sync::atomic::Ordering::Relaxed);
+    crate::startup::nature_settings(&s);
     DASH_DIMMER.store(s.dash_dimmer as u32, std::sync::atomic::Ordering::Relaxed);
     CLOUDS.store(s.clouds && omsi_cfg::env::var_os("OMSI_NO_CLOUDS").is_none(), std::sync::atomic::Ordering::Relaxed);
 }
@@ -383,6 +386,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
     CLOUDS.store(settings.clouds && omsi_cfg::env::var_os("OMSI_NO_CLOUDS").is_none(), std::sync::atomic::Ordering::Relaxed);
     SOUND_AI.store(settings.vol_ai.to_bits(), std::sync::atomic::Ordering::Relaxed);
     NIGHT_BRIGHTNESS.store(settings.night_brightness as u32, std::sync::atomic::Ordering::Relaxed);
+    crate::startup::nature_settings(&settings);
     DASH_DIMMER.store(settings.dash_dimmer as u32, std::sync::atomic::Ordering::Relaxed);
     omsi_sim::particles::set_vehicle_amount(settings.exhaust);
     crate::ui::CLASSIC_SETTINGS.store(settings.classic_ui, std::sync::atomic::Ordering::Relaxed);
@@ -518,6 +522,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         view,
         audio: None,
         ambience: None,
+        lightning: crate::lightning::Lightning::new(),
         cursor: (0.0, 0.0),
         vr_cursor_physical: None,
         vr_cursor_warp_pending: None,

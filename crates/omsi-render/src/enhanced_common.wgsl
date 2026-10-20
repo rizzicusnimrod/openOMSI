@@ -51,6 +51,10 @@ struct Enhanced {
     // colour, w their strength in all (0 none); rows 1.. xyz each lamp's place, w its
     // strength (0: no more)
     saloon: array<vec4<f32>, 9>,
+    // a lightning flash (lib.rs `Flash`): row 0 xyz towards the lit cloud, w its irradiance
+    // here (0: none); row 1 x a stroke's channel's brightness (0: in the cloud), y how far
+    // it stands (m), z the cloud base over the camera (m), w the channel's shape
+    flash: array<vec4<f32>, 2>,
 };
 @group(0) @binding(11) var<uniform> enh: Enhanced;
 @group(0) @binding(13) var s_lin: sampler;

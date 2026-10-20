@@ -239,46 +239,6 @@ fn lamp_shadow_at(li: u32, p: vec3<f32>, n: vec3<f32>, thin: bool) -> f32 {
     return mix(1.0, sum / 9.0, camera.lamp_fade[k]);
 }
 
-// How much of a headlamp's light at `p` gets past the vehicles in its way (`mask`: bits of
-// `camera.blockers`, lib.rs `LightBlocker` - the cars ahead of it, never its own): the way
-// from the point to the lamp through a car's box is dark. A point in a box (or at its
-// skin) is that car's own body, lit as it faces the lamp. The few centimetres where the
-// way only cuts a corner of a box fade, the shadow's edge.
-fn beam_blocked(p: vec3<f32>, lamp: vec3<f32>, mask: u32) -> f32 {
-    var lit = 1.0;
-    var m = mask;
-    let len = distance(p, lamp);
-    for (var k = 0u; k < 24u; k = k + 1u) {
-        if (m == 0u || lit <= 0.0) {
-            break;
-        }
-        let j = firstTrailingBit(m);
-        m = m & (m - 1u);
-        let r0 = camera.blockers[j * 3u];
-        let r1 = camera.blockers[j * 3u + 1u];
-        let r2 = camera.blockers[j * 3u + 2u];
-        let a = vec3<f32>(dot(r0.xyz, p) + r0.w, dot(r1.xyz, p) + r1.w, dot(r2.xyz, p) + r2.w);
-        // (the skin: 4 cm in the box's measure on each axis)
-        let skin = 1.0 + 0.04 * vec3<f32>(length(r0.xyz), length(r1.xyz), length(r2.xyz));
-        if (all(abs(a) < skin)) {
-            continue;
-        }
-        let b = vec3<f32>(dot(r0.xyz, lamp) + r0.w, dot(r1.xyz, lamp) + r1.w, dot(r2.xyz, lamp) + r2.w);
-        var dd = b - a;
-        dd = select(dd, vec3<f32>(1e-6), abs(dd) < vec3<f32>(1e-6));
-        let t0 = (vec3<f32>(-1.0) - a) / dd;
-        let t1 = (vec3<f32>(1.0) - a) / dd;
-        let tn = min(t0, t1);
-        let tf = max(t0, t1);
-        let enter = max(max(max(tn.x, tn.y), tn.z), 0.0);
-        let exit = min(min(min(tf.x, tf.y), tf.z), 1.0);
-        if (exit > enter) {
-            lit = lit * (1.0 - smoothstep(0.0, 0.3, (exit - enter) * len));
-        }
-    }
-    return lit;
-}
-
 // A retroreflective sign's light sent back towards a headlamp, relative to its albedo
 // (see `lamp_light`; a white face's diffuse light facing the lamp is 1/PI of it).
 const SIGN_RETRO: f32 = 14.0;
@@ -344,7 +304,10 @@ fn lamp_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, sf: Surface, thin: bool,
         let window = (1.0 - q * q) * (1.0 - q * q);
         var e = core * core / sqrt(dist2 * dist2 + core * core * core * core) * window;
         if (l.extra.z != 0.0) {
-            e = headlamp(-ld, l.dir.xyz, l.extra.z) / max(dist2, 0.3) * window;
+            // (close to the lamp its pattern is smeared over the lens's width, as in the fog
+            // (`near_blur`): taken as it is far off, the road a few metres in front of the
+            // bus showed the cut-off as a ruled line)
+            e = headlamp_blur(-ld, l.dir.xyz, l.extra.z, near_blur(sqrt(dist2))) / max(dist2, 0.3) * window;
         } else if (l.dir.w > -1.5) {
             let cd = dot(-ld, l.dir.xyz);
             e = e * smoothstep(l.dir.w, l.extra.x, cd);
@@ -713,6 +676,8 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
             tex.a = smoothstep(0.32, 0.68, tex.a);
         }
     }
+    // (the fall's and the winter's bare crowns, `seasonal_alpha`)
+    tex.a = seasonal_alpha(tex.a, tex.rgb, in.uv, in.world);
     let mode = material.params.x;
     // Keep the filtered fractional coverage, but tighten its transition around the cutout
     // edge before MSAA turns it into sample coverage. The MSAA depth prepass skips these
@@ -728,6 +693,8 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
             discard;
         }
     }
+    // (the year's colours on the trees, `seasonal_colour`)
+    tex = vec4<f32>(seasonal_colour(tex.rgb, in.world), tex.a);
     var alpha = tex.a * material.color.a;
     if (mode < 0.5) {
         alpha = 1.0;
@@ -1026,6 +993,10 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
             shadow = sun_shadow_soft(in.world, n, thin);
             if (traced.w > 0.5 && traced.z >= 0.0) {
                 shadow = shadow * traced.z;
+            } else if (!thin && enh.eye.w > 0.5) {
+                // the contact shadows where the map's own are too coarse (ssao.wgsl
+                // `contact_shadow`); not on leaves, whose crowns the map shades as a whole
+                shadow = shadow * occlusion_texel(in.clip.xy, in.world).b;
             }
         }
         let e_sun = enh.sun.rgb * shadow;
@@ -1038,7 +1009,9 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
             // low sun left every tree dull and dark while the walls beside it glowed). Seen
             // against the sun a leaf glows with what comes through it - yellow-green, the
             // light having passed the leaf's colour twice.
-            let through = pow(clamp(dot(-v, s), 0.0, 1.0), 3.0);
+            // (bare twigs let none of it through: `seasonal_alpha` has taken the leaves)
+            let bare = select(0.0, camera.season.y * camera.season.w, foliage_kind() == 1u);
+            let through = pow(clamp(dot(-v, s), 0.0, 1.0), 3.0) * (1.0 - 0.9 * bare);
             let leaf = sf.albedo / PI;
             direct = e_sun * (leaf * (0.42 + 0.3 * max(nl, 0.0) + 0.08 * max(-nl, 0.0))
                 + leaf * min(sf.albedo * 2.2, vec3<f32>(1.0)) * through * 0.45);

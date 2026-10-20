@@ -75,6 +75,11 @@ struct CameraUniform {
     blockers: [[f32; 4]; LIGHT_BLOCKERS * 3],
     /// How much of each lamp shadow map's shadow shows (`LampShadow::fade`).
     lamp_fade: [f32; 4],
+    /// The wind the plants sway in (shader.wgsl `swayed`): xy the weather's wind (m/s, east
+    /// and north), z its gustiness, w the sway's strength (0: still).
+    breeze: [f32; 4],
+    /// The trees through the year (`Lighting::foliage`, shader.wgsl `seasonal_colour`).
+    season: [f32; 4],
 }
 
 /// The period the sky's cloud patterns repeat with (m): 5 x the cloud field (14 km), 8 x
@@ -346,7 +351,41 @@ struct EnhancedUniform {
     /// rgb their mean colour, w their strength in all (0: none); rows 1.. xyz each lamp's
     /// place relative to the render origin, w its strength (0: no more).
     saloon: [[f32; 4]; SALOON_LAMPS + 1],
+    /// A lightning flash (`Lighting::flash`, see `Flash`): row 0 xyz towards the lit cloud,
+    /// w its irradiance here (0: none); row 1 x a stroke's channel's brightness (0: in the
+    /// cloud), y its distance (m), z the cloud base over the camera (m), w its shape.
+    flash: [[f32; 4]; 2],
 }
+
+/// A lightning flash as the picture shows it this frame (`Lighting::flash`, enhanced only):
+/// the light it throws over everything - the clouds lit from within round it, the street
+/// lit as if for an instant by day - and a stroke to the ground's channel in the sky.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Flash {
+    /// From the camera towards the lit cloud (unit, world).
+    pub dir: Vec3,
+    /// Its light here, on a surface facing it (1 = 10 000 lux, as the sky model's).
+    pub irradiance: f32,
+    /// A stroke to the ground: its channel's brightness (0: a flash within the cloud).
+    pub bolt: f32,
+    /// How far the channel stands (m, horizontally).
+    pub distance: f32,
+    /// The cloud base it comes out of, over the camera (m).
+    pub base: f32,
+    /// The channel's shape: a number of its own.
+    pub seed: f32,
+}
+
+/// Lightning's colour against daylight: a little bluer than the sun.
+const FLASH_COLOUR: Vec3 = Vec3::new(0.86, 0.92, 1.0);
+/// How much of a flash's light comes from everywhere alike (scattered in the cloud and the
+/// rain), the rest from the lit cloud's way.
+const FLASH_SPREAD: f32 = 0.45;
+/// A flash's light at most this many times the light the eye is adapted to (2.6 stops: at
+/// 12 the night street stood as by an overcast day).
+const FLASH_OVER: f32 = 6.0;
+/// The share of a flash's light the air (the weather's fog, the rain) shows.
+const FLASH_IN_AIR: f32 = 0.25;
 
 /// How many of the saloon's lamps the panes mirror (the strongest).
 pub const SALOON_LAMPS: usize = 8;
@@ -517,6 +556,22 @@ struct SsaoUniform {
     /// xy: the projection's off-centre shift (0 for the window's own symmetric frustum;
     /// a headset eye or a triple screen's side panel has one)
     shift: [f32; 4],
+    /// The contact shadows (ssao.wgsl `contact_shadow`): xyz towards the sun in the view's
+    /// frame, w 1 to trace them (0: the blue channel stays lit).
+    sun: [f32; 4],
+}
+
+/// Contact shadows (Enhanced, sun shadows on): the shadow map's texels are centimetres to
+/// decimetres wide and its bias lifts a shadow off what casts it, so the dark line where a
+/// kerb, a wheel, a sign's post or a bench's leg meets the ground went missing. A short ray
+/// towards the sun through the depth prepass finds what stands close by in its way.
+/// `OMSI_NO_CONTACT_SHADOWS=1` leaves them out.
+/// The occlusion pass's picture: r the occlusion, g the view depth, b the contact shadows.
+const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+fn contact_shadows_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| omsi_cfg::env::var_os("OMSI_NO_CONTACT_SHADOWS").is_some_and(|v| v != "0"))
 }
 
 #[repr(C)]
@@ -1111,8 +1166,21 @@ pub struct Lighting {
     /// enhanced picture the view they take (`enhanced_weather_fog`) - falling snow takes far
     /// more of it than rain of the same water does.
     pub snowfall: f32,
-    /// The weather's wind (m/s, world): the snowfall drifts with it.
+    /// The weather's wind (m/s, world): the snowfall drifts with it, and the plants sway in
+    /// it (shader.wgsl `swayed`).
     pub wind: Vec3,
+    /// How gusty that wind is (0 steady .. 1 a squall's): the plants' swing about their lean.
+    pub gust: f32,
+    /// A lightning flash this frame (enhanced: the light and the sky; the plain shading
+    /// takes its light into the ambient and the sky colour, see the app's `lightning`).
+    pub flash: Option<Flash>,
+    /// The trees through the year (shader.wgsl `seasonal_colour`, `seasonal_alpha`): x the
+    /// autumn colours, y the share of the leaves gone, z spring's fresh green (0..1 each), w
+    /// 1 when the plants change at all (0: as their pictures are).
+    pub foliage: [f32; 4],
+    /// How much the plants move in the wind against the natural measure (1; 0 = still, the
+    /// settings' `wind_sway`).
+    pub sway: f32,
     pub fog_base: Option<f64>,
     pub envir_tint: [Vec3; 3],
     /// How bright an LED panel's dots burn (`MaterialExtra::led`; the settings' 16 levels
@@ -1203,6 +1271,10 @@ impl Default for Lighting {
             shadows: true,
             snowfall: 0.0,
             wind: Vec3::ZERO,
+            gust: 0.3,
+            flash: None,
+            foliage: [0.0; 4],
+            sway: 1.0,
             lamp_shadows: false,
             wetness: 0.0,
             snow: 0.0,
@@ -1365,6 +1437,16 @@ pub struct Material {
 }
 
 impl Material {
+    /// What the material is to the wind (`MaterialExtra::sway`, 1 for a `[tree]`'s cards).
+    pub fn sway(&self) -> f32 {
+        self.uniform.retro[3]
+    }
+
+    /// What the material is to the year (`MaterialExtra::season`).
+    pub fn season(&self) -> f32 {
+        ((self.uniform.params2[3] + 0.5) as u32 & 56) as f32
+    }
+
     /// Whether the material samples texture `id`.
     pub fn uses_texture(&self, id: TextureId) -> bool {
         self.texture == Some(id)
@@ -1477,6 +1559,15 @@ pub struct MaterialExtra {
     /// lights. That night map is not drawn there - it is the stand-in for the reflection the
     /// vanilla picture has not got (one a variable switches is, a lamp's).
     pub retroreflective: bool,
+    /// What the material is to the wind (shader.wgsl `swayed`): 0 nothing that moves, 2 a
+    /// plant's leaves (they bend with it and flutter), 3 the rest of a plant (its trunk and
+    /// stems bend with the leaves, so that these do not come away from them). A `[tree]`'s
+    /// cards (`tree`) are 1 whatever this says.
+    pub sway: f32,
+    /// What the material is to the year (shader.wgsl `seasonal_colour`): 0 nothing, 8 a
+    /// deciduous plant's leaves, 16 an evergreen's, 32 grass and reeds - a picture the map
+    /// keeps for the season itself stays 0.
+    pub season: f32,
 }
 
 /// `OMSI_DEBUG_RETRO=1`: retroreflective sheeting is drawn magenta, as far as it shines
@@ -1484,6 +1575,12 @@ pub struct MaterialExtra {
 fn debug_retro() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| omsi_cfg::env::var_os("OMSI_DEBUG_RETRO").is_some_and(|v| v != "0"))
+}
+
+/// `OMSI_NO_WIND_SWAY=1`: the plants stand still whatever the wind (A/B runs).
+fn sway_off() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| omsi_cfg::env::var_os("OMSI_NO_WIND_SWAY").is_some_and(|v| v != "0"))
 }
 
 /// The textures a material's bind group samples.
@@ -2541,6 +2638,8 @@ pub struct Renderer {
     exposure: Option<f32>,
     /// What the night brightness setting adds to it (natural log, see `prepare_enhanced`).
     night_offset: f32,
+    /// A lightning flash's light this frame as drawn (`FLASH_OVER`), 0 for none.
+    flash_e: f32,
     /// The weather's own exposure by day (EV, `Lighting::weather_ev`), taken after the
     /// metering: before it, the meter lifted a storm's dark day back to a grey one.
     weather_ev: f32,
@@ -4243,7 +4342,7 @@ impl Renderer {
                     module: &ssao_shader,
                     entry_point: Some(entry),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rg16Float,
+                        format: AO_FORMAT,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -5161,6 +5260,7 @@ impl Renderer {
             sky_job: None,
             exposure: None,
             night_offset: 0.0,
+            flash_e: 0.0,
             weather_ev: 0.0,
             texture_aspect: None,
             last_frame: None,
@@ -6580,10 +6680,12 @@ impl Renderer {
                 envmap.map(|e| e.1).unwrap_or(0.0),
                 moisture,
                 // bit 1: a [matl_envmap_mask]; bit 2: a [matl_transmap]; bit 4: a vehicle's
-                // part that may be metal (see the shaders)
+                // part that may be metal (see the shaders); bits 8, 16, 32: a plant through
+                // the year (`MaterialExtra::season`)
                 (if env_mask.is_some() { 1.0 } else { 0.0 })
                     + if extra.transmap_declared || transmap.is_some() { 2.0 } else { 0.0 }
-                    + if extra.metal_ok { 4.0 } else { 0.0 },
+                    + if extra.metal_ok { 4.0 } else { 0.0 }
+                    + if [8.0, 16.0, 32.0].contains(&extra.season) { extra.season } else { 0.0 },
             ],
             emissive: [emissive[0], emissive[1], emissive[2], if extra.rain_film { 2.0 } else if extra.glass { 1.0 } else if extra.led { -2.0 } else if extra.display { -1.0 } else { 0.0 }],
             specular: extra.specular,
@@ -6617,7 +6719,8 @@ impl Renderer {
                 if extra.retroreflective { 1.0 } else { 0.0 },
                 if extra.retroreflective && debug_retro() { 1.0 } else { 0.0 },
                 if extra.wiped { 1.0 } else { 0.0 },
-                0.0,
+                // what the wind does to it (shader.wgsl `swayed`)
+                if extra.tree { 1.0 } else { extra.sway },
             ],
         };
         let slot = |t: Option<TextureId>| {
@@ -7570,8 +7673,9 @@ impl Renderer {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 // r the occlusion, g the view depth (m) it was worked out at: the main
-                // pass upsamples it by depth, not bilinearly (see `ao_at` in shader.wgsl)
-                format: wgpu::TextureFormat::Rg16Float,
+                // pass upsamples it by depth, not bilinearly (see `ao_at` in shader.wgsl);
+                // b the contact shadows (`contact_at`)
+                format: AO_FORMAT,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                     | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
@@ -7871,8 +7975,12 @@ impl Renderer {
     /// The enhanced path's light for this frame: the sky (recomputed when the sun or the
     /// weather has moved on), the exposure following it, the sky table and the uniform.
     /// Returns whether the reflection probe is to be drawn this frame.
-    fn prepare_enhanced(&mut self, lighting: &Lighting, cam_rel: Vec3, ro: DVec3, dt: f32) -> bool {
+    fn prepare_enhanced(&mut self, lighting: &Lighting, cam_rel: Vec3, ro: DVec3, dt: f32, contact: bool) -> bool {
         let (input, sun_visibility) = enhanced_sky_input(lighting, self.city_glow.unwrap_or(1.0));
+        // OMSI_DEBUG_RAINBOW: what the rainbow (sky_enhanced.wgsl `rainbow`) is made of
+        if omsi_cfg::env::var_os("OMSI_DEBUG_RAINBOW").is_some() {
+            log::info!("rainbow: wet {:.2}, cloud {:.2}, rain {:.2}, sun through {:.2}, sun {:.2}", lighting.wetness, lighting.cloud_density, lighting.rain, sun_visibility, lighting.sun_dir.normalize_or_zero().z);
+        }
         // A new sky takes a few milliseconds: it is computed on a helper thread and taken in
         // when it is ready. A picture on its own, and the first frame, wait for it.
         if let Some((_, rx)) = &self.sky_job {
@@ -7973,9 +8081,28 @@ impl Renderer {
         let pre = log_exposure.exp();
         // the fog's in-scattered light: a white sphere's average in this light
         let axes = [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z];
+        // (a lightning flash: its light comes down from the lit cloud round it and, scattered
+        // in the cloud and the rain, a good part of it from everywhere; the eye has no time
+        // to take to it, so the exposure is left alone)
+        // (and at most `FLASH_OVER` times the light the eye is taken to: a camera's or an
+        // eye's picture of a near flash at night blazes up a few stops, not to white)
+        let flash_e = lighting
+            .flash
+            .filter(|f| f.irradiance > 0.0 && f.dir.length_squared() > 0.0)
+            .map(|f| (f, f.irradiance.min(FLASH_OVER * (st.e_sun * cloud_t + e_rest).max(1e-7))));
+        self.flash_e = flash_e.map_or(0.0, |f| f.1);
+        let flash_sh = flash_e.map(|(f, e)| atmosphere::sh_of_light((f.dir.normalize() + Vec3::Z).normalize(), FLASH_COLOUR * e, FLASH_SPREAD));
+        let mut sky_sh = st.sh;
+        if let Some(f) = &flash_sh {
+            for (c, a) in sky_sh.iter_mut().zip(f) {
+                *c += *a;
+            }
+        }
+        // (the rain and the mist between take a share of the flash: all of it, and the
+        // whole distance stood white behind the stroke)
         let avg = axes
             .iter()
-            .map(|a| atmosphere::sh_irradiance(&st.sh, *a))
+            .map(|a| atmosphere::sh_irradiance(&st.sh, *a) + flash_sh.as_ref().map_or(Vec3::ZERO, |f| atmosphere::sh_irradiance(f, *a) * FLASH_IN_AIR))
             .fold(Vec3::ZERO, |a, b| a + b)
             / 6.0;
         let fog_rgb = avg * 0.9 / std::f32::consts::PI;
@@ -7990,7 +8117,7 @@ impl Renderer {
             None => cam_rel.z - 2.0,
         };
         let mut sh = [[0.0f32; 4]; 9];
-        for (k, c) in st.sh.iter().enumerate() {
+        for (k, c) in sky_sh.iter().enumerate() {
             sh[k] = c.extend(0.0).to_array();
         }
         // the probe is drawn every half second or so, and at once for a new sky
@@ -8060,7 +8187,8 @@ impl Renderer {
                 // the tone curve's contrast, which self-lit pictures undo (`display_level`)
                 tone_contrast(log_exposure),
             ],
-            eye: eye_off.extend(0.0).to_array(),
+            // (w: 1 when the occlusion's texture holds the contact shadows, `contact_on`)
+            eye: eye_off.extend(if contact { 1.0 } else { 0.0 }).to_array(),
             // x how bright an LED panel's dots burn (see `MaterialExtra::led`; the settings'
             // 16 levels give 0 = off .. 3.75), y whether the LED panels' `\S:n` masks keep
             // their mip chain (0: at full resolution, the dots stay visible when small), z
@@ -8110,6 +8238,10 @@ impl Renderer {
                     }
                 }
                 rows
+            },
+            flash: match lighting.flash.filter(|f| f.irradiance > 0.0 && f.dir.length_squared() > 0.0) {
+                Some(f) => [f.dir.normalize().extend(self.flash_e).to_array(), [f.bolt.max(0.0), f.distance.max(50.0), f.base, f.seed]],
+                None => [[0.0; 4]; 2],
             },
         };
         self.queue
@@ -9508,9 +9640,20 @@ impl Renderer {
         // mirrors, a headset's eyes or a triple screen's panels: they keep the shadow map)
         let rt_frame = self.rt.is_some() && enhanced && with_overlays && projection.is_none() && omsi_cfg::env::var_os("OMSI_NO_RT_FRAME").is_none();
         let ao_on = with_overlays && self.rt.is_none() && self.options.ssao && self.ssao_pipeline.is_some() && omsi_cfg::env::var_os("OMSI_NO_AO").is_none();
+        // the contact shadows ride on the occlusion's pass (its blue channel), with or without
+        // the occlusion itself: the window's enhanced picture in sunshine
+        let contact_on = with_overlays
+            && enhanced
+            && self.rt.is_none()
+            && projection.is_none()
+            && lighting.shadows
+            && lighting.sun_dir.normalize_or_zero().z > 0.02
+            && self.ssao_pipeline.is_some()
+            && !contact_shadows_off();
+        let ao_on_or_contact = ao_on || contact_on;
         // the enhanced path's shading is costly: the depth prepass keeps it to the visible
         // surface (without multisampling, see `share_depth`)
-        let prepass_on = ao_on || puddles_wanted || glass_on || (enhanced && (with_overlays || xr_view));
+        let prepass_on = ao_on_or_contact || puddles_wanted || glass_on || (enhanced && (with_overlays || xr_view));
         if prepass_on && self.ensure_ao(width, height) {
             // a new AO texture: the camera bind group must point at it
             scene.dirty = true;
@@ -9778,6 +9921,8 @@ impl Renderer {
             lamp_shadow: std::array::from_fn(|k| lamp_shadows.get(k).map_or(-1.0, |l| l.lights_code())),
             blockers: blocker_rows(&scene.light_blockers, ro),
             lamp_fade: std::array::from_fn(|k| lamp_shadows.get(k).map_or(0.0, |l| l.fade)),
+            breeze: [lighting.wind.x, lighting.wind.y, lighting.gust.clamp(0.0, 1.0), if sway_off() { 0.0 } else { lighting.sway.clamp(0.0, 4.0) }],
+            season: lighting.foliage.map(|v| v.clamp(0.0, 1.0)),
         };
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cu));
@@ -9811,7 +9956,7 @@ impl Renderer {
         }
         let probe_redraw = enhanced
             && (lead_view || self.sky_state.is_none())
-            && self.prepare_enhanced(lighting, cam_rel, ro, dt);
+            && self.prepare_enhanced(lighting, cam_rel, ro, dt, contact_on);
         // --- what every pass draws, as batches over one draw list (see `Batch`): the shadow
         // casters of each cascade, the depth prepass and the main pass. The list is built
         // and uploaded before any pass is encoded.
@@ -10930,11 +11075,16 @@ impl Renderer {
                 inv_proj: proj.inverse().to_cols_array_2d(),
                 params: [
                     1.0,
-                    1.4,
+                    // (the occlusion's strength; 0 when only the contact shadows are wanted)
+                    if ao_on { 1.4 } else { 0.0 },
                     width.div_ceil(2) as f32,
                     height.div_ceil(2) as f32,
                 ],
                 shift: [proj.z_axis.x, proj.z_axis.y, 0.0, 0.0],
+                sun: Mat4::look_to_rh(Vec3::ZERO, camera.forward(), camera.up())
+                    .transform_vector3(lighting.sun_dir.normalize_or(Vec3::Z))
+                    .extend(if contact_on { 1.0 } else { 0.0 })
+                    .to_array(),
             };
             self.queue
                 .write_buffer(&self.ao_buf, 0, bytemuck::bytes_of(&u));
@@ -10964,7 +11114,7 @@ impl Renderer {
                 (&self.ssao_pipeline, &ao.ssao_bg, &ao.ao_view, "ssao"),
                 (&self.blur_pipeline, &ao.blur_bg, &ao.blur_view, "ssao blur"),
             ] {
-                let Some(pipe) = pipe.as_ref().filter(|_| ao_on) else {
+                let Some(pipe) = pipe.as_ref().filter(|_| ao_on_or_contact) else {
                     break;
                 };
                 let mut pass = prepass_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -13288,6 +13438,7 @@ fn scene_shader_text(gl: bool) -> String {
         include_str!("enhanced_common.wgsl"),
         include_str!("puddle_common.wgsl"),
         include_str!("lamp_air.wgsl"),
+        include_str!("blockers.wgsl"),
         include_str!("enhanced.wgsl"),
     ]
     .join("\n");
@@ -13379,6 +13530,7 @@ fn snow_shader_source() -> String {
         include_str!("enhanced_common.wgsl"),
         FOG_LAMP_LIGHTS,
         include_str!("lamp_air.wgsl"),
+        include_str!("blockers.wgsl"),
     ]
     .join("\n");
     if array_path() == ArrayPath::NoStorage {
@@ -13414,9 +13566,14 @@ fn fog_lamps_shader_source() -> String {
         include_str!("enhanced_common.wgsl"),
         FOG_LAMP_LIGHTS,
         include_str!("lamp_air.wgsl"),
+        include_str!("blockers.wgsl"),
     ]
     .join("\n")
 }
+
+/// `beam_blocked` (blockers.wgsl) for a module whose camera holds no blockers: the light
+/// passes.
+const BEAM_BLOCKED_NONE: &str = "fn beam_blocked(p: vec3<f32>, lamp: vec3<f32>, mask: u32) -> f32 { return 1.0; }\n";
 
 /// The scene's point lights and their grid as the fog pass reads them (`lamp_air.wgsl`):
 /// the scene shader's declarations.
@@ -13438,6 +13595,7 @@ fn corona_shader_source() -> String {
         include_str!("enhanced_common.wgsl"),
         FOG_LAMP_LIGHTS,
         include_str!("lamp_air.wgsl"),
+        BEAM_BLOCKED_NONE,
     ]
     .join("\n");
     // (without storage buffers the precipitation has no lamps to be lit by)

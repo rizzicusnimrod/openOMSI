@@ -68,6 +68,12 @@ impl Rules {
     /// `object` (its .sco file) is sheeting. An `object:` rule sees the object's path from
     /// its `Sceneryobjects` folder on (the OMSI folder's own path is no part of it).
     pub(crate) fn sheeting(&self, texture: &str, object: &Path) -> bool {
+        self.matches(texture, object)
+    }
+
+    /// Whether the rules take `texture` of the object at `object` (the same rules serve
+    /// other lists of names than the sheeting, `crate::foliage`'s plants).
+    pub(crate) fn matches(&self, texture: &str, object: &Path) -> bool {
         let name = texture.replace('\\', "/");
         let stem = Path::new(&name).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
         if stem.is_empty() {
@@ -103,38 +109,45 @@ impl Rules {
 /// The rules of the map being loaded (`set_map`); the defaults before one is.
 static RULES: RwLock<Option<Arc<Rules>>> = RwLock::new(None);
 
-fn global_path() -> Option<PathBuf> {
+fn global_path(file: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(PathBuf::from(home).join(".openomsi").join(FILE))
+    Some(PathBuf::from(home).join(".openomsi").join(file))
 }
 
 /// The global rules: the player's file, written with the defaults when there is none.
-fn global_text() -> String {
-    let Some(p) = global_path() else { return DEFAULTS.to_string() };
+fn global_text(file: &str, defaults: &str, label: &str) -> String {
+    let Some(p) = global_path(file) else { return defaults.to_string() };
     match std::fs::read(&p) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(_) => {
             let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
-            match std::fs::write(&p, DEFAULTS) {
-                Ok(()) => log::info!("retroreflective: wrote the default rules to {}", p.display()),
-                Err(e) => log::warn!("retroreflective: could not write {}: {e}", p.display()),
+            match std::fs::write(&p, defaults) {
+                Ok(()) => log::info!("{label}: wrote the default rules to {}", p.display()),
+                Err(e) => log::warn!("{label}: could not write {}: {e}", p.display()),
             }
-            DEFAULTS.to_string()
+            defaults.to_string()
         }
     }
 }
 
-/// Take the rules for the map in `map_dir`: the global file's, then the map's own file's.
-pub(crate) fn set_map(map_dir: &Path) {
-    let mut rules = Rules::parse(&global_text());
+/// A rules file for the map in `map_dir`: the global one (`~/.openomsi/<file>`, written
+/// with `defaults` when missing), then the map's own beside its global.cfg.
+pub(crate) fn map_rules(file: &str, defaults: &str, label: &str, map_dir: &Path, verbose: bool) -> Rules {
+    let mut rules = Rules::parse(&global_text(file, defaults, label));
     let global = rules.len();
-    let own = omsi_cfg::resolve_path(map_dir, FILE);
+    let own = omsi_cfg::resolve_path(map_dir, file);
     if let Ok(text) = omsi_cfg::vfs::read(&own) {
         rules.rules.extend(Rules::parse(&String::from_utf8_lossy(&text)).rules);
-        log::info!("retroreflective: {global} global rules, {} of the map's own ({})", rules.len() - global, own.display());
-    } else if debug() {
-        log::info!("retroreflective: {global} global rules, the map has no {FILE}");
+        log::info!("{label}: {global} global rules, {} of the map's own ({})", rules.len() - global, own.display());
+    } else if verbose {
+        log::info!("{label}: {global} global rules, the map has no {file}");
     }
+    rules
+}
+
+/// Take the rules for the map in `map_dir`: the global file's, then the map's own file's.
+pub(crate) fn set_map(map_dir: &Path) {
+    let rules = map_rules(FILE, DEFAULTS, "retroreflective", map_dir, debug());
     if let Ok(mut r) = RULES.write() {
         *r = Some(Arc::new(rules));
     }

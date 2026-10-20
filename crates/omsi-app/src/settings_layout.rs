@@ -279,6 +279,11 @@ pub const OPTIONS: &[PageDef] = &[
                 it("reflections", "Reflections", "Paint, chrome and glass reflect their surroundings"),
                 it("clouds", "Clouds", "A sky with moving clouds"),
             ]),
+            sec("Nature", &[
+                it("wind_sway", "Wind in the trees", "How much trees, bushes and grass move in the wind"),
+                it("seasonal_foliage", "Trees through the year", "Autumn colours, bare winter trees and fresh spring green"),
+                it("lightning", "Lightning and thunder", "Thunderstorms flash and rumble"),
+            ]),
             sec("Detail", &[
                 it("detail_textures", "Fine detail up close", "The ground and large walls get a fine grain when you are near"),
                 it("sel mirror_size", "Mirror quality", "How sharp the mirrors are"),

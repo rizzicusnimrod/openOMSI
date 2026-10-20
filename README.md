@@ -85,6 +85,20 @@ plain openOMSI's releases. *Settings → Install updates without asking* skips t
 * No light column over low beams in rain, softer lamp-lit fog, and the weather's own cloud
   picture on the sky.
 
+### Nature
+
+* **Trees in the wind:** trees, bushes, hedges and grass sway with the weather's wind, gusts
+  sweep across the land and leaves flutter (*Wind in the trees* in the Graphics settings).
+  Which objects are plants is listed in `foliage.cfg`, like the reflective signs.
+* **Trees through the year:** autumn colours from mid-September, bare crowns in winter and
+  fresh green in spring, on maps that have no seasonal trees of their own (conifers stay
+  green).
+* **Lightning and thunder:** thunderstorms flash in the clouds and strike the ground, the
+  street lit for an instant, and the thunder rolls in after it - later the farther away it
+  struck.
+* **Rainbows** opposite a low sun when it rains or showers are about, and short **contact
+  shadows** where kerbs, posts and wheels meet the ground (Enhanced graphics).
+
 ### AI traffic and drivers
 
 * Drivers switch their lights on by the weather and the time, use hazards and the horn, flash

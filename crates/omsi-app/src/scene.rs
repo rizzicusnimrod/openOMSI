@@ -2853,6 +2853,7 @@ impl World {
         crate::humans::LEFT_HAND.store(global.left_hand_traffic, std::sync::atomic::Ordering::Relaxed);
         crate::lights::set_halogen_map(&map_dir);
         crate::retro::set_map(&map_dir);
+        crate::foliage::set_map(&map_dir);
         log::info!(
             "tile size {:.1} m ({})",
             omsi_map::tile_size(),
@@ -6163,6 +6164,16 @@ impl World {
             terrain_slots: Vec::new(),
             terrain_rest: Vec::new(),
         };
+        // A plant (`crate::foliage`): one of its see-through textures is leaves. Then the
+        // whole object bends in the wind, its trunk too, and those textures flutter on top.
+        // (Never what lies on the ground.)
+        let plant = !(ot.sco.render_type.is_ground_layer() || ot.sco.surface || ot.sco.is_help_arrow)
+            && ot.meshes.iter().any(|(_, mats, ov)| {
+                mats.iter().enumerate().any(|(slot, m)| crate::foliage::leaves(&m.texture, &ot.sco.path, material_alpha(mats, slot, ov) != AlphaMode::Opaque))
+            });
+        if plant && crate::foliage::debug() {
+            log::info!("foliage: {} is a plant", ot.sco.path.display());
+        }
         for (mesh, o3d_mats, overrides) in &ot.meshes {
             let mut mats: Vec<MaterialId> = Vec::new();
             for (slot, m) in o3d_mats.iter().enumerate() {
@@ -6301,6 +6312,21 @@ impl World {
                 extra.ambient = Some(ambient);
                 extra.no_map_lights = ot.sco.no_map_lighting;
                 extra.retroreflective = retroreflective_texture(&m.texture, &ot.sco);
+                if plant {
+                    let leaves = crate::foliage::leaves(&m.texture, &ot.sco.path, alpha != AlphaMode::Opaque);
+                    extra.sway = if leaves {
+                        crate::foliage::SWAY_LEAVES
+                    } else if crate::foliage::stem(&m.texture, &ot.sco.path) {
+                        crate::foliage::SWAY_STEM
+                    } else {
+                        0.0
+                    };
+                    // (the leaves turn with the year, unless the map has the season's own picture)
+                    let dirs_ref: Vec<&Path> = dirs.iter().map(|p| p.as_path()).collect();
+                    if leaves && !seasonal_texture(&m.texture, &dirs_ref) {
+                        extra.season = crate::foliage::season_kind(&m.texture);
+                    }
+                }
                 if tex.is_some() {
                     let dirs_ref: Vec<&Path> = dirs.iter().map(|p| p.as_path()).collect();
                     let c = self.textures.cfg(&m.texture, &dirs_ref);
@@ -6368,6 +6394,8 @@ impl World {
                     it_extra.no_z_check |= extra.no_z_check;
                     it_extra.glass |= extra.glass;
                     it_extra.retroreflective = extra.retroreflective;
+                    it_extra.sway = extra.sway;
+                    it_extra.season = extra.season;
                     renderer.address_next.set(address);
                     renderer.light_map_next.set(ot.sco.light_map_mapping);
                     let it_light = match items.iter().find_map(|o| o.lightmap.clone()) {
@@ -7122,8 +7150,15 @@ impl World {
                                 None,
                                 None,
                                 [0.0; 3],
+                                // (`tree`: its cards sway in the wind as a whole, shader.wgsl
+                                // `swayed`; and they turn with the year, unless the map has
+                                // the season's own picture of the tree)
                                 omsi_render::MaterialExtra {
                                     tree: true,
+                                    season: {
+                                        let dirs_ref: Vec<&Path> = dirs.iter().map(|p| p.as_path()).collect();
+                                        if seasonal_texture(texture, &dirs_ref) { 0.0 } else { crate::foliage::season_kind(texture) }
+                                    },
                                     ..Default::default()
                                 },
                             );
@@ -7377,6 +7412,8 @@ impl World {
                                 // (a direction sign's own text, on the sign's sheeting)
                                 extra.retroreflective = retroreflective_texture(name, &ot.sco)
                                     || o3d_mats.get(slot).is_some_and(|m| retroreflective_texture(&m.texture, &ot.sco));
+                                extra.sway = base.sway();
+                                extra.season = base.season();
                                 renderer.address_next.set(tex_addressing(slot_ov.iter().copied()));
                                 let mat = renderer.add_material_extra(scene, Some(tex), alpha, color, unlit, transmap, night, light, env, emissive, extra);
                                 let mat = gpu.material(renderer, scene, mat);
@@ -10455,6 +10492,8 @@ fn material_extra(
             .map(|o| o.border_color.map(|c| (c / 255.0).clamp(0.0, 1.0))),
         metal_ok: false,
         retroreflective: false,
+        sway: 0.0,
+        season: 0.0,
     }
 }
 

@@ -93,7 +93,7 @@ impl CustomWeather {
             path:std::path::PathBuf::from(c.encode()),name:"Custom weather".into(),description:"User-defined weather".into(),
             fog:(c.visibility_m,1.0),wind:(c.wind_dir,c.wind_speed),temp:(c.temp_c,absolute_humidity(c.temp_c,c.humidity)),
             pressure:c.pressure,clouds:(cloud.into(),c.cloud_base_m),precip:vec![c.precip as f32,c.precip_intensity,0.0,0.0,0.0],
-            ground_wet:[c.road_wetness*255.0,0.0,0.0],snow:c.snow_cover,snow_on_road:c.snow_on_road,sky:None}
+            ground_wet:[c.road_wetness*255.0,0.0,0.0],snow:c.snow_cover,snow_on_road:c.snow_on_road,sky:None,thunder:0.0}
     }
 }
 fn saturation_vapour_pressure(temp_c:f32)->f32{6.112*((17.67*temp_c)/(temp_c+243.5)).exp()}
@@ -457,6 +457,19 @@ pub(crate) fn road_wetness(rate: f32, secs: f64, start: f32) -> f32 {
     }
 }
 
+/// How gusty the weather's wind is (0 steady .. 1 a squall's), which a weather file does not
+/// say: a wind under a clear or a grey sky blows fairly steady, one under heaped cloud in
+/// gusts, more the stronger it is, and a thunderstorm's in squalls (`Lighting::gust`).
+pub(crate) fn gustiness(w: &omsi_content::weather::Weather) -> f32 {
+    let heaped = match w.sky {
+        Some(s) => s.cumulus / 0.85,
+        None if w.clouds.0.trim().to_ascii_lowercase().starts_with("cumulus") => 0.6,
+        None => 0.2,
+    };
+    let strong = ((w.wind.1 - 4.0) / 10.0).clamp(0.0, 1.0);
+    (0.2 + 0.35 * heaped + 0.3 * strong + 0.3 * crate::lightning::storminess(w)).clamp(0.0, 1.0)
+}
+
 /// The renderer's lighting for this weather at this moment: the daylight, then what the
 /// cloud cover, the rain and the snow make of it.
 pub(crate) fn weather_lighting(
@@ -515,8 +528,10 @@ pub(crate) fn weather_lighting(
     lighting.wetness = wetness;
     // (a preset's gloom: `Sky::exposure`)
     lighting.weather_ev = w.sky.map_or(0.0, |s| s.exposure);
-    // [wind] direction (deg) and speed (m/s): the snowfall drifts with it
+    // [wind] direction (deg) and speed (m/s): the snowfall drifts with it, the plants sway
     lighting.wind = glam::Vec3::new(w.wind.0.to_radians().sin() * w.wind.1, w.wind.0.to_radians().cos() * w.wind.1, 0.0);
+    lighting.sway = crate::startup::WIND_SWAY.load(std::sync::atomic::Ordering::Relaxed).min(200) as f32 / 100.0;
+    lighting.gust = gustiness(w);
     // Omsi.exe hides the sun under an 'ovc' cloud type (the Overcast ones in clouds.cfg) and
     // draws no sun shadows below 350 m visibility
     let overcast = w.clouds.0.trim().to_ascii_lowercase().starts_with("overcast");

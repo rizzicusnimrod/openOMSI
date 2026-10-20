@@ -31,6 +31,11 @@ struct Camera {
     blockers: array<vec4<f32>, 72>,
     // Enhanced: how much of each lamp shadow map's shadow shows (fading in or out)
     lamp_fade: vec4<f32>,
+    // the wind the plants sway in: xy the weather's wind (m/s, east and north), z its
+    // gustiness (0..1), w how much they move (0: still; see `swayed`)
+    breeze: vec4<f32>,
+    // the trees through the year (shader.wgsl `seasonal_colour`)
+    season: vec4<f32>,
 };
 
 // 1 when the point lies inside the player's vehicle (its [boundingbox], shrunk a little so
@@ -249,15 +254,23 @@ fn ao_at(frag: vec2<f32>, world: vec3<f32>) -> f32 {
         let t = rt_at(frag, world);
         return select(t.x, 1.0, t.w < 0.5);
     }
+    return occlusion_texel(frag, world).r;
+}
+
+// The occlusion pass's picture (r the occlusion, b the contact shadows) at a pixel of the
+// full picture, by the depth-aware upsample `ao_at` describes; all lit where the surface is
+// not in the depth prepass (a door or panel drawn in front of what the pass saw - the shade
+// behind it must not show).
+fn occlusion_texel(frag: vec2<f32>, world: vec3<f32>) -> vec4<f32> {
     let size = vec2<i32>(textureDimensions(t_ao));
     let z = (camera.view_proj * vec4<f32>(world, 1.0)).w;
     let f = frag * 0.5 - vec2<f32>(0.5);
     let base = vec2<i32>(floor(f));
     let fr = f - floor(f);
     let tol = 0.04 + 0.015 * z;
-    var sum = 0.0;
+    var sum = vec4<f32>(0.0);
     var wsum = 0.0;
-    var best = 1.0;
+    var best = vec4<f32>(1.0);
     var best_d = 1e9;
     for (var j = 0; j < 2; j = j + 1) {
         for (var i = 0; i < 2; i = i + 1) {
@@ -266,18 +279,16 @@ fn ao_at(frag: vec2<f32>, world: vec3<f32>) -> f32 {
             let bw = select(1.0 - fr.x, fr.x, i == 1) * select(1.0 - fr.y, fr.y, j == 1);
             let dz = abs(s.g - z);
             let w = bw * (1.0 - smoothstep(0.0, tol, dz)) + 1e-4 * bw;
-            sum = sum + s.r * w;
+            sum = sum + s * w;
             wsum = wsum + w;
             if (dz < best_d) {
                 best_d = dz;
-                best = s.r;
+                best = s;
             }
         }
     }
-    // no AO sample at this surface's depth: the surface is not in the depth prepass (a
-    // door or panel drawn in front of what the AO saw) - the AO behind it must not show
     if (best_d > tol * 1.5) {
-        return 1.0;
+        return vec4<f32>(1.0);
     }
     return select(best, sum / wsum, wsum > 0.02);
 }
@@ -475,6 +486,153 @@ fn bump_offset(uv: vec2<f32>) -> vec2<f32> {
     return clamp(vec2<f32>(h - hx, h - hy) * 2.0, vec2<f32>(-1.0), vec2<f32>(1.0)) * material.bump.x;
 }
 
+// Plants in the wind (`camera.breeze`; what a material is to it in `material.retro.w`, see
+// `MaterialExtra::sway`: 1 a [tree]'s cards, 2 a plant's leaves, 3 its trunk and stems). A
+// plant leans away from the wind and swings about that lean, slowly and as a whole, its top
+// the most - a stem's first mode: the bend grows with the square of the height over its
+// foot, and the taller the plant, the slower the swing. The lean goes with the wind's push,
+// the square of its speed: hardly anything in a light air, crowns in constant motion at
+// 5 m/s, whole small trees swaying at 10 (Beaufort's scale). Gusts are bands across the
+// wind that sweep over the land along it, so a row of trees takes one after the other; the
+// leaves flutter on their own, fast and small. Every pass that draws a plant - the depth
+// prepasses, the shadow maps, the main pass - moves it alike (the main pass tests against
+// the depth the prepass left), from what the vertex and its instance alone say.
+const SWAY_LEAN: f32 = 0.00022;
+const SWAY_MAX_LEAN: f32 = 0.07;
+const SWAY_GUST_SPEED: f32 = 7.0;
+const SWAY_FLUTTER_HZ: f32 = 3.1;
+fn swayed(m: mat4x4<f32>, local: vec3<f32>, wp: vec4<f32>) -> vec4<f32> {
+    let kind = material.retro.w;
+    let k = camera.breeze.w;
+    if (kind < 0.5 || k <= 0.0) {
+        return wp;
+    }
+    let foot = m[3].xyz;
+    // the plant's place on the map (the render origin taken modulo 70 km: the same for as
+    // long as it stays in the map), and from it, on a half-metre grid so that the floating
+    // origin's rounding never moves it, a number of its own
+    let place = foot.xy + camera.world_origin.zw;
+    let q = vec2<u32>(vec2<i32>(floor(place * 2.0)));
+    var hsh = q.x * 1664525u + q.y * 1013904223u;
+    hsh = (hsh ^ (hsh >> 16u)) * 2246822519u;
+    hsh = hsh ^ (hsh >> 13u);
+    let seed = f32(hsh & 0xffffu) / 65535.0;
+    var h: f32;
+    var tall: f32;
+    if (kind < 1.5) {
+        // a [tree]'s cards: a card a metre high scaled to the tree (scene.rs tree_quad_mesh)
+        tall = max(length(m[2].xyz), 1.0);
+        h = clamp(local.z, 0.0, 1.0) * tall;
+    } else {
+        // a modelled plant, standing on its origin: of a common tree's height, and above it
+        // bending on alike rather than ever more
+        h = clamp(wp.z - foot.z, 0.0, 30.0);
+        tall = max(12.0, h);
+    }
+    let speed = length(camera.breeze.xy);
+    let dir = select(vec2<f32>(0.7071, 0.7071), camera.breeze.xy / max(speed, 1e-3), speed > 0.05);
+    let across = vec2<f32>(-dir.y, dir.x);
+    // (still air stirs them a little all the same)
+    let v = max(speed, 1.0);
+    let t = camera.post.y;
+    let along = dot(place, dir);
+    let side = dot(place, across);
+    let g1 = sin((along - t * SWAY_GUST_SPEED) * 0.045 + sin(side * 0.021) * 1.7);
+    let g2 = sin((along - t * SWAY_GUST_SPEED) * 0.017 + 1.3 + side * 0.008);
+    let gust = clamp(0.5 + 0.35 * g1 + 0.25 * g2, 0.0, 1.0);
+    let gusty = camera.breeze.z;
+    let push = 1.0 + gusty * (gust * 1.6 - 0.6);
+    let lean = min(SWAY_LEAN * v * v * push, SWAY_MAX_LEAN) * k;
+    let freq = (0.22 + 2.4 / (tall + 4.0)) * (0.85 + 0.3 * seed);
+    let ph = (t * freq + seed) * 6.2832;
+    let swing = lean * (0.25 + 0.5 * gusty * gust) * sin(ph);
+    let side_swing = lean * 0.3 * (0.25 + 0.5 * gusty) * sin(ph * 1.37 + 2.1);
+    let bend = h * h / tall;
+    var off = vec3<f32>((dir * (lean + swing) + across * side_swing) * bend, 0.0);
+    // (the top comes down a little as it bends over)
+    off.z = -0.5 * dot(off.xy, off.xy) / max(h, 0.5);
+    if (kind > 1.5 && kind < 2.5) {
+        // leaves flutter, each its own way, a few centimetres - least near the ground
+        let lp = local * 3.1 + vec3<f32>(seed * 17.0);
+        let a = (0.012 + 0.002 * v) * (0.5 + gusty * gust) * k * min(h / 1.5 + 0.3, 1.0);
+        let w = t * SWAY_FLUTTER_HZ * 6.2832;
+        off += vec3<f32>(sin(w + lp.x * 1.7 + lp.y), sin(w * 0.86 + lp.y * 1.9 + lp.z), 0.6 * sin(w * 1.21 + lp.z * 2.3 + lp.x)) * a;
+    }
+    return vec4<f32>(wp.xyz + off, wp.w);
+}
+
+// The trees through the year (`camera.season`, lib.rs `Lighting::foliage`: x the autumn
+// colours, y the leaves gone, z spring's fresh green, w 1 when on), on what the material's
+// `params2.w` bits mark as a plant (`MaterialExtra::season`: 8 a deciduous plant's leaves,
+// 16 an evergreen's, 32 grass and reeds) - only where the map has no picture of its own for
+// the season. A texel is a leaf by its green: the summer pictures are all the maps have.
+fn foliage_kind() -> u32 {
+    return (u32(material.params2.w + 0.5) >> 3u) & 7u;
+}
+// How much a texel is leaf: coloured (not a trunk's grey or a birch's white) and of a hue
+// from yellow to green (not bark's brown) - a birch's light yellow-green leaves too.
+fn leaf_green(c: vec3<f32>) -> f32 {
+    let hi = max(c.r, max(c.g, c.b));
+    let sat = (hi - min(c.r, min(c.g, c.b))) / max(hi, 0.02);
+    let hue = smoothstep(0.72, 0.88, c.g / max(c.r, 0.02)) * select(0.0, 1.0, c.g >= c.b);
+    return clamp(sat * 3.0 - 0.3, 0.0, 1.0) * hue;
+}
+// A number of the plant's own: the trees of a row turn one by one, not all at once.
+fn plant_seed(world: vec3<f32>) -> f32 {
+    let q = vec2<u32>(vec2<i32>(floor((world.xy + camera.world_origin.zw) / 6.0)));
+    var h = q.x * 747796405u + q.y * 2891336453u;
+    h = (h ^ (h >> 16u)) * 2246822519u;
+    return f32((h ^ (h >> 13u)) & 0xffffu) / 65535.0;
+}
+fn seasonal_colour(c: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
+    let kind = foliage_kind();
+    let s = camera.season;
+    if (kind == 0u || s.w < 0.5) {
+        return c;
+    }
+    let green = leaf_green(c);
+    let lum = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    if (kind == 1u) {
+        // each tree its own: early or late, yellow, orange or red
+        let seed = plant_seed(world);
+        let turn = clamp(s.x * 1.4 - 0.2 + (seed - 0.5) * 0.6, 0.0, 1.0);
+        let hue = fract(seed * 7.31);
+        let fall = select(select(vec3<f32>(0.95, 0.72, 0.18), vec3<f32>(0.93, 0.47, 0.12), hue > 0.5), vec3<f32>(0.78, 0.22, 0.1), hue > 0.85);
+        var out = mix(c, fall * lum * 1.9, turn * green);
+        // what is left after the fall: a haze of grey-brown twigs
+        out = mix(out, mix(vec3<f32>(0.19, 0.17, 0.15), c, 0.1), s.y * green);
+        // spring's light fresh green
+        return mix(out, c * vec3<f32>(1.04, 1.12, 0.78) + vec3<f32>(0.02, 0.03, 0.0), s.z * green);
+    }
+    if (kind == 2u) {
+        // an evergreen darkens a little in the winter
+        return mix(c, c * vec3<f32>(0.82, 0.86, 0.9), s.y * 0.6);
+    }
+    // grass and reeds: straw in the winter, a touch of it in the autumn
+    return mix(c, vec3<f32>(0.64, 0.54, 0.34) * lum * 1.6, max(s.y * 0.75, s.x * 0.3) * green);
+}
+// A deciduous plant's leaves gone with the fall: its leaf-green texels cut away by a number
+// of their own, more as the fall goes on (at most `FALL_CUT` of them: a bare crown is still
+// a haze of twigs), the same in every pass that cuts the plant out - the shadow maps, the
+// prepass and the picture. The blocks a number holds for grow with the pixel's footprint
+// on the texture, by powers of two as the mip levels do: a pixel keeps or loses its leaf
+// as the view moves instead of flickering between texels it no longer resolves.
+const FALL_CUT: f32 = 0.78;
+fn seasonal_alpha(a: f32, c: vec3<f32>, uv: vec2<f32>, world: vec3<f32>) -> f32 {
+    let size = vec2<f32>(textureDimensions(t_diffuse));
+    let footprint = max(max(length(dpdx(uv * size)), length(dpdy(uv * size))), 1.0);
+    let s = camera.season;
+    if (s.w < 0.5 || s.y <= 0.0 || foliage_kind() != 1u) {
+        return a;
+    }
+    let block = 2.0 * exp2(ceil(log2(footprint)));
+    let cell = vec2<u32>(vec2<i32>(floor(uv * size / block)));
+    var h = cell.x * 1664525u + cell.y * 1013904223u + u32(plant_seed(world) * 65535.0) + u32(block) * 374761393u;
+    h = (h ^ (h >> 16u)) * 2246822519u;
+    let r = f32((h ^ (h >> 13u)) & 0xffffu) / 65535.0;
+    return select(a, 0.0, leaf_green(c) > 0.25 && r < s.y * FALL_CUT);
+}
+
 struct VsIn {
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -566,7 +724,7 @@ fn vertex_specular(wp: vec3<f32>, n: vec3<f32>) -> array<vec3<f32>, 2> {
 fn vs_main(in: VsIn) -> VsOut {
     let e = draw_list[in.inst];
     let m = model_matrix(e);
-    let wp = m * vec4<f32>(in.pos, 1.0);
+    let wp = swayed(m, in.pos, m * vec4<f32>(in.pos, 1.0));
     var out: VsOut;
     // Road surfaces (splines, the objects lying on them, a shadow blob) are pulled towards
     // the eye along the line of sight - the picture does not move, only the depth - so that
@@ -671,7 +829,7 @@ fn shadow_caster_pos(e: u32, wp: vec4<f32>) -> vec4<f32> {
 fn vs_shadow(in: VsIn) -> VsOut {
     let e = draw_list[in.inst];
     let m = model_matrix(e);
-    let wp = shadow_caster_pos(e, m * vec4<f32>(in.pos, 1.0));
+    let wp = shadow_caster_pos(e, swayed(m, in.pos, m * vec4<f32>(in.pos, 1.0)));
     var out: VsOut;
     out.clip = camera.light_view_proj * wp;
     out.world = wp.xyz;
@@ -692,7 +850,7 @@ fn vs_shadow(in: VsIn) -> VsOut {
 fn vs_shadow_close(in: VsIn) -> VsOut {
     let e = draw_list[in.inst];
     let m = model_matrix(e);
-    let wp = shadow_caster_pos(e, m * vec4<f32>(in.pos, 1.0));
+    let wp = shadow_caster_pos(e, swayed(m, in.pos, m * vec4<f32>(in.pos, 1.0)));
     var out: VsOut;
     out.clip = camera.light_view_proj_close * wp;
     out.world = wp.xyz;
@@ -713,7 +871,7 @@ fn vs_shadow_close(in: VsIn) -> VsOut {
 fn vs_shadow_far(in: VsIn) -> VsOut {
     let e = draw_list[in.inst];
     let m = model_matrix(e);
-    let wp = shadow_caster_pos(e, m * vec4<f32>(in.pos, 1.0));
+    let wp = shadow_caster_pos(e, swayed(m, in.pos, m * vec4<f32>(in.pos, 1.0)));
     var out: VsOut;
     out.clip = camera.light_view_proj_far * wp;
     out.world = wp.xyz;
@@ -739,7 +897,7 @@ fn vs_shadow_far(in: VsIn) -> VsOut {
 fn shadow_lamp(in: VsIn, inst: u32, k: u32) -> VsOut {
     let e = draw_list[inst];
     let m = model_matrix(e);
-    let wp = m * vec4<f32>(in.pos, 1.0);
+    let wp = swayed(m, in.pos, m * vec4<f32>(in.pos, 1.0));
     var out: VsOut;
     out.clip = camera.lamp_view_proj[k] * wp;
     out.world = wp.xyz;
@@ -813,12 +971,14 @@ fn fs_shadow_test(in: FsIn) {
     // paint/gloss value rather than coverage (vehicle bodies use values such as 0.03). Only
     // alpha-test materials use diffuse alpha as a cutout; blended bodies are solid unless a
     // real transmap supplies coverage.
-    var a = select(diffuse_border(textureSample(t_diffuse, s_diffuse, duv), duv).a, 1.0, material.params.x > 1.5 && material.params.z < 0.5);
+    let dtex = diffuse_border(textureSample(t_diffuse, s_diffuse, duv), duv);
+    var a = select(dtex.a, 1.0, material.params.x > 1.5 && material.params.z < 0.5);
     if (material.params.z > 0.5) {
         // (the transmap stays where it is: [texcoordtransX/Y] only moves the diffuse stage)
         let tm = sample_transmap(tex_address(in.uv - in.params.zw));
         a = select(1.0, tm.a, material.params.w > 0.5);
     }
+    a = seasonal_alpha(a, dtex.rgb, in.uv, in.world);
     if (a < 0.5) {
         discard;
     }
@@ -839,11 +999,13 @@ fn fs_cutout_core(in: FsIn) -> @location(0) vec4<f32> {
     if (material.extra.x > 0.5) {
         duv = in.uv * material.extra.z;
     }
-    var a = diffuse_border(textureSample(t_diffuse, s_diffuse, duv), duv).a;
+    let dtex = diffuse_border(textureSample(t_diffuse, s_diffuse, duv), duv);
+    var a = dtex.a;
     if (material.params.z > 0.5) {
         let tm = sample_transmap(tex_address(in.uv - in.params.zw));
         a = select(1.0, tm.a, material.params.w > 0.5);
     }
+    a = seasonal_alpha(a, dtex.rgb, in.uv, in.world);
     let mode = material.params.x;
     if (mode > 0.5 && mode < 1.5) {
         let aa = max(fwidth(a) * 0.5, 1.0 / 255.0);
@@ -1699,6 +1861,8 @@ fn shade_vanilla(in: FsIn, puddle_weight: ptr<function, f32>, eye: vec3<f32>) ->
             tex.a = smoothstep(0.32, 0.68, tex.a);
         }
     }
+    // (the fall's and the winter's bare crowns, `seasonal_alpha`)
+    tex.a = seasonal_alpha(tex.a, tex.rgb, in.uv, in.world);
     let mode = material.params.x;
     // Mip-filtered alpha is the fraction of the pixel covered by leaves or fence wires.
     // Tighten the transition around the cutout edge before MSAA turns it into sample
@@ -1729,7 +1893,7 @@ fn shade_vanilla(in: FsIn, puddle_weight: ptr<function, f32>, eye: vec3<f32>) ->
         ao = ao_at(in.clip.xy, in.world);
     }
     var diffuse = camera.sun_color.rgb * camera.sun_dir.w * ndl * shadow + (camera.sky_color.rgb * from_above * (0.6 + 0.4 * shadow) + camera.ambient.xyz) * ao;
-    var albedo = tex.rgb;
+    var albedo = seasonal_colour(tex.rgb, in.world);
     if (camera.flags.x > 0.5 && (material.extra.x > 0.5 || in.params2.w > 0.5)) {
         // detail texturing (setting): procedural grain on the ground and the roads, fading out with distance
         let dist0 = distance(in.world, camera.cam_pos.xyz);

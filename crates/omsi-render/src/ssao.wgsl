@@ -5,6 +5,8 @@ struct SsaoParams {
     params: vec4<f32>,
     // xy: the projection's off-centre shift (m20, m21), zero for a symmetric frustum
     shift: vec4<f32>,
+    // the contact shadows: xyz towards the sun in the view's frame, w 1 to trace them
+    sun: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> p: SsaoParams;
 @group(0) @binding(1) var t_depth: texture_depth_2d;
@@ -57,7 +59,7 @@ fn fs_ssao(in: VsOut) -> @location(0) vec4<f32> {
     let px = vec2<i32>(in.clip.xy);
     let d0 = textureLoad(t_depth, px * 2, 0);
     if (d0 <= 0.0) {
-        return vec4<f32>(1.0, 60000.0, 0.0, 0.0); // sky
+        return vec4<f32>(1.0, 60000.0, 1.0, 1.0); // sky
     }
     let pos = view_pos(px);
     // the normal from the depth neighbourhood (the smaller step of each pair, so an edge
@@ -82,7 +84,8 @@ fn fs_ssao(in: VsOut) -> @location(0) vec4<f32> {
     // moved as the head turned: close to the camera the radius shrinks with the distance.
     let radius = min(p.params.x, 0.3 + 0.1 * -pos.z);
     var occ = 0.0;
-    let count = 12;
+    // (none when only the contact shadows are asked for)
+    let count = select(0, 12, p.params.y > 0.0);
     for (var i = 0; i < count; i = i + 1) {
         let fi = f32(i);
         // a spiral over the hemisphere, denser near the middle
@@ -106,14 +109,54 @@ fn fs_ssao(in: VsOut) -> @location(0) vec4<f32> {
             occ = occ + range;
         }
     }
-    var ao = 1.0 - p.params.y * occ / f32(count);
+    var ao = 1.0 - p.params.y * occ / f32(max(count, 1));
     // far away a screen-space radius covers whole buildings: fade the effect out with
     // distance, where it only added shimmer
     let dist = -pos.z;
     ao = mix(ao, 1.0, clamp((dist - 60.0) / 140.0, 0.0, 1.0));
     // (clamp of a NaN is not safe on every GPU: a black blotch of shade on Windows)
     let ao_ok = select(1.0, clamp(ao, 0.0, 1.0), (bitcast<u32>(ao) & 0x7f800000u) != 0x7f800000u);
-    return vec4<f32>(ao_ok, dist, 0.0, 0.0);
+    let contact = select(1.0, contact_shadow(pos, n, in.clip.xy), p.sun.w > 0.5);
+    return vec4<f32>(ao_ok, dist, contact, 1.0);
+}
+
+// Contact shadows: a short ray from the surface towards the sun through the depth prepass.
+// The shadow map's texels are centimetres to decimetres across and its bias lifts a shadow
+// off what casts it, so the dark line where a kerb, a wheel, a post or a bench's leg meets
+// the ground went missing. Where the ray passes behind a surface (in front of it seen from
+// the camera, by no more than a thickness), something stands in the sun's way. The steps
+// lengthen with the distance and start at a per-pixel offset the blur averages out; it
+// fades into the shadow map's own detail past 120 m. 1 lit, 0 shaded.
+const CONTACT_STEPS: i32 = 10;
+fn contact_shadow(pos: vec3<f32>, n: vec3<f32>, frag: vec2<f32>) -> f32 {
+    let sun = normalize(p.sun.xyz);
+    let dist = -pos.z;
+    // facing away from the sun: the shadow map's shade (and the shading) has it already
+    if (dot(n, sun) <= 0.02 || dist > 150.0) {
+        return 1.0;
+    }
+    let reach = clamp(0.03 * dist, 0.25, 2.0);
+    let jitter = hash(frag);
+    let start = pos + n * (0.01 + 0.0015 * dist);
+    var shade = 0.0;
+    for (var i = 0; i < CONTACT_STEPS; i = i + 1) {
+        let k = (f32(i) + jitter) / f32(CONTACT_STEPS);
+        let sp = start + sun * reach * k;
+        let q = project(sp);
+        if (q.x < 0.0 || q.y < 0.0 || q.x >= p.params.z || q.y >= p.params.w) {
+            break;
+        }
+        let qz = lin(textureLoad(t_depth, vec2<i32>(q) * 2, 0));
+        let dz = qz - sp.z;
+        let bias = 0.015 + 0.002 * dist;
+        let thick = 0.35 + 0.02 * dist;
+        if (dz > bias && dz < thick) {
+            // (nearer the start, the darker: a contact shadow is sharpest at the contact)
+            shade = max(shade, 1.0 - k * 0.6);
+        }
+    }
+    let fade = 1.0 - smoothstep(80.0, 120.0, dist);
+    return 1.0 - shade * fade;
 }
 
 // pixel position of a view-space point, through the same projection the depth was made with
@@ -136,6 +179,7 @@ fn fs_blur(in: VsOut) -> @location(0) vec4<f32> {
     let size = vec2<i32>(i32(p.params.z), i32(p.params.w));
     let z0 = lin(textureLoad(t_depth, px * 2, 0));
     var sum = 0.0;
+    var csum = 0.0;
     var wsum = 0.0;
     // 6x6 window: covers every rotation of the 4x4 pattern at least once in each row and
     // column, and the depth weight keeps the occlusion from bleeding across an edge (a
@@ -146,10 +190,13 @@ fn fs_blur(in: VsOut) -> @location(0) vec4<f32> {
             let z = lin(textureLoad(t_depth, c * 2, 0));
             let tol = 0.3 + 0.02 * abs(z0);
             let w = select(0.0, 1.0, abs(z - z0) < tol);
-            sum = sum + textureLoad(t_ao, c, 0).r * w;
+            let s = textureLoad(t_ao, c, 0);
+            sum = sum + s.r * w;
+            csum = csum + s.b * w;
             wsum = wsum + w;
         }
     }
     let blurred = select(1.0, sum / wsum, wsum > 0.0);
-    return vec4<f32>(select(1.0, blurred, (bitcast<u32>(blurred) & 0x7f800000u) != 0x7f800000u), select(-z0, 60000.0, textureLoad(t_depth, px * 2, 0) <= 0.0), 0.0, 0.0);
+    let contact = select(1.0, csum / wsum, wsum > 0.0);
+    return vec4<f32>(select(1.0, blurred, (bitcast<u32>(blurred) & 0x7f800000u) != 0x7f800000u), select(-z0, 60000.0, textureLoad(t_depth, px * 2, 0) <= 0.0), select(1.0, clamp(contact, 0.0, 1.0), (bitcast<u32>(contact) & 0x7f800000u) != 0x7f800000u), 1.0);
 }

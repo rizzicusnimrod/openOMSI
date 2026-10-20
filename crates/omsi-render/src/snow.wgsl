@@ -41,6 +41,10 @@ struct Camera {
     blockers: array<vec4<f32>, 72>,
     // Enhanced: how much of each lamp shadow map's shadow shows (fading in or out)
     lamp_fade: vec4<f32>,
+    // the wind the plants sway in (shader.wgsl `swayed`)
+    breeze: vec4<f32>,
+    // the trees through the year (shader.wgsl `seasonal_colour`)
+    season: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 

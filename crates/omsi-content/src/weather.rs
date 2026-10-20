@@ -23,6 +23,10 @@ pub struct Weather {
     /// The sky as this fork's enhanced graphics draw it (`[openomsi_sky]`, which OMSI 2
     /// passes by): without it they make what they can of the cloud type and the visibility.
     pub sky: Option<Sky>,
+    /// How much of a thunderstorm it is, 0 none .. 1 a heavy one (`[openomsi_thunder]`, which
+    /// OMSI 2 passes by; a METAR's TS): its lightning and thunder. 0 says nothing - a heavy,
+    /// warm rain may still be taken for a storm (omsi-app `lightning::storminess`).
+    pub thunder: f32,
 }
 
 /// A weather's sky for the enhanced graphics (`[openomsi_sky]`), in the terms of the weather
@@ -69,6 +73,7 @@ impl Weather {
                 "groundwet" => w.ground_wet = r.f32s::<3>(),
                 "snow" => w.snow = true,
                 "snowonroad" => w.snow_on_road = true,
+                "openomsi_thunder" => w.thunder = r.f32().clamp(0.0, 1.0),
                 "openomsi_sky" => {
                     let [cumulus, deck, veil, haze, angstrom, aerosol_height] = r.f32s::<6>();
                     w.sky = Some(Sky {
@@ -166,7 +171,7 @@ mod preset_tests {
             assert_eq!(format!("{}.owt", w.name), *name);
             assert!(!w.description.is_empty(), "{name}");
             assert!(w.sky.is_some(), "{name}");
-            assert_eq!(preset_version(text), Some(1), "{name}");
+            assert!(preset_version(text).is_some_and(|v| v >= 1), "{name}");
             assert!(w.fog.0 >= 50.0 && w.fog.0 <= 50_000.0, "{name}");
             assert!(w.temp.1 > 0.0, "{name}: humidity");
             if w.precip.first() == Some(&2.0) {
@@ -176,6 +181,12 @@ mod preset_tests {
         // (the seventh number, the day's exposure, is read where it is given)
         let storm = PRESETS.iter().find(|p| p.0 == "Thunderstorm.owt").unwrap();
         assert!(Weather::parse(&CfgFile::from_str(storm.0, storm.1)).sky.unwrap().exposure < -1.0);
+        // (and it thunders, as no other preset does)
+        for (name, text) in PRESETS {
+            let thunder = Weather::parse(&CfgFile::from_str(name, text)).thunder;
+            assert_eq!(thunder > 0.0, *name == "Thunderstorm.owt", "{name}");
+        }
+        assert!(preset_version(storm.1) >= Some(2));
         let six = Weather::parse(&CfgFile::from_str("x.owt", "[openomsi_sky]\n0.3\n0\n0\n1\n1.3\n0\n\n[snow]\n"));
         assert!(six.snow && six.sky.unwrap().exposure == 0.0);
         assert!(is_preset("Weather/Thunderstorm.owt") && is_preset("C:\\x\\Weather\\crystal clear.owt"));
@@ -297,6 +308,12 @@ pub fn from_metar(station: &str, text: &str) -> Weather {
                 }
             }
         }
+        // thunder: a storm at the station (TS; +TS a heavy one) or near it (VCTS)
+        let core = t.trim_start_matches(['-', '+']);
+        if core.starts_with("TS") || core.starts_with("VCTS") {
+            let s = if core.starts_with("VC") { 0.4 } else if t.starts_with('+') { 1.0 } else { 0.75 };
+            w.thunder = w.thunder.max(s);
+        }
         // precipitation: -/+ strength, RA DZ SN SG PL GR, with showers and thunder
         let (strength, rest) = match t.chars().next() {
             Some('-') => (70.0, &t[1..]),
@@ -360,5 +377,17 @@ mod metar_tests {
         assert_eq!(c.temp.0, -3.0);
         let s = super::from_metar("EDDT", "EDDT 241250Z 30012G25KT 1200 +SN VV008 M02/M03 Q1005");
         assert!(s.snow && s.precip[0] == 2.0 && s.fog.0 == 1200.0);
+        assert_eq!(w.thunder, 0.0);
+    }
+
+    #[test]
+    fn thunderstorms_at_and_near_the_station() {
+        let heavy = super::from_metar("EDDT", "EDDT 191250Z 24015G28KT 3000 +TSRA BKN012CB 18/16 Q1004");
+        assert_eq!(heavy.thunder, 1.0);
+        assert_eq!(heavy.precip[0], 1.0);
+        let near = super::from_metar("EDDT", "EDDT 191250Z 24008KT 9999 VCTS SCT040CB 22/15 Q1010");
+        assert!(near.thunder > 0.0 && near.thunder < 0.75);
+        let plain = super::from_metar("EDDT", "EDDT 191250Z 24008KT 9999 TS SCT040CB 22/15 Q1010");
+        assert_eq!(plain.thunder, 0.75);
     }
 }

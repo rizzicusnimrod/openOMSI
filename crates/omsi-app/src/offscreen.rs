@@ -392,6 +392,8 @@ pub(crate) fn run_offscreen(
     let spray_wind = Vec3::new(weather.wind.0.to_radians().sin(), weather.wind.0.to_radians().cos(), 0.0) * weather.wind.1 * puddles::GROUND_WIND;
     let mut demo = args.demo.as_deref().and_then(crate::demo::Demo::new);
     let mut events = crate::events::Events::new(&world.map_dir, crate::events::Config::from_settings(&settings), 0x5eed);
+    // a thunderstorm's flashes (`OMSI_LIGHTNING_AT` puts one where a snapshot is taken)
+    let mut lightning = crate::lightning::Lightning::new();
     // `--view cinema` / `--view dashcam`: the cinematic camera's director and the dashcam's
     // mount run every frame, their camera and lens make the snapshots
     let lens_cfg = crate::cinema::Config::from_settings(&settings);
@@ -403,6 +405,7 @@ pub(crate) fn run_offscreen(
 
     for i in 0..total_frames {
         let t_s = i as f32 * dt;
+        lightning.tick(dt, &weather, None, false);
         if server {
             srv_clock += dt as f64 * lan_off.as_ref().map(|l| l.clock_speed).unwrap_or(1.0);
             // a server on the real time (server.cfg): its clock reads this machine's
@@ -1391,6 +1394,8 @@ pub(crate) fn run_offscreen(
                     },
                     settings.shadows,
                 );
+                lightning.apply(&mut lighting);
+                lighting.foliage = crate::foliage::season(snap_clock.day_of_year.max(1) as u32, settings.seasonal_foliage);
                 lighting.inside = player.as_ref().and_then(|p| {
                     p.vehicle
                         .ty
@@ -2664,6 +2669,8 @@ pub(crate) fn run_offscreen(
         wetness = v;
     }
     let mut lighting = weather_lighting(&daylight, &weather, cloud_drift_at(&weather, clock.time), wetness, settings.shadows);
+    lightning.apply(&mut lighting);
+    lighting.foliage = crate::foliage::season(clock.day_of_year.max(1) as u32, settings.seasonal_foliage);
     // the player's vehicle has moved into `player_ref` by now (after --drive): without
     // this the offscreen picture had no cab box, unlike the window
     lighting.inside = player_ref.as_ref().or(player.as_ref()).and_then(|p| {

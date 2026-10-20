@@ -241,6 +241,109 @@ fn sky_radiance(d: vec3<f32>, pix: f32) -> vec3<f32> {
     return col * a.a + a.rgb;
 }
 
+// Lightning (lib.rs `Flash`, the app's lightning.rs), drawn over the dome every frame - the
+// sky cube is redrawn too seldom for a flash. The cloud lit from within round the flash,
+// through the cover where there is cloud and as a faint glow of the air elsewhere; and a
+// stroke to the ground's channel: a jagged line in the upright plane `dist` metres off, from
+// the cloud base down to the ground (what stands in front hides its foot), with a branch,
+// a dazzling core a metre or so thick in a glow of its own. The rain and the fog between dim
+// it, though far less than they hide a dark thing: a light that bright shows through.
+const FLASH_TINT: vec3<f32> = vec3<f32>(0.86, 0.92, 1.0);
+const BOLT_OVER_WHITE: f32 = 6.0;
+fn bolt_tri(x: f32) -> f32 {
+    return abs(fract(x) - 0.5) * 4.0 - 1.0;
+}
+// The channel's sideways wander along its height t (0 the ground, 1 the cloud base), -1..1:
+// sums of triangle waves - straight runs and sharp kinks, as a channel goes.
+fn bolt_path(t: f32, s: f32) -> f32 {
+    return 0.3 * bolt_tri(t * 1.3 + s) + 0.22 * bolt_tri(t * 3.1 + s * 3.7) + 0.16 * bolt_tri(t * 7.9 + s * 5.3)
+        + 0.11 * bolt_tri(t * 19.0 + s * 9.1) + 0.08 * bolt_tri(t * 47.0 + s * 13.3) + 0.05 * bolt_tri(t * 113.0 + s * 17.9);
+}
+fn bolt_light(d: vec3<f32>, fd: vec3<f32>, dist: f32, base: f32, seed: f32, pix: f32) -> f32 {
+    let h = normalize(vec3<f32>(fd.x, fd.y, 0.0) + vec3<f32>(1e-5, 0.0, 0.0));
+    let along = dot(d, h);
+    if (along < 0.05) {
+        return 0.0;
+    }
+    let s = dist / along;
+    let p = d * s;
+    let across = dot(p, vec3<f32>(-h.y, h.x, 0.0));
+    let foot = -60.0;
+    let t = (p.z - foot) / max(base - foot, 100.0);
+    if (t < 0.0 || t > 1.05) {
+        return 0.0;
+    }
+    // (the picture's own glow round bright light makes the channel's halo: drawn here, it
+    // smeared the stroke into a ribbon)
+    let span = 0.22 * (base - foot);
+    let x = bolt_path(t, seed) * span;
+    let w = max(1.0, 0.7 * pix * s);
+    var light = exp(-pow((across - x) / w, 2.0)) + 0.004 * exp(-abs(across - x) / (6.0 + 2.0 * pix * s));
+    // a branch: off the channel half way up or more, down and away to one side
+    let tb = 0.55 + 0.15 * fract(seed * 7.13);
+    if (t < tb && t > tb - 0.3) {
+        let k = (tb - t) / 0.3;
+        let side = select(-1.0, 1.0, fract(seed * 3.31) > 0.5);
+        let xb = bolt_path(tb, seed) * span + side * k * span * 0.7 + bolt_path(t * 2.0, seed + 0.37) * span * 0.3 * k;
+        light += (1.0 - k) * 0.4 * exp(-pow((across - xb) / (w * 0.7), 2.0));
+    }
+    let h0 = camera.cam_pos.z - enh.fog.z;
+    let seen = pow(air_of(d, min(s, 30000.0), h0, h0 + p.z, 0.0).a, 0.35);
+    return light * smoothstep(1.05, 0.92, t) * seen;
+}
+fn lightning_sky(d: vec3<f32>, cover: f32, pix: f32) -> vec3<f32> {
+    let f = enh.flash[0];
+    if (f.w <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let fd = normalize(f.xyz);
+    let near = exp(-(1.0 - dot(d, fd)) / 0.05);
+    let above = smoothstep(-0.03, 0.06, d.z);
+    // (the cloud's glow kept under the channel's: at night it clipped the whole sky white
+    // and the stroke went in it)
+    var col = FLASH_TINT * f.w / PI * (0.015 + 0.08 * near) * (0.3 + 0.7 * cover) * above;
+    let b = enh.flash[1];
+    if (b.x > 0.0) {
+        // (the channel a few times over white in the picture, whatever the eye is taken
+        // to: at night its full radiance bloomed into a blot the size of a house)
+        col += FLASH_TINT * min(b.x, BOLT_OVER_WHITE / max(enh.exposure.x, 1e-6)) * bolt_light(d, fd, b.y, b.z, b.w, pix);
+    }
+    return col;
+}
+
+// A rainbow: the sunlight the falling drops send back, round the point opposite the sun -
+// the primary bow from 40.5 deg (violet, inside) to 42.5 (red, outside), the sky inside it
+// a little brighter, the secondary from 50 to 53.5 deg with its colours the other way round
+// and a third as bright, and the dark band between them darker. Only while it rains and
+// the sun shines through (`enh.weather.z`, `enh.lights.w`), and only above the horizon: a
+// bow seen as the rain falls in front of the camera with the sun behind it, low (the bow
+// sinks under the horizon when the sun climbs past 42 deg).
+fn bow_colour(t: f32) -> vec3<f32> {
+    // 0 violet .. 1 red: a smooth spectrum through blue, green and yellow
+    let r = smoothstep(0.45, 0.85, t) + 0.35 * smoothstep(0.15, 0.0, t);
+    let g = smoothstep(0.2, 0.5, t) * (1.0 - smoothstep(0.65, 0.95, t));
+    let b = 1.0 - smoothstep(0.15, 0.5, t);
+    return vec3<f32>(r, g, b);
+}
+fn rainbow(d: vec3<f32>) -> vec3<f32> {
+    // rain here, or showers about: the roads wet under heaped cloud with the sun out (a
+    // shower's curtain off in the distance, where the bow stands)
+    let showers = smoothstep(0.5, 0.9, enh.weather.x) * clamp(camera.clouds.x * 2.0, 0.0, 1.0) * 0.6;
+    let rain = max(enh.weather.z, showers / 3.0);
+    let sun = normalize(camera.sun_dir.xyz);
+    if (rain <= 0.01 || enh.lights.w < 0.2 || sun.z < 0.0 || d.z < -0.01) {
+        return vec3<f32>(0.0);
+    }
+    let theta = degrees(acos(clamp(dot(d, -sun), -1.0, 1.0)));
+    let primary = bow_colour((theta - 40.5) / 2.0) * smoothstep(40.2, 40.7, theta) * (1.0 - smoothstep(42.3, 42.8, theta));
+    let secondary = bow_colour((53.5 - theta) / 3.5) * smoothstep(49.8, 50.4, theta) * (1.0 - smoothstep(53.2, 53.9, theta)) * 0.35;
+    let inside = 0.08 * smoothstep(30.0, 40.3, theta) * (1.0 - smoothstep(40.3, 40.6, theta));
+    let strength = clamp(rain * 3.0, 0.0, 1.0) * clamp((enh.lights.w - 0.2) / 0.5, 0.0, 1.0) * smoothstep(-0.01, 0.04, d.z);
+    // (the drops' share of the sun: some tenths of its light into each colour's ring - the
+    // sun on the shower far off, not the one a cloud may keep off the camera)
+    return enh.sun_disc.rgb * enh.lights.w / PI * 0.2 * strength * (primary + secondary + vec3<f32>(inside));
+}
+
 // The sky as the sky cube holds it (drawn a face a frame by `fs_sky_cube`, divided by the
 // table scale): rgb, and how much cloud covers the direction.
 @group(0) @binding(17) var t_sky_cube: texture_cube<f32>;
@@ -275,6 +378,8 @@ fn fs_enhanced(in: VsOut) -> @location(0) vec4<f32> {
         sun_px = l;
     }
     col = col + night_sky(d, cube.a, fwidth(d));
+    col = col + lightning_sky(d, cube.a, length(fwidth(d)));
+    col = col + rainbow(d);
     // the dome is drawn pre-exposed; the disc only a little over white: the eye's glare round
     // it is drawn from its light (fog_lamps.wgsl `sun_glare`), and from the disc's pixels
     // as well the glow would have counted it twice

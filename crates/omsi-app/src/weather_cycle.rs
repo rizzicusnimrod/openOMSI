@@ -85,6 +85,7 @@ pub fn lerp(a: &Weather, b: &Weather, k: f32) -> Weather {
                 })
             }
         },
+        thunder: m(a.thunder, b.thunder),
     }
 }
 

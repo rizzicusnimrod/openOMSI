@@ -2568,6 +2568,13 @@ impl ApplicationHandler for App {
                     }
                     None => lights::lighting_from(&daylight, 50000.0),
                 };
+                // a thunderstorm's flashes and thunder (none while the game stands still)
+                if let Some(w) = self.weather.as_ref() {
+                    self.lightning.tick(if self.paused { 0.0 } else { dt }, w, self.audio.as_ref(), self.in_cab);
+                    self.lightning.apply(&mut lighting);
+                }
+                // the trees through the year
+                lighting.foliage = crate::foliage::season(self.clock.day_of_year.max(1) as u32, crate::startup::SEASONAL_FOLIAGE.load(std::sync::atomic::Ordering::Relaxed));
                 lighting.wetness = omsi_cfg::env::var("OMSI_WETNESS")
                     .ok()
                     .and_then(|v| v.parse().ok())

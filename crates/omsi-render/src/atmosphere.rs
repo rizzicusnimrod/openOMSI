@@ -502,6 +502,23 @@ pub fn sh_irradiance(sh: &[Vec3; 9], n: Vec3) -> Vec3 {
     sh.iter().zip(y).map(|(c, y)| *c * y).fold(Vec3::ZERO, |a, b| a + b)
 }
 
+/// The irradiance SH (as `SkyState::sh`) of a light `e` (irradiance on a surface facing it)
+/// coming from `dir`, `spread` of it from everywhere alike instead: added to the sky's, a
+/// surface facing the light gets `e`, one facing away `e * spread`. (A distant light's
+/// cosine lobe in three bands: Ramamoorthi and Hanrahan's pi, 2 pi / 3 and pi / 4.)
+pub fn sh_of_light(dir: Vec3, e: Vec3, spread: f32) -> [Vec3; 9] {
+    let spread = spread.clamp(0.0, 1.0);
+    let y = sh_basis(dir.normalize_or(Vec3::Z));
+    let lobe = |k: usize| match k {
+        0 => std::f32::consts::PI,
+        1..=3 => 2.0 * std::f32::consts::PI / 3.0,
+        _ => std::f32::consts::PI / 4.0,
+    };
+    let mut sh: [Vec3; 9] = std::array::from_fn(|k| e * (1.0 - spread) * lobe(k) * y[k]);
+    sh[0] += e * spread / 0.282_095;
+    sh
+}
+
 const LUM: Vec3 = Vec3::new(0.2126, 0.7152, 0.0722);
 
 /// The camera's white: the colour of the noon daylight on a white sheet (sun at 60° and

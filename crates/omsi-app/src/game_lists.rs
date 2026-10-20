@@ -1111,6 +1111,7 @@ fn steps_of(verb: &str) -> Option<Vec<f32>> {
         "volume" => VOLUME.to_vec(),
         "led_glow" => (0..16).map(|v| v as f32).collect(),
         "night_brightness" => (2..=40).map(|v| v as f32 * 5.0).collect(),
+        "wind_sway" => (0..=20).map(|v| v as f32 * 10.0).collect(),
         "headlamp_range" => (-4..=2).map(|v| v as f32).collect(),
         "dash_dimmer" => (2..=15).map(|v| v as f32 * 10.0).collect(),
         "autopilot_style" => vec![0.0, 0.5, 1.0],
@@ -1267,6 +1268,7 @@ fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
         "volume" => s.volume,
         "led_glow" => s.led_glow as f32,
         "night_brightness" => s.night_brightness as f32,
+        "wind_sway" => s.wind_sway as f32,
         "headlamp_range" => s.headlamp_range as f32,
         "dash_dimmer" => s.dash_dimmer as f32,
         "autopilot_style" => s.autopilot_style,
@@ -1373,6 +1375,11 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
             app.settings.night_brightness = v.round().clamp(10.0, 200.0) as u8;
             crate::startup::NIGHT_BRIGHTNESS.store(app.settings.night_brightness as u32, std::sync::atomic::Ordering::Relaxed);
             Some(("night_brightness", app.settings.night_brightness.to_string()))
+        }
+        "wind_sway" => {
+            app.settings.wind_sway = v.round().clamp(0.0, 200.0) as u8;
+            crate::startup::nature_settings(&app.settings);
+            Some(("wind_sway", app.settings.wind_sway.to_string()))
         }
         "headlamp_range" => {
             app.settings.headlamp_range = v.round().clamp(-4.0, 2.0) as i8;
@@ -1671,6 +1678,8 @@ fn toggle_now(app: &App, id: &str) -> Option<bool> {
         "detail_textures" => s.detail_textures,
         "reflections" => s.reflections,
         "clouds" => s.clouds,
+        "seasonal_foliage" => s.seasonal_foliage,
+        "lightning" => s.lightning,
         "fullscreen" => s.fullscreen,
         "vsync" => s.vsync,
         "texture_compression" => s.texture_compression,
@@ -1931,6 +1940,16 @@ fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static str, String
         "clouds" => {
             app.settings.clouds = on;
             Some(("clouds", bit))
+        }
+        "seasonal_foliage" => {
+            app.settings.seasonal_foliage = on;
+            crate::startup::nature_settings(&app.settings);
+            Some(("seasonal_foliage", bit))
+        }
+        "lightning" => {
+            app.settings.lightning = on;
+            crate::startup::nature_settings(&app.settings);
+            Some(("lightning", bit))
         }
         "fullscreen" => {
             app.settings.fullscreen = on;
@@ -2521,6 +2540,7 @@ fn sync_live(app: &mut App) {
     let s = &app.settings;
     crate::startup::SOUND_AI.store(s.vol_ai.to_bits(), std::sync::atomic::Ordering::Relaxed);
     crate::startup::NIGHT_BRIGHTNESS.store(s.night_brightness as u32, std::sync::atomic::Ordering::Relaxed);
+    crate::startup::nature_settings(s);
     omsi_sim::particles::set_vehicle_amount(s.exhaust);
     crate::startup::SOUND_SCENERY.store(s.vol_scenery.to_bits(), std::sync::atomic::Ordering::Relaxed);
     omsi_audio::DOPPLER.store(s.doppler, std::sync::atomic::Ordering::Relaxed);
@@ -2608,6 +2628,9 @@ fn options_pages(app: &App) -> Vec<Page> {
         slider_row(app, "led_mips", "LED mask mipmaps", "Keep the mip chain of the LED masks (smoother from a distance).", &|v| format!("{v:.2}")),
         switch_row(app, "reflections", "Reflection maps (paint, chrome, glass)", later).filter(|_| !app.settings.ray_tracing()),
         switch_row(app, "clouds", "Clouds", later),
+        slider_row(app, "wind_sway", "Wind in the trees", "How much trees, bushes and grass move in the wind: 0% still, 100% as nature has it", &|v| if v < 0.5 { "Still".to_string() } else { format!("{}%", v as i64) }),
+        switch_row(app, "seasonal_foliage", "Trees through the year", "Autumn colours, bare winter trees and fresh spring green where the map has no seasonal trees of its own"),
+        switch_row(app, "lightning", "Lightning and thunder", "Thunderstorms flash in the clouds and to the ground, and the thunder follows"),
     ]
         .into_iter()
         .flatten()

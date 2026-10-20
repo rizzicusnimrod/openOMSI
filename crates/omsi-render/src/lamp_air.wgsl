@@ -273,7 +273,10 @@ fn lamp_airlight(c: vec3<f32>, d: vec3<f32>, start: f32, len: f32, jitter: f32) 
                             // (near the lamp its beam is not formed yet: `near_blur`; the beam's
                             // light and the light scattered on from it each with its own phase)
                             let direct = blurred_headlamp(-ld, l.dir.xyz, l.extra.z, depth, near_blur(sqrt(dot(to, to))));
-                            lit = direct * beam_phase(cp) + spread * ax2 * ax2 * ax2 * spread_phase(cp);
+                            // (the air behind a car ahead gets none of the beam: blockers.wgsl;
+                            // what the fog has scattered on goes round it)
+                            let past = beam_blocked(c + d * tq, l.pos.xyz, u32(l.extra.x));
+                            lit = direct * past * beam_phase(cp) + spread * ax2 * ax2 * ax2 * spread_phase(cp);
                         } else {
                             lit = smoothstep(l.dir.w, l.extra.x, dot(-ld, l.dir.xyz)) * fog_phase(cp);
                         }
