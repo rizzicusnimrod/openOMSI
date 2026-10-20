@@ -230,6 +230,7 @@ pub const OPTIONS: &[PageDef] = &[
                 it("fov", "Field of view", "How much you see at once"),
                 it("seat 1", "Seat forward and back", "Move the driver's seat towards the windscreen or away"),
                 it("seat 2", "Seat height", "Raise or lower the driver's seat"),
+                it("sel air_seat", "Air seat", "The air-suspended seat takes the road's jolts; the view rides on it"),
                 it("seat 0", "Seat left and right", "Move the driver's seat sideways"),
                 it("seat_reset", "Reset the seat", "Put the seat back where the bus has it"),
                 it("hands_in_cab", "Driver's hands in view", "Shows your hands on the steering wheel"),

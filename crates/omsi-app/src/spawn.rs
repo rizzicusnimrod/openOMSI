@@ -438,6 +438,7 @@ pub(crate) fn spawn_player(
         head: Vec3::ZERO,
         head_vel: Vec3::ZERO,
         head_omega: Vec3::ZERO,
+        air_seat: None,
         head_idle: Default::default(),
         steer_look: 0.0,
         seat: Vec3::ZERO,

@@ -118,6 +118,8 @@ impl ControlNames {
             ("autopilot_style", "Autopilot: driving style"),
             ("headlamp_range_up", "Headlamp range: beams up"),
             ("headlamp_range_down", "Headlamp range: beams down"),
+            ("air_seat_up", "Air seat: raise (hold)"),
+            ("air_seat_down", "Air seat: lower (hold)"),
             ("dash_brighter", "Instrument lights brighter"),
             ("dash_darker", "Instrument lights darker"),
             ("view_set_cinematic", "Cinematic camera (again: the next shot)"),

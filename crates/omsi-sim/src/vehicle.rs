@@ -952,6 +952,13 @@ pub struct VehicleInstance {
     /// The driver's seat's travel and speed, and the body's turning last frame (see
     /// `update_driver_seat`).
     seat: (f32, f32, Vec3),
+    /// The driver's air seat's lift this frame (m, the app's `air_seat`), None for OMSI's
+    /// own seat spring: it goes into `Driver_Seat_VertTransl`, or moves the seat's mesh of a
+    /// bus that has no such variable (`driver_seat_meshes`). A bus with an air seat of its
+    /// own in its scripts (a `luftsitz` variable: the HH109) keeps its own.
+    pub driver_seat_lift: Option<f32>,
+    /// The meshes of the driver's seat that are lifted (found the first time it is asked).
+    driver_seat_meshes: Option<Vec<usize>>,
     pub bank: f32,
     pub animators: Vec<MeshAnimator>,
     /// Current mesh-space transforms, parallel to `ty.meshes`.
@@ -1320,6 +1327,8 @@ impl VehicleInstance {
             wheel_seats: None,
             ai_odometer: 0.0,
             seat: (0.0, 0.0, Vec3::ZERO),
+            driver_seat_lift: None,
+            driver_seat_meshes: None,
             driven_km: 0.0,
             km_started: false,
             cabin_air: None,
@@ -1441,6 +1450,13 @@ impl VehicleInstance {
     /// driver's camera) push a spring (3000) and damper (2000) on 150 kg; ±10 cm at most.
     fn update_driver_seat(&mut self, dt: f32) {
         let Some(id) = self.ty.program.var("Driver_Seat_VertTransl") else { return };
+        // (the air seat's lift instead, unless the bus has an air seat of its own)
+        if let Some(lift) = self.driver_seat_lift {
+            if !own_air_seat(&self.ty.program.var_names()) {
+                self.state.vars[id as usize] = lift;
+            }
+            return;
+        }
         if dt <= 0.0 {
             return;
         }
@@ -1464,6 +1480,43 @@ impl VehicleInstance {
         }
         self.seat = (x, v, omega);
         self.state.vars[id as usize] = x;
+    }
+
+    /// The air seat's lift on the seat's mesh of a bus without `Driver_Seat_VertTransl`
+    /// (what is hung on the seat in the model follows it).
+    fn lift_driver_seat(&mut self) {
+        let Some(lift) = self.driver_seat_lift else { return };
+        if self.ty.program.var("Driver_Seat_VertTransl").is_some() || own_air_seat(&self.ty.program.var_names()) {
+            return;
+        }
+        if self.driver_seat_meshes.is_none() {
+            let eye = self.ty.def.cameras_driver.get(self.ty.def.camera_std).or(self.ty.def.cameras_driver.first()).map(|c| Vec3::from(c.pos));
+            let found: Vec<usize> = eye
+                .map(|eye| {
+                    self.ty
+                        .meshes
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, m)| is_driver_seat(&m.file.to_string_lossy()))
+                        .filter(|(i, m)| {
+                            let p = &m.data.positions;
+                            if p.is_empty() {
+                                return false;
+                            }
+                            let t = self.mesh_transforms[*i];
+                            let centre = p.iter().fold(Vec3::ZERO, |a, q| a + t.transform_point3(*q)) / p.len() as f32;
+                            centre.distance(eye) <= DRIVER_SEAT_REACH
+                        })
+                        .map(|(i, _)| i)
+                        .collect()
+                })
+                .unwrap_or_default();
+            log::info!("air seat: {} seat mesh(es) lifted ({:?})", found.len(), found.iter().map(|i| self.ty.meshes[*i].file.to_string_lossy().into_owned()).collect::<Vec<_>>());
+            self.driver_seat_meshes = Some(found);
+        }
+        for &i in self.driver_seat_meshes.as_deref().unwrap_or(&[]) {
+            self.mesh_transforms[i] = Mat4::from_translation(Vec3::new(0.0, 0.0, lift)) * self.mesh_transforms[i];
+        }
     }
 
     /// The variables a paint scheme sets: its `[setvar]` lines, and `Colorscheme` - the
@@ -2645,6 +2698,7 @@ impl VehicleInstance {
         for (i, a) in self.animators.iter_mut().enumerate() {
             self.mesh_transforms[i] = a.update(dt, &self.state.vars);
         }
+        self.lift_driver_seat();
         crate::anim::apply_parents(&self.animators, &mut self.mesh_transforms);
         self.seat_wheels();
         static DEBUG_ANIM: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
@@ -6119,5 +6173,46 @@ mod winding_exporter_tests {
     #[test]
     fn forward_majority_keeps_existing_behaviour() {
         assert!(keep_authored_winding(80, 40, 1, 1));
+    }
+}
+
+/// How far the driver's seat's mesh lies from the driver's eye at most (m).
+const DRIVER_SEAT_REACH: f32 = 0.8;
+
+/// Whether a mesh file is the driver's seat by its name (not a companion's or a folding seat).
+pub fn is_driver_seat(file: &str) -> bool {
+    let f = file.to_ascii_lowercase().replace(['\\', ' ', '-'], "_");
+    let name = f.rsplit('/').next().unwrap_or(&f);
+    let seat = ["fahrersitz", "fahrer_sitz", "driverseat", "driver_seat", "drivers_seat", "sitz_fahrer", "seat_driver"].iter().any(|w| name.contains(w));
+    let other = ["begleit", "companion", "beifahrer", "klapp", "fold", "passenger"].iter().any(|w| name.contains(w));
+    seat && !other
+}
+
+/// Whether a bus's scripts have an air seat of their own (a `luftsitz` / `airseat` variable).
+pub fn own_air_seat(var_names: &[String]) -> bool {
+    var_names.iter().any(|v| {
+        let v = v.to_ascii_lowercase();
+        v.contains("luftsitz") || v.contains("airseat") || v.contains("air_seat")
+    })
+}
+
+#[cfg(test)]
+mod air_seat_tests {
+    use super::*;
+
+    #[test]
+    fn the_drivers_seat_is_found_by_its_name_and_not_a_companions() {
+        for f in ["model\\Fahrersitz.o3d", "cockpit/driverseat_low.o3d", "MAN_Driver_Seat.o3d", "int\\sitz_fahrer.o3d"] {
+            assert!(is_driver_seat(f), "{f}");
+        }
+        for f in ["model\\Begleitersitz.o3d", "Fahrersitz_Klappsitz.o3d", "companion_driverseat.o3d", "sitz_reihe3.o3d", "lenkrad.o3d"] {
+            assert!(!is_driver_seat(f), "{f}");
+        }
+    }
+
+    #[test]
+    fn a_bus_with_its_own_air_seat_keeps_it() {
+        assert!(own_air_seat(&["engine_n".into(), "Luftsitz_Hoehe".into()]));
+        assert!(!own_air_seat(&["Driver_Seat_VertTransl".into(), "engine_n".into()]));
     }
 }

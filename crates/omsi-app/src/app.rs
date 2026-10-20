@@ -93,6 +93,10 @@ pub(crate) struct App {
     pub(crate) lightning: crate::lightning::Lightning,
     /// The grass round the camera (`crate::grass`).
     pub(crate) grass: crate::grass::Field,
+    /// The driver's air seat's sounds (`crate::air_seat_sounds`).
+    pub(crate) air_seat_sounds: crate::air_seat_sounds::AirSeatSounds,
+    /// An air seat key was held last frame (the height is saved when it is let go).
+    pub(crate) air_seat_key_held: bool,
     pub(crate) cursor: (f32, f32),
     /// Last Windows mouse position used for the unbounded VR cockpit pointer.
     #[cfg_attr(not(windows), allow(dead_code))]

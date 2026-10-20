@@ -264,6 +264,8 @@ fn get<'a>(v: &'a Value, k: &str) -> &'a Value {
 }
 
 /// The window sizes the settings offer (`resolution`).
+/// The driver's air seat (`crate::air_seat`).
+pub(crate) const AIR_SEATS: &[(&str, &str)] = &[("off", "Off (as OMSI)"), ("firm", "Firm"), ("normal", "Normal"), ("soft", "Soft")];
 pub(crate) const RESOLUTIONS: &[(&str, &str)] = &[("auto", "Automatic"), ("1280x720", "1280 x 720"), ("1280x800", "1280 x 800 (Steam Deck)"), ("1366x768", "1366 x 768"), ("1600x900", "1600 x 900"), ("1920x1080", "1920 x 1080"), ("1920x1200", "1920 x 1200"), ("2560x1440", "2560 x 1440"), ("3840x2160", "3840 x 2160")];
 
 fn sel_setting(ui: &mut Ui, s: &mut Value, dirty: &mut f32, name: &str, r: Rect, label: &str, key: &str, options: &[(&str, &str)]) {
@@ -835,6 +837,7 @@ fn camera_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, co
         *dirty = 0.3;
     }
     toggle_setting(ui, s, dirty, c.row(), "Head moves with the bus", "head_movement");
+    sel_setting(ui, s, dirty, "s-air-seat", c.row(), "Air seat", "air_seat", AIR_SEATS);
     toggle_setting(ui, s, dirty, c.row(), "Camera glides between viewpoints", "driverview_smooth");
     toggle_setting(ui, s, dirty, c.row(), "Driver's hands in the cab view", "hands_in_cab");
     toggle_setting(ui, s, dirty, c.row(), "Right mouse button turns the view, Shift+right zooms (off: right zooms as in OMSI, the wheel button turns)", "alt_view");
@@ -2743,6 +2746,7 @@ mod settings_tests {
             "s-steer-look-angle",
             "s-steer-look-response",
             "set-head_movement",
+            "s-air-seat",
             "set-driverview_smooth",
             "set-hands_in_cab",
             "set-alt_view",

@@ -9,7 +9,7 @@ pub(crate) fn is_game_action(name: &str) -> bool {
     name.starts_with("view_")
         || matches!(
             name.as_str(),
-            "sim_pause" | "screenshot" | "quicksave" | "toggel_mouse_ctrl" | "toggel_ctrler" | "interface_toggle" | "autopilot_toggle" | "autopilot_faster" | "autopilot_slower" | "autopilot_gap" | "autopilot_style" | "headlamp_range_up" | "headlamp_range_down" | "dash_brighter" | "dash_darker"
+            "sim_pause" | "screenshot" | "quicksave" | "toggel_mouse_ctrl" | "toggel_ctrler" | "interface_toggle" | "autopilot_toggle" | "autopilot_faster" | "autopilot_slower" | "autopilot_gap" | "autopilot_style" | "headlamp_range_up" | "headlamp_range_down" | "dash_brighter" | "dash_darker" | "air_seat_up" | "air_seat_down"
         )
 }
 
@@ -3661,6 +3661,8 @@ impl App {
             "headlamp_range_down" => self.lamp_key(-1, 0),
             "dash_brighter" => self.lamp_key(0, 1),
             "dash_darker" => self.lamp_key(0, -1),
+            // (held: `air_seat_keys` moves the seat while the key is down)
+            "air_seat_up" | "air_seat_down" => {}
             "view_set_ego" => {
                 // on foot from where the camera is (beside the bus in the driver's view)
                 if let (Some(cam), Some(p)) = (self.camera.as_mut(), self.player.as_ref()) {

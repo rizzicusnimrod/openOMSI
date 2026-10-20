@@ -212,6 +212,7 @@ impl AirSeat {
     }
 
     /// The height the bag holds the seat at now (m).
+    #[cfg(test)]
     pub(crate) fn height(&self) -> f32 {
         self.height
     }
@@ -236,10 +237,80 @@ pub(crate) fn tank_pressure(var: impl Fn(&str) -> Option<f32>) -> Option<f32> {
         .fold(None, |m: Option<f32>, p| Some(m.map_or(p, |m| m.max(p))))
 }
 
+/// The seat height a held key makes of `height` over `dt` seconds (`dir` +1 raising, -1
+/// lowering): at the air's speeds, within the seat's range.
+pub(crate) fn held_height(height: f32, dir: i8, dt: f32) -> f32 {
+    let speed = if dir > 0 { RAISE_SPEED } else { LOWER_SPEED };
+    if dir == 0 {
+        return height;
+    }
+    (height + dir as f32 * speed * dt.clamp(0.0, MAX_FRAME)).clamp(-HEIGHT_RANGE, HEIGHT_RANGE)
+}
+
+/// What the keys say of the height: "Seat +2 cm".
+pub(crate) fn height_text(height: f32) -> String {
+    let cm = (height * 100.0).round() as i32;
+    if cm == 0 {
+        "Seat 0 cm".to_string()
+    } else {
+        format!("Seat {cm:+} cm")
+    }
+}
+
+impl crate::App {
+    /// Alt+Insert / Alt+Delete held (`air_seat_up` / `air_seat_down`, wherever the player
+    /// put them): the seat height setting goes up or down as the air moves the seat, kept in
+    /// the settings once the key is let go.
+    pub(crate) fn air_seat_keys(&mut self, dt: f32) {
+        use winit::keyboard::KeyCode;
+        if kind(&self.settings.air_seat).is_none() || self.player.is_none() || !self.in_cab {
+            return;
+        }
+        let ctrl = self.keys.contains(&KeyCode::ControlLeft) || self.keys.contains(&KeyCode::ControlRight);
+        let alt = self.keys.contains(&KeyCode::AltLeft) || self.keys.contains(&KeyCode::AltRight);
+        let shift = self.keys.contains(&KeyCode::ShiftLeft) || self.keys.contains(&KeyCode::ShiftRight);
+        let m = omsi_content::input::chord(shift, ctrl, alt);
+        let held = |action: &str| {
+            self.keys.iter().filter_map(|c| crate::keys::dik_code(*c)).any(|scan| self.game_keys.iter().any(|b| b.scan_code == scan && b.matches(m) && b.action.eq_ignore_ascii_case(action)))
+        };
+        let dir: i8 = match (held("air_seat_up"), held("air_seat_down")) {
+            (true, false) => 1,
+            (false, true) => -1,
+            _ => 0,
+        };
+        if dir != 0 {
+            let h = held_height(self.settings.seat[2], dir, dt);
+            self.settings.seat[2] = h;
+            let pressure = self.player.as_ref().and_then(|p| tank_pressure(|n| p.vehicle.var(n)));
+            let text = if dir > 0 && pressure.is_some_and(|p| p < RAISE_PRESSURE) {
+                format!("{} - not enough air to raise it ({:.1} bar)", height_text(h), pressure.unwrap_or(0.0) / 1e5)
+            } else {
+                height_text(h)
+            };
+            self.service_msg = Some((text, 1.5));
+            self.air_seat_key_held = true;
+        } else if std::mem::take(&mut self.air_seat_key_held) {
+            crate::game_lists::remember_setting("seat_z", &self.settings.seat[2].to_string());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use glam::Vec3;
+
+    #[test]
+    fn a_held_key_moves_the_height_at_the_airs_speed_within_its_range() {
+        assert!((held_height(0.0, 1, 1.0 / 60.0) - RAISE_SPEED / 60.0).abs() < 1e-6);
+        assert!((held_height(0.0, -1, 0.25) + LOWER_SPEED * 0.25).abs() < 1e-6);
+        assert_eq!(held_height(0.079, 1, 0.25), HEIGHT_RANGE);
+        assert_eq!(held_height(-0.2, -1, 0.1), -HEIGHT_RANGE);
+        assert_eq!(held_height(0.03, 0, 0.1), 0.03);
+        assert_eq!(height_text(0.02), "Seat +2 cm");
+        assert_eq!(height_text(-0.035), "Seat -4 cm");
+        assert_eq!(height_text(0.001), "Seat 0 cm");
+    }
 
     const AIR: Input = Input { floor: 0.0, height: 0.0, pressure: None };
 

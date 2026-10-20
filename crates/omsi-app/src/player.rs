@@ -168,6 +168,8 @@ pub(crate) struct Player {
     /// Its speed (m/s) and the body's turning rates of the frame before (see `move_head`).
     pub(crate) head_vel: Vec3,
     pub(crate) head_omega: Vec3,
+    /// The driver's air seat (`crate::air_seat`), while the setting has one.
+    pub(crate) air_seat: Option<crate::air_seat::AirSeat>,
     /// What a head does when nothing moves it: the slow sway of a standing body, kept apart
     /// from `head` so the bus's own head movement is never fed it (Settings -> idle head sway;
     /// read through `head_offset`).
@@ -1385,14 +1387,22 @@ impl Player {
     /// never further than 10 cm up or down (0x7e2256). (A lag of our own towards a point a
     /// hundredth of the acceleration off - a third of what the original throws the head -
     /// stood in for it.)
-    pub(crate) fn move_head(&mut self, dt: f32, enabled: bool) {
+    /// `air`: the air seat's kind and the seat height the driver set (m, `Settings::seat`),
+    /// None for the old head spring (the setting off, a headset). What the seat hisses and
+    /// knocks this frame.
+    pub(crate) fn move_head(&mut self, dt: f32, enabled: bool, air: Option<(crate::air_seat::Kind, f32)>) -> crate::air_seat::Sounds {
+        let mut heard = crate::air_seat::Sounds::default();
         let dt = dt.clamp(0.0, 0.1);
         let a = self.vehicle.physics.accel;
         let omega = self.vehicle.rigid.as_ref().map(|rb| rb.omega).unwrap_or(Vec3::ZERO);
         let dw = omega - self.head_omega;
         self.head_omega = omega;
+        if air.is_none() {
+            self.air_seat = None;
+            self.vehicle.driver_seat_lift = None;
+        }
         if dt <= 0.0 {
-            return;
+            return heard;
         }
         let def = &self.vehicle.ty.def;
         let n = def.cameras_driver.len().max(1);
@@ -1403,15 +1413,29 @@ impl Player {
             let v = v + kick + (-k * p - c * v) * stab * dt;
             (p + v * dt, v)
         };
-        // up and down: the heave's acceleration, and the roll and pitch rates' change at the eye
-        let kick = -(a.z - 9.81) * dt + dw.y * eye.x + dw.x * eye.y;
-        let (mut p, mut v) = spring(self.head.z, self.head_vel.z, kick, 3000.0 / 150.0, 2000.0 / 150.0);
-        if p.abs() > 0.1 {
-            p = p.clamp(-0.1, 0.1);
-            v = 0.0;
+        if let Some((kind, want)) = air {
+            // the air seat: the floor under it pushes it, the eye rides on it and the upper
+            // body (`crate::air_seat`); its bag holds it within its range of the model's seat,
+            // the slider's height beyond that is the seat's place as before
+            let floor = crate::air_seat::floor_accel(a.z - 9.81, dw, dt, eye);
+            let pressure = crate::air_seat::tank_pressure(|n| self.vehicle.var(n));
+            let seat = self.air_seat.get_or_insert_with(|| crate::air_seat::AirSeat::at(want));
+            heard = seat.step(dt, kind, crate::air_seat::Input { floor, height: want, pressure });
+            let held = want.clamp(-crate::air_seat::HEIGHT_RANGE, crate::air_seat::HEIGHT_RANGE);
+            self.head.z = seat.eye_offset() - held;
+            self.head_vel.z = 0.0;
+            self.vehicle.driver_seat_lift = Some(seat.seat_offset());
+        } else {
+            // up and down: the heave's acceleration, and the roll and pitch rates' change at the eye
+            let kick = -(a.z - 9.81) * dt + dw.y * eye.x + dw.x * eye.y;
+            let (mut p, mut v) = spring(self.head.z, self.head_vel.z, kick, 3000.0 / 150.0, 2000.0 / 150.0);
+            if p.abs() > 0.1 {
+                p = p.clamp(-0.1, 0.1);
+                v = 0.0;
+            }
+            self.head.z = p;
+            self.head_vel.z = v;
         }
-        self.head.z = p;
-        self.head_vel.z = v;
         if enabled {
             let moving = self.vehicle.physics.speed.abs().min(1.0);
             let kx = (-a.x * dt + dw.y * eye.z - dw.z * eye.y) * moving;
@@ -1428,6 +1452,7 @@ impl Player {
             self.head_vel.x = 0.0;
             self.head_vel.y = 0.0;
         }
+        heard
     }
 
     /// The head of someone who is doing nothing at all: a standing body breathes and shifts

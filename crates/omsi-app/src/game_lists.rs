@@ -2508,6 +2508,7 @@ fn select_options(key: &str) -> Vec<(&'static str, &'static str)> {
         "texture_memory" => vec![("0", "Automatic"), ("500", "500 MB"), ("1000", "1 GB"), ("1500", "1.5 GB"), ("2000", "2 GB"), ("3000", "3 GB"), ("4000", "4 GB"), ("6000", "6 GB")],
         "drive_keys" => vec![("omsi", "Custom controls (Controls page)"), ("simple", "W A S D + arrows"), ("wasd", "W A S D only"), ("arrows", "Arrow keys only")],
         "resolution" => crate::launcher::pages::RESOLUTIONS.to_vec(),
+        "air_seat" => crate::launcher::pages::AIR_SEATS.to_vec(),
         "navigator_corner" => vec![("top-left", "Top left"), ("top-right", "Top right"), ("bottom-left", "Bottom left"), ("bottom-right", "Bottom right")],
         "boarding" => vec![("auto", "Pay and take the ticket"), ("pay", "The driver sells the ticket"), ("walk", "Just walk in")],
         "pax_voices" => vec![("all", "Greetings and tickets"), ("tickets", "Only the ticket asked for"), ("off", "Silent")],
@@ -2809,7 +2810,8 @@ fn options_pages(app: &App) -> Vec<Page> {
         switch_row(app, "precision_zoom", "Precision mouse zoom", "The mouse zoom follows the FOV curve instead of OMSI's linear way"),
         slider_row(app, "fov", "Field of view", "Vertical field of view; in triple screen Default uses physical measurements, an override moves the virtual eye", &|v| if v < 20.0 { "Default".to_string() } else { format!("{v:.0}°") }),
         slider_row(app, "seat 1", "Seat forward and back", "Adjust the driver's seat position forward or backward", &cm),
-        slider_row(app, "seat 2", "Seat height", "Adjust the driver's seat height", &cm),
+        slider_row(app, "seat 2", "Seat height", "Adjust the driver's seat height (Alt+Insert / Alt+Delete held, with an air seat)", &cm),
+        pick("air_seat", "Air seat", "The driver's air-suspended seat takes the road's jolts; the view rides on it (Off: as OMSI)"),
         slider_row(app, "seat 0", "Seat left and right", "Adjust the driver's seat position from side to side", &cm),
         slider_row(app, "seat_pitch", "Head pitch", "Set the driver's neutral head tilt up or down, independent of the display setup", &|v| format!("{v:+.0}°")),
     ]

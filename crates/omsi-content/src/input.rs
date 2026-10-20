@@ -136,7 +136,8 @@ impl KeyboardCfg {
         }
         // the headlamp range control's wheel (Page Up / Down) and the instrument dimmer (Home
         // brighter, End darker), on Alt as well
-        for (action, scan_code) in [("headlamp_range_up", 201), ("headlamp_range_down", 209), ("dash_brighter", 199), ("dash_darker", 207)] {
+        // (and the air seat: Insert raises it, Delete lowers it, held)
+        for (action, scan_code) in [("headlamp_range_up", 201), ("headlamp_range_down", 209), ("dash_brighter", 199), ("dash_darker", 207), ("air_seat_up", 210), ("air_seat_down", 211)] {
             if !self.game.iter().any(|b| b.action.eq_ignore_ascii_case(action)) {
                 self.game.push(KeyBinding { action: action.into(), scan_code, modifier: KEY_ALT });
             }

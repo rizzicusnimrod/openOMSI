@@ -984,6 +984,8 @@ impl ApplicationHandler for App {
                 }
                 // the on-screen wheel and pedals (a phone)
                 self.touch_frame(dt);
+                // the air seat's keys, held
+                self.air_seat_keys(dt);
                 if let (Some(p), Some(r), Some(scene)) = (
                     self.player.as_mut(),
                     self.renderer.as_ref(),
@@ -1012,7 +1014,10 @@ impl ApplicationHandler for App {
                         let vr_on = self.vr.is_some();
                         #[cfg(not(windows))]
                         let vr_on = false;
-                        p.move_head(dt, self.settings.head_movement && !vr_on);
+                        // (the air seat: not in the headset either)
+                        let air = crate::air_seat::kind(&self.settings.air_seat).filter(|_| !vr_on).map(|k| (k, self.settings.seat[2]));
+                        let heard = p.move_head(dt, self.settings.head_movement && !vr_on, air);
+                        self.air_seat_sounds.play(self.audio.as_ref(), &heard, &p.vehicle, self.in_cab && self.view == "driver");
                         // (a head that is doing nothing still breathes and shifts its weight:
                         // the sway goes on the head and the view while the bus waits, never
                         // into the springs above. Nothing of it while a headset or a real

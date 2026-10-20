@@ -78,6 +78,7 @@ mod tiles;
 mod traffic;
 mod ai_drivers;
 mod air_seat;
+mod air_seat_sounds;
 mod settings_layout;
 mod ui;
 
@@ -529,6 +530,8 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         ambience: None,
         lightning: crate::lightning::Lightning::new(),
         grass: crate::grass::Field::new(),
+        air_seat_sounds: Default::default(),
+        air_seat_key_held: false,
         cursor: (0.0, 0.0),
         vr_cursor_physical: None,
         vr_cursor_warp_pending: None,

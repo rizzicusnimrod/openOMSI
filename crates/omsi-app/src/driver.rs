@@ -251,6 +251,9 @@ pub struct DriverFigure {
     skins: Vec<(Vec<Vec3>, Vec<Vec3>)>,
     /// Hip point, floor point in front of the seat, heading (model frame).
     hip: Vec3,
+    /// How far the air seat has lifted the seat this frame (m, `VehicleInstance::
+    /// driver_seat_lift`): the hip rides on it, the feet stay on the floor.
+    lift: f32,
     floor: Vec3,
     heading: f32,
     /// The seat's four `[interiorlight]`s (see `PassPos::illumination`): the lamps that
@@ -496,6 +499,7 @@ impl DriverFigure {
             meshes,
             skins: Vec::new(),
             hip: Vec3::ZERO,
+            lift: 0.0,
             floor: Vec3::ZERO,
             heading: 0.0,
             lamps: [-1; 4],
@@ -590,6 +594,11 @@ impl DriverFigure {
         );
     }
 
+    /// The hip where the seat holds it now (the air seat's lift on the seat's own).
+    fn hip_now(&self) -> Vec3 {
+        self.hip + Vec3::Z * self.lift
+    }
+
     /// Hide the figure (kept for another bus).
     pub fn hide(&mut self, renderer: &Renderer, scene: &mut Scene) {
         for (_, inst) in &self.meshes {
@@ -602,6 +611,7 @@ impl DriverFigure {
     /// `mirror_only` keeps it out of the window's picture but in the mirrors (the driver's
     /// own view: OMSI shows the driver in the mirrors while one looks from his seat).
     pub fn update(&mut self, renderer: &Renderer, scene: &mut Scene, v: &VehicleInstance, render: &crate::scene::VehicleRender, dt: f32, show: bool, mirror_only: bool) {
+        self.lift = v.driver_seat_lift.unwrap_or(0.0);
         if show != self.shown {
             for (_, inst) in &self.meshes {
                 renderer.set_params(scene, *inst, &[], show, &[]);
@@ -1011,7 +1021,7 @@ impl DriverFigure {
             let along = (right * a.cos() - up * a.sin()).normalize_or(right);
             let tube = centre + radial * w.radius + (axis * 0.85 + radial * 0.3) * (LIFT * lift);
             // the forearm: from the elbow as last posed, else from about where it will be
-            let elbow = self.elbows.map(|e| e[k]).unwrap_or(self.hip + Vec3::Z * 0.2 - fwd * 0.05 + (tube - centre).with_z(0.0) * 0.5);
+            let elbow = self.elbows.map(|e| e[k]).unwrap_or(self.hip_now() + Vec3::Z * 0.2 - fwd * 0.05 + (tube - centre).with_z(0.0) * 0.5);
             let fore = (tube - elbow).normalize_or(fwd);
             // How far the fist is rolled round the rim (0: the fingers out over the rim's
             // outer edge, the palm on it from the driver's side; 90: the knuckles turned away
@@ -1075,7 +1085,7 @@ impl DriverFigure {
         let h = self.heading.to_radians();
         let turn_person = move |d: Vec3| Vec3::new(d.x * h.cos() - d.y * h.sin(), d.x * h.sin() + d.y * h.cos(), d.z);
         let floor = self.floor + fwd * self.slide;
-        let hip = self.hip + fwd * self.slide;
+        let hip = self.hip_now() + fwd * self.slide;
         PoseInput {
             activity: Activity::Sit,
             origin: floor.as_dvec3(),
@@ -1144,7 +1154,7 @@ impl DriverFigure {
     fn arm_excess(&self, elbow: &[Vec3], wrist: &[Vec3]) -> f32 {
         let h = self.heading.to_radians();
         let fwd = Vec3::new(h.sin(), h.cos(), 0.0);
-        let hip = self.to_person(self.hip + fwd * self.slide);
+        let hip = self.to_person(self.hip_now() + fwd * self.slide);
         let l = self.lean.to_radians();
         let up = Vec3::new(0.0, l.sin(), l.cos());
         let mut worst = 0.0f32;
@@ -1344,7 +1354,7 @@ impl DriverFigure {
         let h = self.heading.to_radians();
         let right = Vec3::new(h.cos(), -h.sin(), 0.0);
         let side = if sh.hand == 1 { 1.0 } else { -1.0 };
-        let shoulder = self.hip + fwd * self.slide + Vec3::Z * 0.55 + right * (0.14 * side);
+        let shoulder = self.hip_now() + fwd * self.slide + Vec3::Z * 0.55 + right * (0.14 * side);
         // The palm lies on the knob's end; the fingers point the way the arm comes from.
         let palm = -axis;
         let reach = knob - shoulder;
