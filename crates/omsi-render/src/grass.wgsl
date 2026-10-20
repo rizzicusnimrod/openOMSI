@@ -54,7 +54,7 @@ fn grass_wind(place: vec2<f32>, seed: f32) -> vec2<f32> {
 }
 
 @vertex
-fn vs_grass(@builtin(vertex_index) vi: u32, g: GrassIn) -> GrassOut {
+fn vs_grass_enhanced(@builtin(vertex_index) vi: u32, g: GrassIn) -> GrassOut {
     let blade = vi / 18u;
     let k = vi % 18u;
     let seg = k / 6u;
@@ -93,7 +93,7 @@ fn vs_grass(@builtin(vertex_index) vi: u32, g: GrassIn) -> GrassOut {
 }
 
 @fragment
-fn fs_grass(in: GrassOut, @builtin(front_facing) front: bool) -> EnhancedOut {
+fn fs_grass_enhanced(in: GrassOut, @builtin(front_facing) front: bool) -> EnhancedOut {
     let pre = enh.exposure.x;
     let v = normalize(camera.cam_pos.xyz - in.world);
     let n = select(-in.normal, in.normal, front);

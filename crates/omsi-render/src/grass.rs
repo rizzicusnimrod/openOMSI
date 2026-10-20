@@ -81,7 +81,7 @@ impl Grass {
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("grass"),
             layout: Some(&layout),
-            vertex: wgpu::VertexState { module: shader, entry_point: Some("vs_grass"), buffers: &[instance], compilation_options: Default::default() },
+            vertex: wgpu::VertexState { module: shader, entry_point: Some("vs_grass_enhanced"), buffers: &[instance], compilation_options: Default::default() },
             primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
             // (reversed Z, as the scene's)
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -94,7 +94,7 @@ impl Grass {
             multisample: wgpu::MultisampleState { count: msaa, mask: !0, alpha_to_coverage_enabled: false },
             fragment: Some(wgpu::FragmentState {
                 module: shader,
-                entry_point: Some("fs_grass"),
+                entry_point: Some("fs_grass_enhanced"),
                 targets: &color_targets(HDR_FORMAT, None, wgpu::ColorWrites::ALL, true, true),
                 compilation_options: Default::default(),
             }),
