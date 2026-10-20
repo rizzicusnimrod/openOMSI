@@ -1,6 +1,8 @@
 # build output (releases are built by GitHub Actions, see .github/workflows)
 /target
 /dist
+/out
+/dxc
 **/*.rs.bk
 
 # local tools and editors
