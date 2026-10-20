@@ -77,6 +77,7 @@ mod threads;
 mod tiles;
 mod traffic;
 mod ai_drivers;
+mod air_seat;
 mod settings_layout;
 mod ui;
 
