@@ -1148,7 +1148,7 @@ impl Dashcam {
         let s = Subject::of(v);
         let key = std::sync::Arc::as_ptr(&v.ty) as usize;
         if self.glass.as_ref().map(|g| g.0) != Some(key) {
-            let glass = crate::wipers::Wipers::new(v).map(|w| w.frame(v));
+            let glass = crate::wipers::Wipers::new(v, 0.0).map(|w| w.frame(v));
             log::info!("dashcam: windscreen {:?}", glass.map(|g| (g.rect, g.depth)));
             self.glass = Some((key, glass));
         }

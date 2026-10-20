@@ -24,6 +24,25 @@ const GATHER_AT_SPEED: f32 = 0.8;
 /// brings at the closest (of the full film a second, on a soaked road).
 const SPRAY_REACH: f64 = 30.0;
 const SPRAY: f32 = 0.6;
+/// How fast the water on the glass dries once it no longer rains (of the full film a
+/// second): standing, and on top of that at 80 km/h in the airstream.
+const DRY_STANDING: f32 = 1.0 / 120.0;
+const DRY_AT_SPEED: f32 = 1.0 / 40.0;
+
+/// How much water the glass holds when the map is made (the bus spawned or the camera got
+/// into another): as much as the rain falling now leaves on it - dry glass in dry weather.
+pub fn initial_water(rain: f32) -> f32 {
+    (rain / 0.3).clamp(0.0, 1.0)
+}
+
+/// How much of the film dries this frame: none while it rains, else in a couple of minutes
+/// standing, much sooner in the airstream.
+pub fn evaporation(rain: f32, kmh: f32, dt: f32) -> f32 {
+    if rain > 0.01 {
+        return 0.0;
+    }
+    (DRY_STANDING + DRY_AT_SPEED * (kmh.abs() / 80.0).min(1.5)) * dt
+}
 
 /// A blade: its mesh and the two ends of its edge in that mesh's own frame, and where they
 /// were on the map the frame before.
@@ -71,7 +90,8 @@ fn ends(points: &[Vec3]) -> Option<(Vec3, Vec3)> {
 impl Wipers {
     /// The wipers of `v`'s windscreen: None when it has no film the wipers sweep, or no
     /// blades to sweep it with.
-    pub fn new(v: &VehicleInstance) -> Option<Wipers> {
+    /// `rain`: the rain falling now (the glass starts as wet as it leaves it).
+    pub fn new(v: &VehicleInstance, rain: f32) -> Option<Wipers> {
         let ty = &v.ty;
         let wiped = |m: &omsi_sim::vehicle::VehicleMesh, slot: u32| {
             m.overrides.iter().any(|o| {
@@ -119,7 +139,7 @@ impl Wipers {
             rect: [lo.x - 0.05, lo.y - 0.05, hi.x + 0.05, hi.y + 0.05],
             depth: [y0, y1],
             blades,
-            wet: vec![1.0; MAP_W * MAP_H],
+            wet: vec![initial_water(rain); MAP_W * MAP_H],
             rgba: vec![255; MAP_W * MAP_H * 4],
             debug_t: 0,
         })
@@ -136,14 +156,21 @@ impl Wipers {
         Vec2::new((q.x - x0) / (x1 - x0) * MAP_W as f32, (1.0 - (q.z - z0) / (z1 - z0)) * MAP_H as f32)
     }
 
-    /// One frame: the rain gathers by `gather` (of the full film), and every blade clears
-    /// the strip it swept since the frame before. The map as a picture (red: the water).
-    pub fn step(&mut self, v: &VehicleInstance, gather: f32) -> &[u8] {
-        if gather > 0.0 {
+    /// The rain gathers by `gather` (of the full film) and the water dries by `dry`.
+    fn step_water(&mut self, gather: f32, dry: f32) {
+        let d = gather - dry;
+        if d != 0.0 {
             for w in &mut self.wet {
-                *w = (*w + gather).min(1.0);
+                *w = (*w + d).clamp(0.0, 1.0);
             }
         }
+    }
+
+    /// One frame: the rain gathers by `gather` (of the full film), the water dries by `dry`,
+    /// and every blade clears the strip it swept since the frame before. The map as a
+    /// picture (red: the water).
+    pub fn step(&mut self, v: &VehicleInstance, gather: f32, dry: f32) -> &[u8] {
+        self.step_water(gather, dry);
         for k in 0..self.blades.len() {
             let (mesh, a, b) = (self.blades[k].mesh, self.blades[k].a, self.blades[k].b);
             let t = v.mesh_transforms.get(mesh).copied().unwrap_or(glam::Mat4::IDENTITY);
@@ -264,6 +291,31 @@ mod tests {
     }
 
     #[test]
+    fn a_bus_spawned_in_dry_weather_has_dry_glass_and_in_rain_wet() {
+        assert_eq!(initial_water(0.0), 0.0);
+        assert_eq!(initial_water(0.6), 1.0);
+        // a drizzle: wet already, but not soaked
+        assert!(initial_water(0.05) > 0.0 && initial_water(0.05) < 1.0);
+    }
+
+    #[test]
+    fn the_glass_dries_once_the_rain_stops_and_faster_when_driving() {
+        assert_eq!(evaporation(0.5, 60.0, 1.0), 0.0);
+        let standing = evaporation(0.0, 0.0, 1.0);
+        let driving = evaporation(0.0, 80.0, 1.0);
+        // (dry in about two minutes standing, well under a minute at 80 km/h)
+        assert!(standing > 1.0 / 180.0 && standing < 1.0 / 60.0, "{standing}");
+        assert!(driving > 2.0 * standing, "{driving}");
+        let mut w = map();
+        w.step_water(0.0, 0.3);
+        assert!(w.wet.iter().all(|x| (*x - 0.7).abs() < 1e-6));
+        w.step_water(0.0, 5.0);
+        assert!(w.wet.iter().all(|x| *x == 0.0));
+        w.step_water(0.4, 0.0);
+        assert!(w.wet.iter().all(|x| (*x - 0.4).abs() < 1e-6));
+    }
+
+    #[test]
     fn wiper_parts_are_told_from_their_switches_and_washers() {
         assert_eq!(wiper_part("UL_Euro3_ext\\Wischer_links_Blatt.o3d"), Some(0));
         assert_eq!(wiper_part("UL_Euro3_ext\\Wischer_links_Arm.o3d"), Some(1));
@@ -289,13 +341,13 @@ impl crate::App {
         // (only once a film of the bus took the map, see `World::wipe_texture`)
         let tex = (*self.world.as_ref()?.wipe_texture.lock())?;
         if !self.wipers.as_ref().is_some_and(|w| w.fits(v)) {
-            self.wipers = Wipers::new(v);
+            self.wipers = Wipers::new(v, rain);
         }
         let w = self.wipers.as_mut()?;
         let pose = (v.position, Mat3::from_mat4(v.body_rotation()));
         let ahead: Vec<(DVec3, f32)> = self.traffic.as_ref().map(|t| t.cars.iter().map(|c| (c.vehicle.position, c.state.speed)).collect()).unwrap_or_default();
-        let g = if self.paused { 0.0 } else { gather(rain, kmh, self.wetness, pose, ahead.into_iter(), dt) };
-        let rgba = w.step(v, g).to_vec();
+        let (g, dry) = if self.paused { (0.0, 0.0) } else { (gather(rain, kmh, self.wetness, pose, ahead.into_iter(), dt), evaporation(rain, kmh, dt)) };
+        let rgba = w.step(v, g, dry).to_vec();
         if let (Some(r), Some(scene)) = (self.renderer.as_ref(), self.scene.as_ref()) {
             r.update_texture(scene, tex, &omsi_texture::Image { width: MAP_W as u32, height: MAP_H as u32, rgba, has_alpha: false });
         }
