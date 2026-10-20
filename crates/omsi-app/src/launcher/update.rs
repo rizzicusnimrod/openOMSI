@@ -101,8 +101,14 @@ impl Launcher {
         let full = Rect::new(0.0, 0.0, size.x, size.y);
         self.ui.solid(full);
         self.ui.p().rect(full, omsi_ui::Color::rgba(0, 0, 0, 0.62));
-        let w = (size.x - 48.0).min(560.0);
-        let h = 250.0;
+        let w = (size.x - 48.0).min(600.0);
+        // (an offer lists what the new version changes: the dialog grows to hold the list,
+        // as far as the window lets it)
+        let list = match &status {
+            Status::Available(rel) => Some(self.change_list(&rel.notes, w - 48.0, (size.y - 360.0).clamp(90.0, 380.0))),
+            _ => None,
+        };
+        let h = 250.0 + list.as_ref().map_or(0.0, |l| l.height);
         let r = Rect::new((size.x - w) * 0.5, (size.y - h) * 0.5, w, h);
         self.ui.panel(r);
         let inner = Rect::new(r.x + 24.0, r.y + 20.0, r.w - 48.0, r.h - 40.0);
@@ -121,6 +127,10 @@ impl Launcher {
                     format!("You have {current}. Update now? The launcher downloads the new version ({}) from GitHub, puts it in place of this one and starts again - your mods and settings stay as they are.", mb(rel.size))
                 };
                 self.ui.paragraph(&text, body_at, inner.w, 13.0, Weight::Regular, TEXT_DIM);
+                if let Some(l) = &list {
+                    let top = body_at.y + self.ui.paragraph_height(&text, inner.w, 13.0, Weight::Regular) + 14.0;
+                    self.draw_change_list(l, Vec2::new(inner.x, top), inner.w);
+                }
                 let mut auto = self.setting("update_auto", false);
                 if self.ui.toggle("upd-auto", Rect::new(inner.x, buttons_y - 44.0, inner.w, 30.0), &mut auto, "Install updates without asking from now on") {
                     self.state.settings["update_auto"] = serde_json::json!(auto);
@@ -325,6 +335,81 @@ impl Launcher {
             };
             self.ui.clipboard_out = Some(format!("openOMSI {} ({})\n{what}\n\n{tail}", updater::current_version(), std::env::consts::OS));
             updater::open_url(&format!("{}/issues/new?title={}&body={}", updater::REPO_URL, enc(&title), enc(&body)));
+        }
+    }
+}
+
+/// What an update changes, laid out for the update dialog (`updater::changes`).
+pub(super) struct ChangeList {
+    /// The lines and their heights, as many as fit.
+    lines: Vec<(updater::Change, f32)>,
+    /// The changes left out (the notes list more than fit).
+    more: usize,
+    /// The whole list's height, its title and the "more" line with it.
+    pub(super) height: f32,
+}
+
+/// The change list's text sizes, and how far an item stands in.
+const CHANGE_TEXT: f32 = 13.0;
+const CHANGE_INDENT: f32 = 16.0;
+/// How many changes the list takes at most.
+const MAX_CHANGES: usize = 12;
+
+impl Launcher {
+    /// The changes of `notes` as they fit into `width` and `room` (pixels).
+    fn change_list(&mut self, notes: &str, width: f32, room: f32) -> ChangeList {
+        let all = updater::changes(notes, MAX_CHANGES);
+        let total = updater::change_count(notes);
+        let mut lines = Vec::new();
+        let mut used = 0.0;
+        let mut shown = 0;
+        for c in all {
+            let h = match &c {
+                updater::Change::Heading(t) => self.ui.paragraph_height(t, width, CHANGE_TEXT, Weight::Bold) + 4.0,
+                updater::Change::Item(t) => self.ui.paragraph_height(t, width - CHANGE_INDENT, CHANGE_TEXT, Weight::Regular) + 3.0,
+            };
+            if used + h > room {
+                break;
+            }
+            // (a group's title is no use without a change under it)
+            if matches!(c, updater::Change::Item(_)) {
+                shown += 1;
+            }
+            used += h;
+            lines.push((c, h));
+        }
+        while matches!(lines.last(), Some((updater::Change::Heading(_), _))) {
+            used -= lines.pop().map_or(0.0, |l| l.1);
+        }
+        let more = total.saturating_sub(shown);
+        // (the title over it; a line saying what is left out; none of it for notes that
+        // list nothing - the dialog stays as it was)
+        let height = if lines.is_empty() { 0.0 } else { 26.0 + used + if more > 0 { 22.0 } else { 0.0 } };
+        ChangeList { lines, more, height }
+    }
+
+    /// The change list with its title, from `at`.
+    fn draw_change_list(&mut self, l: &ChangeList, at: Vec2, width: f32) {
+        if l.lines.is_empty() {
+            return;
+        }
+        self.ui.text_in("What changes", Rect::new(at.x, at.y, width, 20.0), 14.0, Weight::Bold, TEXT, Align::Left);
+        let mut y = at.y + 26.0;
+        for (c, h) in &l.lines {
+            match c {
+                updater::Change::Heading(t) => {
+                    self.ui.paragraph(t, Vec2::new(at.x, y), width, CHANGE_TEXT, Weight::Bold, TEXT);
+                }
+                updater::Change::Item(t) => {
+                    self.ui.text_in("•", Rect::new(at.x + 2.0, y, CHANGE_INDENT, 18.0), CHANGE_TEXT, Weight::Bold, ACCENT, Align::Left);
+                    self.ui.paragraph(t, Vec2::new(at.x + CHANGE_INDENT, y), width - CHANGE_INDENT, CHANGE_TEXT, Weight::Regular, TEXT_DIM);
+                }
+            }
+            y += h;
+        }
+        if l.more > 0 {
+            let more = if l.more == 1 { "…and 1 more change (What's new)".to_string() } else { format!("…and {} more changes (What's new)", l.more) };
+            self.ui.text_in(&more, Rect::new(at.x + CHANGE_INDENT, y + 2.0, width - CHANGE_INDENT, 18.0), 12.5, Weight::Regular, TEXT_DIM, Align::Left);
         }
     }
 }

@@ -871,6 +871,185 @@ pub fn open_url(url: &str) {
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
+/// A line of what an update changes, as the update dialog lists it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Change {
+    /// A group's title ("Bug Fixes & Improvements").
+    Heading(String),
+    /// One change.
+    Item(String),
+}
+
+/// What a release changes, from its notes (GitHub's release body: the version's section of
+/// CHANGELOG.md, or the fork's commit list): the changes listed, under the headings of their
+/// groups, in plain text. Not the notes' preamble (the version line, the early-release
+/// warning), their install steps or what is folded away in `<details>`. At most `max`
+/// changes; long ones are cut at `MAX_CHANGE` characters.
+pub fn changes(notes: &str, max: usize) -> Vec<Change> {
+    let mut out = Vec::new();
+    let mut items = 0;
+    let mut heading: Option<String> = None;
+    let mut skip_section = false;
+    let mut folded = false;
+    // (lines of text outside any list: what notes without one say)
+    let mut text: Vec<String> = Vec::new();
+    for raw in notes.lines() {
+        let line = raw.trim();
+        if line.starts_with("<details") {
+            folded = true;
+            continue;
+        }
+        if line.starts_with("</details") {
+            folded = false;
+            continue;
+        }
+        if folded || line.is_empty() || line.starts_with('>') || line.starts_with("<!--") {
+            continue;
+        }
+        if line.starts_with('#') {
+            let title = plain_text(line.trim_start_matches('#'));
+            skip_section = title.to_lowercase().contains("install");
+            heading = (!skip_section && !title.is_empty()).then_some(title);
+            continue;
+        }
+        if skip_section {
+            continue;
+        }
+        match list_item(line) {
+            Some(t) => {
+                if items >= max {
+                    continue;
+                }
+                if let Some(h) = heading.take() {
+                    out.push(Change::Heading(h));
+                }
+                out.push(Change::Item(shorten(&plain_text(t))));
+                items += 1;
+            }
+            // (not the version line in bold, nor GitHub's "Full Changelog" link)
+            None if !line.starts_with("**") && !line.to_lowercase().starts_with("full changelog") => text.push(plain_text(line)),
+            None => {}
+        }
+    }
+    if items == 0 {
+        out.extend(text.into_iter().filter(|t| !t.is_empty()).take(max).map(|t| Change::Item(shorten(&t))));
+    }
+    out
+}
+
+/// How many changes the notes list in all (`changes` shows the first few).
+pub fn change_count(notes: &str) -> usize {
+    changes(notes, usize::MAX).iter().filter(|c| matches!(c, Change::Item(_))).count()
+}
+
+/// A list item's text ("- ", "* ", "+ " or "1. " before it), else None.
+fn list_item(line: &str) -> Option<&str> {
+    for b in ["- ", "* ", "+ "] {
+        if let Some(t) = line.strip_prefix(b) {
+            return Some(t);
+        }
+    }
+    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+    (digits > 0).then(|| line[digits..].strip_prefix(". ")).flatten()
+}
+
+/// Markdown as plain text: a link's text without its address, no emphasis or code marks,
+/// single spaces.
+fn plain_text(md: &str) -> String {
+    let mut out = String::with_capacity(md.len());
+    let mut rest = md;
+    while let Some(i) = rest.find('[') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        match after.find("](").and_then(|j| after[j + 2..].find(')').map(|k| (j, j + 2 + k))) {
+            Some((j, end)) => {
+                // (an image's alt text stays out)
+                if out.ends_with('!') {
+                    out.pop();
+                } else {
+                    out.push_str(&after[..j]);
+                }
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push('[');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    let out = out.replace("**", "").replace("__", "").replace('`', "");
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A change cut to `MAX_CHANGE` characters at a word, with an ellipsis.
+fn shorten(t: &str) -> String {
+    if t.chars().count() <= MAX_CHANGE {
+        return t.to_string();
+    }
+    let cut: String = t.chars().take(MAX_CHANGE - 1).collect();
+    let cut = match cut.rfind(' ') {
+        Some(i) if i > MAX_CHANGE / 2 => &cut[..i],
+        _ => cut.as_str(),
+    };
+    format!("{}…", cut.trim_end_matches([' ', ',', ';', ':']))
+}
+
+/// The longest a change is shown (characters; the notes' own are often a paragraph).
+pub const MAX_CHANGE: usize = 180;
+
+#[cfg(test)]
+mod change_tests {
+    use super::*;
+
+    const UPSTREAM: &str = "**openOMSI 0.2.1**\n\n> **Early release, expect bugs.** openOMSI needs an original OMSI 2 installation to run; it contains no game content.\n\n### Bug Fixes & Improvements\n- Android: a black screen instead of the game since 0.2.0 (#1633).\n- The **night** is dark again: see [the docs](https://example.org/x) and `Settings`.\n\n### Snowfall (all graphics modes)\n* A new snowfall: up to 150 000 flakes.\n";
+
+    const FORK: &str = "**openOMSI 0.3.12** - a custom fork of [openOMSI](https://github.com/openOMSI-Project/openOMSI).\n\n### Install\n\nYou need **OMSI 2** (Steam) installed.\n\n1. Download `openOMSI-0.3.12-windows-x64.zip` and start `openomsi.exe`.\n2. Optional: `TH_Wald-traffic-addon.zip`.\n\nThis build does not update itself.\n\n### New since v0.3.11\n\n- Grass on verges and fields (phase 2.3)\n- Fix: no rain drops on a bus's windscreen when it spawns in dry weather\n\n<details><summary>Everything this fork changes</summary>\n\n- Autopilot for everyone (Alt+A)\n- Older things\n\n</details>\n";
+
+    #[test]
+    fn the_changelogs_groups_and_items_are_listed_in_plain_text() {
+        assert_eq!(
+            changes(UPSTREAM, 20),
+            vec![
+                Change::Heading("Bug Fixes & Improvements".into()),
+                Change::Item("Android: a black screen instead of the game since 0.2.0 (#1633).".into()),
+                Change::Item("The night is dark again: see the docs and Settings.".into()),
+                Change::Heading("Snowfall (all graphics modes)".into()),
+                Change::Item("A new snowfall: up to 150 000 flakes.".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_forks_install_steps_and_folded_history_are_left_out() {
+        assert_eq!(
+            changes(FORK, 20),
+            vec![
+                Change::Heading("New since v0.3.11".into()),
+                Change::Item("Grass on verges and fields (phase 2.3)".into()),
+                Change::Item("Fix: no rain drops on a bus's windscreen when it spawns in dry weather".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_long_list_is_cut_and_long_items_shortened() {
+        let many: String = (0..30).map(|i| format!("- change {i}\n")).collect();
+        let c = changes(&many, 10);
+        assert_eq!(c.iter().filter(|c| matches!(c, Change::Item(_))).count(), 10);
+        let long = format!("- {}\n", "word ".repeat(100));
+        let Change::Item(t) = &changes(&long, 5)[0] else { panic!() };
+        assert!(t.chars().count() <= MAX_CHANGE && t.ends_with('…'), "{t}");
+    }
+
+    #[test]
+    fn notes_without_a_list_give_their_text_and_none_give_nothing() {
+        assert_eq!(changes("**openOMSI 1.0**\n\nSmall changes and fixes.\n", 10), vec![Change::Item("Small changes and fixes.".into())]);
+        assert!(changes("", 10).is_empty());
+        assert!(changes("**openOMSI 1.0**\n", 10).is_empty());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
