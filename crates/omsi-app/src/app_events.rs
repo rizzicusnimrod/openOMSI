@@ -3079,6 +3079,8 @@ impl ApplicationHandler for App {
                     // second keep the simulation and the sound going; more is only heat
                     // (OMSI_RENDER_OCCLUDED, which draws them anyway, keeps its pace)
                     let max_fps = if shown_nothing { if max_fps == 0 { 30 } else { max_fps.min(30) } } else { max_fps };
+                    // (the dashcam's view at its own 30 frames a second, as its footage)
+                    let max_fps = if self.view == crate::cinema::DASHCAM { crate::cinema::dashcam_fps(max_fps) } else { max_fps };
                     #[cfg(windows)]
                     let vr_active = self.vr.is_some();
                     #[cfg(not(windows))]

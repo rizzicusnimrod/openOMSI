@@ -1221,7 +1221,9 @@ impl Dashcam {
         // a new phase every one
         let phase = ((frame as f32 * 0.618_034) % 1.0) * 1.7 + self.t * 3.1;
         let wobble = [self.rough * (0.0006 + 0.0009 * cheap), 1.6 + 1.2 * ((frame % 7) as f32 / 7.0), phase];
-        let fisheye = ((cfg.dash_fov - 90.0) / 70.0).clamp(0.0, 1.0) * 0.85 + 0.05;
+        // (a dashcam's wide lens is near an equidistant fisheye: its horizon bows, its
+        // lamp posts lean out at the edges)
+        let fisheye = ((cfg.dash_fov - 90.0) / 70.0).clamp(0.0, 1.0) * 0.7 + 0.3;
         LensFx {
             fisheye,
             chroma: 0.0012 + 0.0035 * cheap,
@@ -1247,6 +1249,19 @@ impl Dashcam {
             seed: (frame % 4096) as f32,
             ..Default::default()
         }
+    }
+}
+
+/// A dashcam records 30 frames a second: in its view the game runs at that, and its
+/// footage steps as a real one's does (a lower limit of the player's stays).
+pub(crate) const DASHCAM_FPS: u32 = 30;
+
+/// The frame rate in the dashcam's view for the player's limit `max_fps` (0: none).
+pub(crate) fn dashcam_fps(max_fps: u32) -> u32 {
+    if max_fps == 0 {
+        DASHCAM_FPS
+    } else {
+        max_fps.min(DASHCAM_FPS)
     }
 }
 
@@ -1310,6 +1325,22 @@ mod tests {
         let (left, right) = stamp(&clock, 51.6);
         assert_eq!(left, "2004/06/21  14:32:07");
         assert_eq!(right, "052 KM/H");
+    }
+
+    #[test]
+    fn the_dashcam_records_at_thirty_frames_a_second() {
+        assert_eq!(dashcam_fps(0), 30);
+        assert_eq!(dashcam_fps(144), 30);
+        assert_eq!(dashcam_fps(24), 24);
+    }
+
+    #[test]
+    fn a_wide_dashcam_lens_bends_its_lines_as_a_real_one_does() {
+        let d = Dashcam::default();
+        let fish = |fov: f32| d.lens(&Config { dash_fov: fov, ..Default::default() }, 1.0 / 30.0, 16.0 / 9.0, 0.0, 0).fisheye;
+        assert!(fish(130.0) >= 0.65, "{}", fish(130.0));
+        assert!(fish(160.0) > fish(130.0) && fish(130.0) > fish(100.0));
+        assert!(fish(160.0) <= 1.0);
     }
 
     #[test]
