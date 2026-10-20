@@ -2,9 +2,12 @@
 
 pub mod atmosphere;
 pub mod clouds;
+mod looks;
 mod puddles;
+mod relief;
 mod rt;
 pub mod shafts;
+pub use looks::Looks;
 mod triple;
 pub use triple::{panel_width, ScreenView, TripleScreen};
 
@@ -356,6 +359,9 @@ struct EnhancedUniform {
     /// w its irradiance here (0: none); row 1 x a stroke's channel's brightness (0: in the
     /// cloud), y its distance (m), z the cloud base over the camera (m), w its shape.
     flash: [[f32; 4]; 2],
+    /// Phase two's looks (`Looks::row`): x the vehicles' screen-space reflections, y relief,
+    /// z the sunlit cab, w tyre tracks.
+    looks: [f32; 4],
 }
 
 /// A lightning flash as the picture shows it this frame (`Lighting::flash`, enhanced only):
@@ -1191,6 +1197,9 @@ pub struct Lighting {
     /// A calm, damp dawn's ground mist (`shafts::ground_mist`, 1/m at the ground; 0 none):
     /// the sun's shafts show in it.
     pub ground_mist: f32,
+    /// Phase two's looks of the enhanced picture (`looks.rs`): the vehicles' screen-space
+    /// reflections, relief, the sunlit cab, tyre tracks, temporal anti-aliasing.
+    pub looks: Looks,
     pub fog_base: Option<f64>,
     pub envir_tint: [Vec3; 3],
     /// How bright an LED panel's dots burn (`MaterialExtra::led`; the settings' 16 levels
@@ -1287,6 +1296,7 @@ impl Default for Lighting {
             sway: 1.0,
             shafts: 2,
             ground_mist: 0.0,
+            looks: Looks::default(),
             lamp_shadows: false,
             wetness: 0.0,
             snow: 0.0,
@@ -1459,6 +1469,11 @@ impl Material {
         ((self.uniform.params2[3] + 0.5) as u32 & 56) as f32
     }
 
+    /// Whether the material takes relief from its brightness (`MaterialExtra::relief`).
+    pub fn relief(&self) -> bool {
+        (self.uniform.params2[3] + 0.5) as u32 & 64 != 0
+    }
+
     /// Whether the material samples texture `id`.
     pub fn uses_texture(&self, id: TextureId) -> bool {
         self.texture == Some(id)
@@ -1580,6 +1595,9 @@ pub struct MaterialExtra {
     /// deciduous plant's leaves, 16 an evergreen's, 32 grass and reeds - a picture the map
     /// keeps for the season itself stays 0.
     pub season: f32,
+    /// Relief made from the texture's brightness (relief.wgsl, enhanced): an old texture of
+    /// cobbles, brick or bark the app's `relief.cfg` takes.
+    pub relief: bool,
 }
 
 /// `OMSI_DEBUG_RETRO=1`: retroreflective sheeting is drawn magenta, as far as it shines
@@ -6697,7 +6715,9 @@ impl Renderer {
                 (if env_mask.is_some() { 1.0 } else { 0.0 })
                     + if extra.transmap_declared || transmap.is_some() { 2.0 } else { 0.0 }
                     + if extra.metal_ok { 4.0 } else { 0.0 }
-                    + if [8.0, 16.0, 32.0].contains(&extra.season) { extra.season } else { 0.0 },
+                    + if [8.0, 16.0, 32.0].contains(&extra.season) { extra.season } else { 0.0 }
+                    // bit 64: relief from its brightness (`MaterialExtra::relief`)
+                    + if extra.relief { 64.0 } else { 0.0 },
             ],
             emissive: [emissive[0], emissive[1], emissive[2], if extra.rain_film { 2.0 } else if extra.glass { 1.0 } else if extra.led { -2.0 } else if extra.display { -1.0 } else { 0.0 }],
             specular: extra.specular,
@@ -8255,6 +8275,7 @@ impl Renderer {
                 Some(f) => [f.dir.normalize().extend(self.flash_e).to_array(), [f.bolt.max(0.0), f.distance.max(50.0), f.base, f.seed]],
                 None => [[0.0; 4]; 2],
             },
+            looks: lighting.looks.effective().row(),
         };
         self.queue
             .write_buffer(&self.enh_buf, 0, bytemuck::bytes_of(&u));
@@ -9665,7 +9686,18 @@ impl Renderer {
         let ao_on_or_contact = ao_on || contact_on;
         // the enhanced path's shading is costly: the depth prepass keeps it to the visible
         // surface (without multisampling, see `share_depth`)
-        let prepass_on = ao_on_or_contact || puddles_wanted || glass_on || (enhanced && (with_overlays || xr_view));
+        // the vehicles' paint and panes take the puddles' rays in any weather (looks.rs; the
+        // window's enhanced picture, not Enhanced+, which traces its own)
+        let ssr_wanted = enhanced
+            && with_overlays
+            && projection.is_none()
+            && !rt_frame
+            && self.puddles.is_some()
+            && self.options.reflections
+            && lighting.looks.effective().ssr
+            && debug_view() == 0.0;
+        let trace_wanted = puddles_wanted || ssr_wanted;
+        let prepass_on = ao_on_or_contact || trace_wanted || glass_on || (enhanced && (with_overlays || xr_view));
         if prepass_on && self.ensure_ao(width, height) {
             // a new AO texture: the camera bind group must point at it
             scene.dirty = true;
@@ -10461,7 +10493,7 @@ impl Renderer {
             && self.options.msaa > 1
             && !enhanced
             && !glass_on
-            && !puddles_wanted
+            && !trace_wanted
             && omsi_cfg::env::var_os("OMSI_FULL_PREPASS").is_none())
         .then_some(AO_PREPASS_REACH);
         // A presurface in the picture (an excavation's floor and walls under the ground, and
@@ -11267,7 +11299,7 @@ impl Renderer {
         // seals them. Reusing prepass depth would reject those faces (or let terrain
         // reject them first). The prepass still supplies AO; colour rebuilds its depth.
         // A depth-writing window in the colour pass must not replace the road receiver.
-        let share_depth = prepass_on && single && self.ao.is_some() && !has_presurface && !puddles_wanted;
+        let share_depth = prepass_on && single && self.ao.is_some() && !has_presurface && !trace_wanted;
         let targets = if share_depth {
             None
         } else {
@@ -11578,9 +11610,13 @@ impl Renderer {
         if rt_frame {
             self.encode_rt_reflections(&mut encoder, width, height, tset.as_ref(), &mut timed);
         }
-        let puddles_on = puddles_wanted
+        // (or no vehicle's reflecting paint or pane, for the vehicles' rays)
+        let puddles_on = trace_wanted
             && !rt_frame
-            && main_batches.iter().any(|b| scene.materials[b.material as usize].uniform.params2[2] > 0.0)
+            && main_batches.iter().any(|b| {
+                let u = &scene.materials[b.material as usize].uniform;
+                (puddles_wanted && u.params2[2] > 0.0) || (ssr_wanted && looks::vehicle_reflective(u))
+            })
             && self.prepare_puddle_reflections(width, height, camera, aspect, projection, &cu, lighting, ro);
         if puddles_on {
             // (the vehicle the camera is in is drawn into the puddles' picture as well)
@@ -13456,6 +13492,7 @@ fn scene_shader_text(gl: bool) -> String {
         include_str!("puddle_common.wgsl"),
         include_str!("lamp_air.wgsl"),
         include_str!("blockers.wgsl"),
+        include_str!("relief.wgsl"),
         include_str!("enhanced.wgsl"),
     ]
     .join("\n");

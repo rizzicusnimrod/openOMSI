@@ -2854,6 +2854,7 @@ impl World {
         crate::lights::set_halogen_map(&map_dir);
         crate::retro::set_map(&map_dir);
         crate::foliage::set_map(&map_dir);
+        crate::relief::set_map(&map_dir);
         log::info!(
             "tile size {:.1} m ({})",
             omsi_map::tile_size(),
@@ -6312,6 +6313,8 @@ impl World {
                 extra.ambient = Some(ambient);
                 extra.no_map_lights = ot.sco.no_map_lighting;
                 extra.retroreflective = retroreflective_texture(&m.texture, &ot.sco);
+                // (relief from its brightness: cobbles, brick, bark - `crate::relief`)
+                extra.relief = crate::relief::takes(&m.texture, &ot.sco.path, alpha == AlphaMode::Blend);
                 if plant {
                     let leaves = crate::foliage::leaves(&m.texture, &ot.sco.path, alpha != AlphaMode::Opaque);
                     extra.sway = if leaves {
@@ -6396,6 +6399,7 @@ impl World {
                     it_extra.retroreflective = extra.retroreflective;
                     it_extra.sway = extra.sway;
                     it_extra.season = extra.season;
+                    it_extra.relief = extra.relief;
                     renderer.address_next.set(address);
                     renderer.light_map_next.set(ot.sco.light_map_mapping);
                     let it_light = match items.iter().find_map(|o| o.lightmap.clone()) {
@@ -7046,6 +7050,8 @@ impl World {
                                 MaterialExtra {
                                     no_z_write: alpha == AlphaMode::Blend,
                                     moisture: if wet { 1.0 } else { 0.0 },
+                                    // (a cobbled street's relief: `crate::relief`)
+                                    relief: crate::relief::takes(&t.file, Path::new("Splines"), alpha == AlphaMode::Blend),
                                     ..MaterialExtra::default()
                                 },
                             );
@@ -7414,6 +7420,7 @@ impl World {
                                     || o3d_mats.get(slot).is_some_and(|m| retroreflective_texture(&m.texture, &ot.sco));
                                 extra.sway = base.sway();
                                 extra.season = base.season();
+                                extra.relief = base.relief();
                                 renderer.address_next.set(tex_addressing(slot_ov.iter().copied()));
                                 let mat = renderer.add_material_extra(scene, Some(tex), alpha, color, unlit, transmap, night, light, env, emissive, extra);
                                 let mat = gpu.material(renderer, scene, mat);
@@ -10494,6 +10501,7 @@ fn material_extra(
         retroreflective: false,
         sway: 0.0,
         season: 0.0,
+        relief: false,
     }
 }
 

@@ -677,7 +677,10 @@ impl Renderer {
             });
             pass.set_bind_group(0, scene.camera_bind_group.as_ref().unwrap(), &[]);
             pass.set_bind_group(2, &pipelines.vehicle_bg, &[]);
-            if omsi_cfg::env::var_os("OMSI_NO_PUDDLE_VEHICLE").is_none() {
+            // (the puddles' picture of the bus is wanted only where there is water: the
+            // vehicles' own rays run in dry weather too, looks.rs)
+            let wet = lighting.wetness * (1.0 - lighting.snow.clamp(0.0, 1.0)) > 0.05;
+            if wet && omsi_cfg::env::var_os("OMSI_NO_PUDDLE_VEHICLE").is_none() {
                 if let Some(first) = vehicle_batches.first() {
                     pass.set_bind_group(
                         1,
@@ -859,7 +862,7 @@ fn selected_entry_batches(
 
 // Match the enhanced shader's glass classification, excluding rain films, decals and
 // unlit screens. Their colour is already composited over the actual window surface.
-fn reflection_glass(u: &MaterialUniform) -> bool {
+pub(crate) fn reflection_glass(u: &MaterialUniform) -> bool {
     u.extra[0] < 0.5
         && u.params[0] > 1.5
         && u.params[1] < 0.5
@@ -1059,6 +1062,52 @@ mod tests {
 
     fn image_difference(a: &[u8], b: &[u8]) -> u64 {
         a.iter().zip(b).map(|(a, b)| a.abs_diff(*b) as u64).sum()
+    }
+
+    #[test]
+    #[ignore = "requires a graphics adapter; renders a dry street in a bus's flank and pane"]
+    fn a_vehicles_paint_and_pane_mirror_the_street_in_dry_weather() {
+        let mut r = test_renderer(1);
+        let mut scene = r.new_scene();
+        let white = r.add_texture(&mut scene, &omsi_texture::Image { width: 1, height: 1, rgba: vec![255; 4], has_alpha: false }, false);
+        let red = test_material(&r, &mut scene, [1.0, 0.01, 0.01, 1.0], true, 0.0, MaterialExtra::default());
+        let road = test_material(&r, &mut scene, [0.25, 0.25, 0.25, 1.0], false, 0.0, MaterialExtra::default());
+        // a bus's flank: grey paint with an envmap, a vehicle's part; and a pane
+        let paint = r.add_material_inner(
+            &mut scene, None, AlphaMode::Opaque, [0.3, 0.3, 0.3, 1.0], false, None, None, None, None, Some((white, 1.0)), [0.0; 3], 0.0,
+            MaterialExtra { metal_ok: true, ..Default::default() },
+        );
+        let pane = r.add_material_inner(
+            &mut scene, None, AlphaMode::Blend, [0.25, 0.3, 0.35, 0.15], false, None, None, None, None, Some((white, 0.4)), [0.0; 3], 0.0,
+            MaterialExtra { glass: true, ..Default::default() },
+        );
+        test_quad(&r, &mut scene, [[-20.0, 0.0, 0.0], [20.0, 0.0, 0.0], [20.0, 40.0, 0.0], [-20.0, 40.0, 0.0]], Vec3::Z, road);
+        // the red house front across the street, on the left
+        test_quad(&r, &mut scene, [[-6.0, 2.0, 0.0], [-6.0, 30.0, 0.0], [-6.0, 30.0, 8.0], [-6.0, 2.0, 8.0]], Vec3::X, red);
+        let flank = test_quad(&r, &mut scene, [[2.5, 3.0, 0.3], [2.5, 3.0, 3.2], [2.5, 25.0, 3.2], [2.5, 25.0, 0.3]], -Vec3::X, paint);
+        let camera = Camera { position: DVec3::new(0.0, 0.0, 1.8), yaw: 0.0, pitch: -3.0, roll: 0.0, fov_deg: 70.0, near: 0.1, far: 200.0 };
+        let red_in_flank = |r: &mut Renderer, scene: &mut Scene, ssr: bool| -> i64 {
+            let lighting = Lighting { enhanced: true, shadows: false, looks: crate::Looks { ssr, ..Default::default() }, ..Default::default() };
+            // (the sky and the exposure settle first)
+            for _ in 0..3 {
+                r.render_to_image(scene, 128, 128, &camera, &lighting).unwrap();
+            }
+            let img = r.render_to_image(scene, 128, 128, &camera, &lighting).unwrap();
+            // the right half, where the flank stands: red over green
+            (30..100)
+                .flat_map(|y| (80..128).map(move |x| (y * 128 + x) * 4))
+                .map(|i| img[i] as i64 - img[i + 1] as i64)
+                .sum()
+        };
+        let without = red_in_flank(&mut r, &mut scene, false);
+        let with = red_in_flank(&mut r, &mut scene, true);
+        assert!(with - without > 1000, "no street in the paint: {without} -> {with}");
+        // the same in a pane
+        r.set_params(&mut scene, flank, &[], false, &[]);
+        test_quad(&r, &mut scene, [[2.5, 3.0, 0.3], [2.5, 3.0, 3.2], [2.5, 25.0, 3.2], [2.5, 25.0, 0.3]], -Vec3::X, pane);
+        let without = red_in_flank(&mut r, &mut scene, false);
+        let with = red_in_flank(&mut r, &mut scene, true);
+        assert!(with - without > 300, "no street in the pane: {without} -> {with}");
     }
 
     #[test]

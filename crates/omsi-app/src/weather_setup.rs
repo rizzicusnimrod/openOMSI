@@ -536,6 +536,17 @@ pub(crate) fn weather_lighting(
     lighting.shafts = crate::startup::SUN_SHAFTS.load(std::sync::atomic::Ordering::Relaxed).min(3) as u8;
     let saturated = omsi_content::weather::absolute_humidity(w.temp.0, w.temp.0);
     let humidity = if saturated > 0.0 { w.temp.1 / saturated } else { 0.0 };
+    // phase two's looks (the settings' switches, `startup::nature_settings`)
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        lighting.looks = omsi_render::Looks {
+            ssr: crate::startup::SSR.load(Relaxed),
+            relief: crate::startup::RELIEF.load(Relaxed),
+            sunlit_cab: crate::startup::SUNLIT_CAB.load(Relaxed),
+            road_tracks: crate::startup::ROAD_TRACKS.load(Relaxed),
+            taa: crate::startup::TAA.load(Relaxed),
+        };
+    }
     lighting.ground_mist = omsi_render::shafts::ground_mist(lighting.sun_dir.normalize_or_zero().z, humidity, w.wind.1, lighting.rain.max(lighting.snowfall));
     // Omsi.exe hides the sun under an 'ovc' cloud type (the Overcast ones in clouds.cfg) and
     // draws no sun shadows below 350 m visibility

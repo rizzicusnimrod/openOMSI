@@ -51,6 +51,7 @@ mod lan_world;
 mod lights;
 mod foliage;
 mod lightning;
+mod relief;
 mod retro;
 mod launcher;
 mod menu;

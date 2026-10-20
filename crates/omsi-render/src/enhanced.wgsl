@@ -454,6 +454,18 @@ struct EnhancedOut {
 // probe's reflection is left out of the colour there: the traced one is added in its place.
 var<private> rt_gbuf: vec4<f32>;
 var<private> rt_aux: vec4<f32>;
+// Enhanced (not +): how much of a vehicle's paint or glass reflection the screen-space rays
+// replace (puddle_reflection.wgsl), written into the mask's r below a half (looks.rs).
+var<private> ssr_weight: f32;
+
+// The mask's r for a vehicle's reflection weight `w` on a layer of `coverage` (looks.rs
+// `vehicle_mask`): the mask blends by the coverage, so a pane's weight is divided by it.
+fn vehicle_mask(w: f32, coverage: f32) -> f32 {
+    if (!(w > 0.0)) {
+        return 0.0;
+    }
+    return clamp(w / max(coverage, 1e-3), 0.0, 1.0) * 0.49;
+}
 
 @fragment
 fn fs_enhanced(in: FsIn) -> EnhancedOut {
@@ -470,7 +482,7 @@ fn fs_enhanced(in: FsIn) -> EnhancedOut {
     // A vehicle's shadow is light blocked from the road, not a new dry surface. Its
     // colour still blends normally, but it must preserve the road's reflection mask.
     let coverage = select(select(c.a, 1.0, screen), 0.0, in.params2.w > 1.5);
-    out.mask = vec4<f32>(select(0.0, 1.0, screen), max(led, puddle_weight.y * 0.49), puddle_weight.x, coverage);
+    out.mask = vec4<f32>(select(vehicle_mask(ssr_weight, coverage), 1.0, screen), max(led, puddle_weight.y * 0.49), puddle_weight.x, coverage);
     //RT out.gbuf = rt_gbuf;
     //RT out.aux = rt_aux;
     return out;
@@ -581,6 +593,7 @@ fn saloon_reflection(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
 }
 
 fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bool, eye: vec3<f32>) -> vec4<f32> {
+    ssr_weight = 0.0;
     if (material.emissive.w > 1.5) {
         // a pane's film of water: drops, not the sliding texture (see `rain_glass`), each a
         // lens that mirrors the sky probe and shows it upside down through itself
@@ -801,6 +814,14 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
         let b = dp2p * du1.y + dp1p * du2.y;
         let inv = inverseSqrt(max(max(dot(t, t), dot(b, b)), 1e-12));
         n = normalize(n - (t * inv * slope.x + b * inv * slope.y) * 0.6);
+    }
+    // relief from the texture's brightness (relief.wgsl; `relief.cfg` marks the textures,
+    // bit 64): where the material has no normal map or bump map of its own, near the eye
+    // (the derivatives are taken in the material's uniform flow, the distance fades it)
+    if ((u32(material.params2.w + 0.5) & 64u) != 0u && enh.looks.y > 0.5 && material.pbr.x < 0.5 && material.bump.y < 0.5) {
+        let h = dot(tex.rgb, vec3<f32>(0.2126, 0.7152, 0.0722)) * RELIEF_DEPTH * relief_fade(dist);
+        let bent = relief_normal(n, dpdx(in.world), dpdy(in.world), dpdx(h), dpdy(h));
+        n = select(n, bent, dist < RELIEF_FAR);
     }
     var albedo = tex.rgb * material.color.rgb;
     // OMSI materials have separate diffuse and ambient colours. Some interiors have
@@ -1181,6 +1202,17 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
             rt_gbuf = vec4<f32>(n * w, w);
             rt_aux = vec4<f32>(dist * w, rough_t * w, 0.0, w);
         }
+    }
+    // Enhanced: the street and the cars round about in a vehicle's paint, chrome and panes,
+    // from the screen-space rays (`enh.looks.x`, looks.rs) - the smooth ones; a pane of the
+    // bus one sits in keeps its saloon
+    let vehicle_part = (u32(material.params2.w + 0.5) & 4u) != 0u;
+    if (enh.looks.x > 0.5 && camera.clouds.w < 1.5 && !capture && !is_water && ((reflective_env && vehicle_part) || glass) && own_pane < 0.5) {
+        var w = dot(refl_f, vec3<f32>(0.2126, 0.7152, 0.0722)) * aer.a * (1.0 - smoothstep(0.15, 0.45, rough));
+        if (glass) {
+            w = w * smoothstep(0.0, 0.05, alpha);
+        }
+        ssr_weight = w;
     }
     // --- the lamps, the cabin light and what glows by itself
     // ([nomaplighting] objects are not lit by the map's lamps; light-mapped roads are, with

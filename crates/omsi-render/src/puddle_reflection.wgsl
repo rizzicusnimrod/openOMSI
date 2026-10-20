@@ -65,16 +65,26 @@ fn scene_colour(c: vec3<f32>) -> vec3<f32> {
 fn trace_miss(depth: f32) -> vec4<f32> {
     return vec4<f32>(select(vec3<f32>(0.0), vec3<f32>(1.0, 0.0, 0.0), p.projection_trace.z == 2.0), depth);
 }
-fn fallback_light(direction: vec3<f32>, px: vec2<i32>) -> vec3<f32> {
+// `occlusion`: how much of the sky the receiver's ambient occlusion leaves (the puddles'
+// mask.g over b; a vehicle's weight has it in already).
+fn fallback_light(direction: vec3<f32>, occlusion: f32) -> vec3<f32> {
     if (p.vehicle_info.w < 0.5) { return p.sky.rgb; }
     let lod = 0.03 * (p.origin_rain.w - 1.0);
     let sky = finite_colour(textureSampleLevel(t_probe, s_linear, direction.xzy, lod).rgb * p.sky.w);
     let open = smoothstep(-0.05, 0.35, direction.z);
     let fallback = mix(p.sky.rgb, sky, mix(open, 1.0, 0.25));
-    let mask = textureLoad(t_mask, px, 0);
     // Sky ambient occlusion removes sky light; a local scene hit already contains its
     // own lighting and must not be suppressed by the receiver's ambient occlusion.
-    return fallback * clamp(mask.g / max(mask.b * 0.49, 1e-6), 0.0, 1.0);
+    return fallback * occlusion;
+}
+fn puddle_occlusion(px: vec2<i32>) -> f32 {
+    let mask = textureLoad(t_mask, px, 0);
+    return clamp(mask.g / max(mask.b * 0.49, 1e-6), 0.0, 1.0);
+}
+// A vehicle's paint or pane: how much of its reflection the rays replace (the mask's r
+// below a half, looks.rs `vehicle_weight`; a screen's 1 is none).
+fn vehicle_weight(r: f32) -> f32 {
+    return select(clamp(r / 0.49, 0.0, 1.0), 0.0, r >= 0.5);
 }
 fn player_surface(world: vec3<f32>) -> bool {
     for (var i = 0u; i < u32(p.vehicle_info.x); i++) {
@@ -94,23 +104,34 @@ fn local_vehicle_plane(world: vec3<f32>) -> bool {
 // Reconstruct the receiver's geometric normal for roads on other grades. Use the
 // nearer neighbor on each axis so a foreground bus or kerb does not tilt the water.
 fn receiver_normal(px: vec2<i32>, uv: vec2<f32>, world: vec3<f32>, depth: f32) -> vec3<f32> {
-    let size = vec2<i32>(textureDimensions(t_depth));
+    let n = depth_normal(t_depth, px, world, depth);
+    if (dot(n, n) < 1e-12) { return vec3<f32>(0.0, 0.0, 1.0); }
+    return normalize(n * select(-1.0, 1.0, n.z > 0.0));
+}
+// A vehicle's paint or pane from the depth with the panes in: its normal facing the eye.
+fn vehicle_normal(px: vec2<i32>, world: vec3<f32>, depth: f32) -> vec3<f32> {
+    let n = depth_normal(t_hit_depth, px, world, depth);
+    if (dot(n, n) < 1e-12) { return normalize(p.eye_time.xyz - world); }
+    return normalize(n * select(-1.0, 1.0, dot(n, p.eye_time.xyz - world) > 0.0));
+}
+// The surface's (unnormalised) normal from the depths beside a pixel, each side taken from
+// the neighbour nearer in depth (an edge's far side is another surface).
+fn depth_normal(t: texture_depth_2d, px: vec2<i32>, world: vec3<f32>, depth: f32) -> vec3<f32> {
+    let size = vec2<i32>(textureDimensions(t));
     var axes: array<vec3<f32>, 2>;
     for (var i = 0; i < 2; i++) {
         let axis = select(vec2<i32>(1, 0), vec2<i32>(0, 1), i == 1);
         let plus = clamp(px + axis, vec2<i32>(0), size - vec2<i32>(1));
         let minus = clamp(px - axis, vec2<i32>(0), size - vec2<i32>(1));
-        let dp = textureLoad(t_depth, plus, 0);
-        let dm = textureLoad(t_depth, minus, 0);
+        let dp = textureLoad(t, plus, 0);
+        let dm = textureLoad(t, minus, 0);
         let forward = dp > 0.0 && (dm <= 0.0 || abs(dp - depth) < abs(dm - depth));
         let q = select(minus, plus, forward);
         let d = select(dm, dp, forward);
         axes[i] = (world_pos((vec2<f32>(q) + vec2<f32>(0.5)) / vec2<f32>(size), d) - world)
             * select(-1.0, 1.0, forward);
     }
-    let n = cross(axes[0], axes[1]);
-    if (dot(n, n) < 1e-12) { return vec3<f32>(0.0, 0.0, 1.0); }
-    return normalize(n * select(-1.0, 1.0, n.z > 0.0));
+    return cross(axes[0], axes[1]);
 }
 
 @fragment
@@ -119,16 +140,24 @@ fn fs_trace(in: PuddleVertex) -> @location(0) vec4<f32> {
     let centre = vec2<i32>(in.uv * vec2<f32>(size));
     // Pick a wet sample from the nearest 2x2 pixels, so a small pool at a half-size
     // pixel's edge still gets a ray. The full-size resolve reapplies the exact mask.
+    // (a vehicle's paint or pane likewise, when there is no water: `vehicle_weight`)
     var px = clamp(centre, vec2<i32>(0), size - vec2<i32>(1));
     var weight = 0.0;
+    var vpx = px;
+    var vweight = 0.0;
     for (var y = 0; y < 2; y++) {
         for (var x = 0; x < 2; x++) {
             let q = clamp(centre + vec2<i32>(x - 1, y - 1), vec2<i32>(0), size - vec2<i32>(1));
-            let w = textureLoad(t_mask, q, 0).b;
-            if (w > weight) { weight = w; px = q; }
+            let m = textureLoad(t_mask, q, 0);
+            if (m.b > weight) { weight = m.b; px = q; }
+            let vw = vehicle_weight(m.r);
+            if (vw > vweight) { vweight = vw; vpx = q; }
         }
     }
-    if (weight < 0.004) { return vec4<f32>(0.0); }
+    if (weight < 0.004) {
+        if (vweight < 0.004) { return vec4<f32>(0.0); }
+        return trace_vehicle(vpx, size);
+    }
     let depth = textureLoad(t_depth, px, 0);
     if (depth <= 0.0) { return vec4<f32>(0.0); }
     let uv = (vec2<f32>(px) + vec2<f32>(0.5)) / vec2<f32>(size);
@@ -140,14 +169,36 @@ fn fs_trace(in: PuddleVertex) -> @location(0) vec4<f32> {
     if (!local_vehicle_plane(world)) { surface_normal = receiver_normal(px, uv, world, depth); }
     let normal = normalize(surface_normal + vec3<f32>(ripple.xy, 0.0));
     let direction = reflect(normalize(world - p.eye_time.xyz), normal);
+    let occlusion = puddle_occlusion(px);
     if (local_vehicle_plane(world)) {
         let vehicle = textureSampleLevel(t_vehicle, s_linear, uv + ripple.xy * 0.006, 0.0);
         if (vehicle.a > 0.01) {
             if (p.projection_trace.z == 2.0) { return vec4<f32>(0.0, 1.0, 0.0, depth); }
             if (p.projection_trace.z == 3.0) { return vec4<f32>(finite_colour(vehicle.rgb), depth); }
-            return vec4<f32>((reflection_colour(finite_colour(vehicle.rgb / max(vehicle.a, 1e-5))) - fallback_light(direction, px)) * vehicle.a, depth);
+            return vec4<f32>((reflection_colour(finite_colour(vehicle.rgb / max(vehicle.a, 1e-5))) - fallback_light(direction, occlusion)) * vehicle.a, depth);
         }
     }
+    return march(world, normal, direction, depth, distance, occlusion, size);
+}
+
+// A vehicle's paint or pane (enhanced.wgsl `ssr_weight`): the receiver is what the depth
+// with the panes in holds - a pane, not the saloon behind it - and its normal is the
+// surface's own (no ripples on a bus's flank).
+fn trace_vehicle(px: vec2<i32>, size: vec2<i32>) -> vec4<f32> {
+    let depth = textureLoad(t_hit_depth, px, 0);
+    if (depth <= 0.0) { return vec4<f32>(0.0); }
+    let uv = (vec2<f32>(px) + vec2<f32>(0.5)) / vec2<f32>(size);
+    let world = world_pos(uv, depth);
+    let distance = length(world - p.eye_time.xyz);
+    if (distance > 100.0) { return vec4<f32>(0.0); }
+    let normal = vehicle_normal(px, world, depth);
+    let direction = reflect(normalize(world - p.eye_time.xyz), normal);
+    return march(world, normal, direction, depth, distance, 1.0, size);
+}
+
+// Follow a reflected ray from `world` over the screen: what it meets, less the sky light
+// the main pass reflected there (`fallback_light`), and the receiver's depth.
+fn march(world: vec3<f32>, normal: vec3<f32>, direction: vec3<f32>, depth: f32, distance: f32, occlusion: f32, size: vec2<i32>) -> vec4<f32> {
     let start = world + normal * 0.025 + direction * 0.08;
     let c0 = p.view_proj * vec4<f32>(start, 1.0);
     let cd = p.view_proj * vec4<f32>(direction, 0.0);
@@ -207,7 +258,7 @@ fn fs_trace(in: PuddleVertex) -> @location(0) vec4<f32> {
                 if (p.projection_trace.z == 2.0) { return vec4<f32>(0.0, 1.0, 0.0, depth); }
                 if (p.projection_trace.z == 3.0) { return vec4<f32>(colour, depth); }
                 // Replace the reflected sky light rather than adding a second reflection.
-                return vec4<f32>((reflection_colour(colour) - fallback_light(direction, px)) * confidence, depth);
+                return vec4<f32>((reflection_colour(colour) - fallback_light(direction, occlusion)) * confidence, depth);
             }
         }
         previous = t;
@@ -252,10 +303,14 @@ fn fs_blur_y(in: PuddleVertex) -> @location(0) vec4<f32> {
 fn fs_resolve(in: PuddleVertex) -> @location(0) vec4<f32> {
     let px = vec2<i32>(in.clip.xy);
     let base = textureLoad(t_scene, px, 0);
-    let weight = textureLoad(t_mask, px, 0).b;
+    let m = textureLoad(t_mask, px, 0);
+    // (water first; else a vehicle's paint or pane, whose receiver is in the depth with the
+    // panes, as `trace_vehicle` took it)
+    let vehicle = m.b < 0.004;
+    let weight = select(m.b, vehicle_weight(m.r), vehicle);
     if (p.projection_trace.z == 1.0) { return vec4<f32>(vec3<f32>(weight * 4.0), 1.0); }
     if (weight < 0.004) { return base; }
-    let depth = textureLoad(t_depth, px, 0);
+    let depth = select(textureLoad(t_depth, px, 0), textureLoad(t_hit_depth, px, 0), vehicle);
     let size = vec2<i32>(textureDimensions(t_trace));
     if (p.projection_trace.z == 4.0) {
         let world = world_pos(in.uv, depth);

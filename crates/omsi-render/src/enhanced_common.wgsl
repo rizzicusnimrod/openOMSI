@@ -55,6 +55,9 @@ struct Enhanced {
     // here (0: none); row 1 x a stroke's channel's brightness (0: in the cloud), y how far
     // it stands (m), z the cloud base over the camera (m), w the channel's shape
     flash: array<vec4<f32>, 2>,
+    // phase two's looks (lib.rs `Looks::row`): x the vehicles' screen-space reflections,
+    // y relief from the textures' brightness, z the sunlit cab, w tyre tracks (1 on each)
+    looks: vec4<f32>,
 };
 @group(0) @binding(11) var<uniform> enh: Enhanced;
 @group(0) @binding(13) var s_lin: sampler;
