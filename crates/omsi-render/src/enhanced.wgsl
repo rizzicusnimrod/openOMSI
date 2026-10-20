@@ -1089,7 +1089,14 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
     ao = mix(ao, 1.0 - (1.0 - ao) * 0.35, in_cab);
     let avg_e = enh.fog_color.rgb * (PI / 0.9);
     let cab_e = vec3<f32>(dot(avg_e, vec3<f32>(0.2126, 0.7152, 0.0722))) * vec3<f32>(1.0, 0.98, 0.95);
-    let e_amb = mix(sh_irradiance(n), cab_e * CAB_AMBIENT, 0.6 * in_cab) * ao_bounce(ao, ambient_albedo);
+    // (the sunlit cab, `enh.looks.z`: the light comes in through the windows, from the side
+    // a surface faces - cab.wgsl - half way to the flat light's grey)
+    var cab_ambient = cab_e * CAB_AMBIENT;
+    if (enh.looks.z > 0.5 && in_cab > 0.0) {
+        let w = window_light(n);
+        cab_ambient = mix(vec3<f32>(dot(w, vec3<f32>(0.2126, 0.7152, 0.0722))), w, 0.5) * vec3<f32>(1.0, 0.98, 0.95) * CAB_AMBIENT;
+    }
+    let e_amb = mix(sh_irradiance(n), cab_ambient, 0.6 * in_cab) * ao_bounce(ao, ambient_albedo);
     var ambient = e_amb * ambient_albedo / PI * (vec3<f32>(1.0) - fr * (1.0 - rough));
     // --- reflections: the sky probe, as sharp as the surface is smooth
     var r = reflect(-v, n);

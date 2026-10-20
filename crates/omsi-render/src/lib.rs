@@ -2,6 +2,7 @@
 
 pub mod atmosphere;
 pub mod clouds;
+mod cab;
 mod looks;
 mod puddles;
 mod relief;
@@ -13493,6 +13494,7 @@ fn scene_shader_text(gl: bool) -> String {
         include_str!("lamp_air.wgsl"),
         include_str!("blockers.wgsl"),
         include_str!("relief.wgsl"),
+        include_str!("cab.wgsl"),
         include_str!("enhanced.wgsl"),
     ]
     .join("\n");
