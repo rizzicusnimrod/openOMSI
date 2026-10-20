@@ -4,6 +4,7 @@ pub mod atmosphere;
 pub mod clouds;
 mod puddles;
 mod rt;
+pub mod shafts;
 mod triple;
 pub use triple::{panel_width, ScreenView, TripleScreen};
 
@@ -536,6 +537,9 @@ struct FogLampUniform {
     /// The headlamps that shine into the eye (`lamp_glare`): where each is from the camera
     /// (world, m) and its light at the eye (irradiance, 1 = 10 000 lux); w 0 = none.
     glare: [[f32; 4]; GLARE_LAMPS],
+    /// The sun's shafts (`shafts.rs`): x the steps along a ray (0: none), y how far (m), z the
+    /// ground mist at the ground (1/m), w its height (m).
+    shafts: [f32; 4],
 }
 
 /// How many headlamps' glare the fog lamps' pass draws round them (the brightest).
@@ -1181,6 +1185,12 @@ pub struct Lighting {
     /// How much the plants move in the wind against the natural measure (1; 0 = still, the
     /// settings' `wind_sway`).
     pub sway: f32,
+    /// How finely the sun's shafts are drawn (enhanced, `shafts.rs`): 0 none, 1 low, 2 medium,
+    /// 3 high (the settings' `sun_shafts`).
+    pub shafts: u8,
+    /// A calm, damp dawn's ground mist (`shafts::ground_mist`, 1/m at the ground; 0 none):
+    /// the sun's shafts show in it.
+    pub ground_mist: f32,
     pub fog_base: Option<f64>,
     pub envir_tint: [Vec3; 3],
     /// How bright an LED panel's dots burn (`MaterialExtra::led`; the settings' 16 levels
@@ -1275,6 +1285,8 @@ impl Default for Lighting {
             flash: None,
             foliage: [0.0; 4],
             sway: 1.0,
+            shafts: 2,
+            ground_mist: 0.0,
             lamp_shadows: false,
             wetness: 0.0,
             snow: 0.0,
@@ -11586,7 +11598,11 @@ impl Renderer {
         // over the picture before its glow and metering (the window's picture; the mirrors
         // go without)
         let fog_lamps = enhanced_weather_fog(lighting) >= 2e-4 && !scene.lights.is_empty();
-        let shafts = lighting.shadows && lighting.sun_dir.z > 0.0;
+        let shafts = lighting.shadows && lighting.sun_dir.z > 0.0 && lighting.shafts > 0 && !shafts::off();
+        let mist = if shafts && !shafts::mist_off() { lighting.ground_mist.clamp(0.0, 0.05) } else { 0.0 };
+        if shafts::debug() {
+            log::info!("sun shafts: quality {} ({} steps over {} m), ground mist {mist:.4}/m", lighting.shafts, shafts::steps(lighting.shafts), shafts::reach(lighting.shafts));
+        }
         let no_glare = omsi_cfg::env::var_os("OMSI_NO_GLARE").is_some();
         let sun_glare = lighting.sun_dir.z > -0.01 && lighting.sun_intensity > 0.0 && !no_glare;
         let lamp_glare = self.lamp_glare.1 > GLARE_FLOOR && !no_glare;
@@ -11610,6 +11626,7 @@ impl Renderer {
                         inv_view_proj: vp_mat.inverse().to_cols_array_2d(),
                         size: [width as f32, height as f32, if sun_glare { 1.0 } else { 0.0 }, droplets],
                         glare: if lamp_glare { self.lamp_glare.0 } else { [[0.0; 4]; GLARE_LAMPS] },
+                        shafts: if shafts { [shafts::steps(lighting.shafts) as f32, shafts::reach(lighting.shafts), mist, shafts::MIST_HEIGHT] } else { [0.0; 4] },
                     };
                     self.queue.write_buffer(&self.fog_lamps_buf, 0, bytemuck::bytes_of(&u));
                     let h = &self.hdr_targets[&(width, height)];

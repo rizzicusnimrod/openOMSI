@@ -532,6 +532,11 @@ pub(crate) fn weather_lighting(
     lighting.wind = glam::Vec3::new(w.wind.0.to_radians().sin() * w.wind.1, w.wind.0.to_radians().cos() * w.wind.1, 0.0);
     lighting.sway = crate::startup::WIND_SWAY.load(std::sync::atomic::Ordering::Relaxed).min(200) as f32 / 100.0;
     lighting.gust = gustiness(w);
+    // the sun's shafts, and the mist of a calm, damp dawn they show in (omsi-render shafts.rs)
+    lighting.shafts = crate::startup::SUN_SHAFTS.load(std::sync::atomic::Ordering::Relaxed).min(3) as u8;
+    let saturated = omsi_content::weather::absolute_humidity(w.temp.0, w.temp.0);
+    let humidity = if saturated > 0.0 { w.temp.1 / saturated } else { 0.0 };
+    lighting.ground_mist = omsi_render::shafts::ground_mist(lighting.sun_dir.normalize_or_zero().z, humidity, w.wind.1, lighting.rain.max(lighting.snowfall));
     // Omsi.exe hides the sun under an 'ovc' cloud type (the Overcast ones in clouds.cfg) and
     // draws no sun shadows below 350 m visibility
     let overcast = w.clouds.0.trim().to_ascii_lowercase().starts_with("overcast");

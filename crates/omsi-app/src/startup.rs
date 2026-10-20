@@ -444,7 +444,28 @@ pub(crate) fn nature_settings(s: &crate::settings::Settings) {
     WIND_SWAY.store(s.wind_sway as u32, Relaxed);
     SEASONAL_FOLIAGE.store(s.seasonal_foliage, Relaxed);
     LIGHTNING.store(s.lightning, Relaxed);
+    SUN_SHAFTS.store(s.sun_shafts as u32, Relaxed);
+    SSR.store(s.ssr, Relaxed);
+    GRASS.store(s.grass as u32, Relaxed);
+    RELIEF.store(s.relief, Relaxed);
+    TAA.store(s.taa, Relaxed);
+    SUNLIT_CAB.store(s.sunlit_cab, Relaxed);
+    ROAD_TRACKS.store(s.road_tracks, Relaxed);
 }
+/// The sun's shafts' quality, 0 off .. 3 high (`Settings::sun_shafts`).
+pub(crate) static SUN_SHAFTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(2);
+/// Screen-space reflections on the vehicles (`Settings::ssr`).
+pub(crate) static SSR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// How much grass grows, 0 none .. 3 dense (`Settings::grass`).
+pub(crate) static GRASS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(2);
+/// Relief made from the old textures' brightness (`Settings::relief`).
+pub(crate) static RELIEF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Temporal anti-aliasing (`Settings::taa`).
+pub(crate) static TAA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The sun's patches and the windows' light in the cab (`Settings::sunlit_cab`).
+pub(crate) static SUNLIT_CAB: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Tyre tracks on wet and snowy roads (`Settings::road_tracks`).
+pub(crate) static ROAD_TRACKS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 /// The instrument dimmer in per cent (`Settings::dash_dimmer`), for `weather_lighting`.
 pub(crate) static DASH_DIMMER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
 /// Volume of the AI vehicles and of the scenery's own sounds (OMSI's `sound_ai` and

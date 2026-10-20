@@ -52,6 +52,9 @@ struct FogLampParams {
     // the headlamps shining into the eye (lib.rs `lamp_glare`): where each is from the
     // camera (world) and its light at the eye; w 0 = none
     glare: array<vec4<f32>, 4>,
+    // the sun's shafts (shafts.rs): x the steps along a ray (0: none), y how far (m), z the
+    // ground mist's extinction at the ground (1/m), w the height it falls off by e over (m)
+    shafts: vec4<f32>,
 };
 @group(1) @binding(0) var<uniform> fp: FogLampParams;
 @group(1) @binding(1) var t_depth: texture_depth_2d;
@@ -94,12 +97,20 @@ fn pixel_ray(at: vec2<f32>) -> vec4<f32> {
 @group(0) @binding(6) var s_shadow: sampler_comparison;
 @group(0) @binding(7) var t_shadow_far: texture_depth_2d;
 const SHAFT_DEPTH_RANGE: f32 = 2199.0;
-const SHAFT_STEPS: u32 = 16u;
-// how far the shafts are followed (the near cascade's reach, a little less)
-const SHAFT_REACH: f32 = 180.0;
 
 // Whether the sun reaches a point in the air (1) or a house or a crown stands between (0).
+// Near the camera the close cascade's finer map (the right half of the atlas, shader.wgsl
+// `shadow_pcf_close`) shows a branch's or a lamp post's shadow the near one loses.
 fn sun_reaches(x: vec3<f32>) -> f32 {
+    let range = camera.flags.w;
+    if (range > 0.0 && distance(x, camera.cam_pos.xyz) < range * 0.85) {
+        let cp = camera.light_view_proj_close * vec4<f32>(x, 1.0);
+        let cuv = vec2<f32>(cp.x * 0.5 + 0.5, 0.5 - cp.y * 0.5);
+        if (max(abs(cuv.x - 0.5), abs(cuv.y - 0.5)) < 0.48 && cp.z >= 0.0 && cp.z <= 1.0) {
+            let scale = select(1.0, camera.post.w, camera.post.w > 0.0);
+            return textureSampleCompareLevel(t_shadow, s_shadow, vec2<f32>(cuv.x * 0.5 * scale + 0.5, cuv.y * scale), cp.z - 0.05 / SHAFT_DEPTH_RANGE);
+        }
+    }
     let lp = camera.light_view_proj * vec4<f32>(x, 1.0);
     let uv = vec2<f32>(lp.x * 0.5 + 0.5, 0.5 - lp.y * 0.5);
     if (max(abs(uv.x - 0.5), abs(uv.y - 0.5)) < 0.48 && lp.z >= 0.0 && lp.z <= 1.0) {
@@ -122,39 +133,59 @@ fn sun_reaches(x: vec3<f32>) -> f32 {
 // lit and dark shafts through a hazy evening, a misty morning wood, a dusty street. The
 // air scatters the way `air` has it - the weather's fog with g 0.55, the clear air's haze
 // and dust forward with g 0.7 (its Rayleigh part is small near the ground).
+// A calm, damp dawn's ground mist (shafts.rs `ground_mist`, `fp.shafts.zw`) is in no other
+// part of the picture: it is all added here, the sun's light where the sun reaches it and
+// the light around (`enh.fog_color`) everywhere - the beams through a wood's crowns.
 fn sun_shafts(c: vec3<f32>, d: vec3<f32>, len: f32, jitter: f32) -> vec3<f32> {
     let s = camera.sun_dir.xyz;
     let e_sun = enh.sun.rgb;
-    if (camera.shadow.x < 0.5 || s.z <= 0.0 || max(e_sun.r, e_sun.g) < 1e-4) {
+    let steps = u32(fp.shafts.x);
+    if (steps == 0u || camera.shadow.x < 0.5 || s.z <= 0.0 || max(e_sun.r, e_sun.g) < 1e-4) {
         return vec3<f32>(0.0);
     }
-    let end = min(len, SHAFT_REACH);
-    let dt = end / f32(SHAFT_STEPS);
+    let end = min(len, fp.shafts.y);
+    let dt = end / f32(steps);
     let cos_t = dot(s, d);
     let p_fog = hg_phase(cos_t, 0.55) * 0.9;
     let p_air = hg_phase(cos_t, 0.7);
+    // (the mist's droplets are fog's: forward, g 0.6)
+    let p_mist = hg_phase(cos_t, 0.6) * 0.9;
+    let mist = fp.shafts.z;
+    let mist_k = 1.0 / max(fp.shafts.w, 1.0);
+    let ground = enh.fog.z;
     let h0 = c.z - enh.fog.z;
     // (the most the shadows could take out along the way, on the screen: where that is
     // too little to see - most of the picture, looking away from the sun - nothing is done)
     let most = (enh.fog.x * p_fog + enh.fog.w * p_air) * max(e_sun.r, e_sun.g) * end * enh.exposure.x;
-    if (most < 0.004) {
+    if (most < 0.004 && mist <= 0.0) {
         return vec3<f32>(0.0);
     }
     var shade = vec3<f32>(0.0);
-    for (var i = 0u; i < SHAFT_STEPS; i = i + 1u) {
+    var lit_mist = vec3<f32>(0.0);
+    var tau_mist = 0.0;
+    for (var i = 0u; i < steps; i = i + 1u) {
         let t = (f32(i) + jitter) * dt;
         let x = c + d * t;
+        let h = max(x.z - enh.fog.z, 0.0);
+        let s_mist = mist * exp(-max(x.z - ground, 0.0) * mist_k);
+        if (s_mist < 1e-6 && most < 0.004) {
+            continue;
+        }
         let lit = sun_reaches(x);
+        let tau = layer_depth(enh.fog.x, enh.fog.y, h0, h, t) + layer_depth(enh.fog.w, 1.0 / 1500.0, h0, h, t);
+        if (s_mist > 1e-6) {
+            let through = exp(-tau - tau_mist);
+            lit_mist = lit_mist + (e_sun * (lit * p_mist) + enh.fog_color.rgb) * s_mist * through * dt;
+            tau_mist = tau_mist + s_mist * dt;
+        }
         if (lit >= 0.999) {
             continue;
         }
-        let h = max(x.z - enh.fog.z, 0.0);
         let s_fog = enh.fog.x * exp(-enh.fog.y * h);
         let s_air = enh.fog.w * exp(-h / 1500.0);
-        let tau = layer_depth(enh.fog.x, enh.fog.y, h0, h, t) + layer_depth(enh.fog.w, 1.0 / 1500.0, h0, h, t);
         shade = shade + vec3<f32>((1.0 - lit) * (s_fog * p_fog + s_air * p_air) * exp(-tau) * dt);
     }
-    return -shade * e_sun;
+    return lit_mist - shade * e_sun;
 }
 
 // at half size: one ray per four pixels

@@ -283,6 +283,15 @@ pub const OPTIONS: &[PageDef] = &[
                 it("wind_sway", "Wind in the trees", "How much trees, bushes and grass move in the wind"),
                 it("seasonal_foliage", "Trees through the year", "Autumn colours, bare winter trees and fresh spring green"),
                 it("lightning", "Lightning and thunder", "Thunderstorms flash and rumble"),
+                it("grass", "Grass", "Grass on the verges and fields, swaying in the wind"),
+            ]),
+            sec("Light and surfaces", &[
+                it("sun_shafts", "Sun shafts", "Beams of sunlight through trees and between houses"),
+                it("ssr", "Street reflections on vehicles", "Bus paint and windows mirror the street, not only the sky"),
+                it("sunlit_cab", "Sunlit cab", "Sun patches move over the dash and the floor"),
+                it("relief", "Relief on old textures", "Cobbles, brick and bark get a soft relief"),
+                it("road_tracks", "Tyre tracks", "Wheel tracks on drying roads and in the snow"),
+                it("taa", "Temporal anti-aliasing", "Steadies shimmering branches; lets a lower MSAA look as smooth"),
             ]),
             sec("Detail", &[
                 it("detail_textures", "Fine detail up close", "The ground and large walls get a fine grain when you are near"),

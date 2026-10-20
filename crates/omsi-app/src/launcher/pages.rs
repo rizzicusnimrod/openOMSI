@@ -626,6 +626,19 @@ fn graphics_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, cols: [Rect; 2]) ->
     }
     toggle_setting(ui, s, dirty, c.row(), "Trees through the year", "seasonal_foliage");
     toggle_setting(ui, s, dirty, c.row(), "Lightning and thunder", "lightning");
+    // (phase two's light and surfaces: the sun's shafts and the grass have levels)
+    for (id, key, name, names) in [("s-shafts", "sun_shafts", "Sun shafts", ["Off", "Low", "Medium", "High"]), ("s-grass", "grass", "Grass", ["Off", "Sparse", "Normal", "Dense"])] {
+        let mut level = get(s, key).as_f64().unwrap_or(2.0) as f32;
+        if ui.slider(id, c.row(), &mut level, 0.0, 3.0, 1.0, name, &|v| names[(v.round().max(0.0) as usize).min(3)].to_string()) {
+            s[key] = json!(level.round().clamp(0.0, 3.0) as i64);
+            *dirty = 0.3;
+        }
+    }
+    toggle_setting(ui, s, dirty, c.row(), "Street reflections on vehicles", "ssr");
+    toggle_setting(ui, s, dirty, c.row(), "Sunlit cab", "sunlit_cab");
+    toggle_setting(ui, s, dirty, c.row(), "Relief on old textures", "relief");
+    toggle_setting(ui, s, dirty, c.row(), "Tyre tracks", "road_tracks");
+    toggle_setting(ui, s, dirty, c.row(), "Temporal anti-aliasing", "taa");
     // (the models' `[isshadow]` blob is what OMSI draws under a vehicle in every graphics
     // mode, the vanilla one included, so its switch is not part of the extras above)
     toggle_setting(ui, s, dirty, c.row(), "OMSI's shadow meshes (under vehicles)", "shadow_blobs");
@@ -2704,7 +2717,7 @@ mod settings_tests {
     fn by_tab() -> Vec<Vec<&'static str>> {
         let mut graphics = vec![
             "s-gp-sel", "s-gp-load", "s-gp-del", "s-gp-name", "s-gp-save",
-            "s-preset", "s-graphics", "s-msaa", "s-scale", "s-af", "s-shadow", "set-ssao", "set-shadows", "s-casters", "set-detail_textures", "s-led", "s-led-mip", "s-night", "s-sway", "set-seasonal_foliage", "set-lightning", "set-shadow_blobs", "set-reflections", "set-clouds",
+            "s-preset", "s-graphics", "s-msaa", "s-scale", "s-af", "s-shadow", "set-ssao", "set-shadows", "s-casters", "set-detail_textures", "s-led", "s-led-mip", "s-night", "s-sway", "set-seasonal_foliage", "set-lightning", "s-shafts", "s-grass", "set-ssr", "set-sunlit_cab", "set-relief", "set-road_tracks", "set-taa", "set-shadow_blobs", "set-reflections", "set-clouds",
             "set-fullscreen", "s-res", "set-vsync", "s-fps", "s-view", "s-maxobj", "s-minobj", "s-mirror", "s-mirror-refresh", "s-texmem", "set-texture_compression",
         ];
         if !cfg!(target_os = "macos") {

@@ -1086,6 +1086,11 @@ pub(crate) fn slider_row(app: &App, id: &str, name: &str, desc: &str, fmt: &dyn 
     Some((row(name, 'v', &fmt(now), desc, Some(frac)), id.to_string()))
 }
 
+/// A quality's name for its level 0 .. 3 (the sun shafts).
+fn quality_name(v: f32) -> String {
+    ["Off", "Low", "Medium", "High"][(v.round().max(0.0) as usize).min(3)].to_string()
+}
+
 /// The values a slider's setting runs through.
 fn steps_of(verb: &str) -> Option<Vec<f32>> {
     if let Some(name) = verb.strip_prefix("photo:") {
@@ -1112,6 +1117,7 @@ fn steps_of(verb: &str) -> Option<Vec<f32>> {
         "led_glow" => (0..16).map(|v| v as f32).collect(),
         "night_brightness" => (2..=40).map(|v| v as f32 * 5.0).collect(),
         "wind_sway" => (0..=20).map(|v| v as f32 * 10.0).collect(),
+        "sun_shafts" | "grass" => vec![0.0, 1.0, 2.0, 3.0],
         "headlamp_range" => (-4..=2).map(|v| v as f32).collect(),
         "dash_dimmer" => (2..=15).map(|v| v as f32 * 10.0).collect(),
         "autopilot_style" => vec![0.0, 0.5, 1.0],
@@ -1269,6 +1275,8 @@ fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
         "led_glow" => s.led_glow as f32,
         "night_brightness" => s.night_brightness as f32,
         "wind_sway" => s.wind_sway as f32,
+        "sun_shafts" => s.sun_shafts as f32,
+        "grass" => s.grass as f32,
         "headlamp_range" => s.headlamp_range as f32,
         "dash_dimmer" => s.dash_dimmer as f32,
         "autopilot_style" => s.autopilot_style,
@@ -1380,6 +1388,16 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
             app.settings.wind_sway = v.round().clamp(0.0, 200.0) as u8;
             crate::startup::nature_settings(&app.settings);
             Some(("wind_sway", app.settings.wind_sway.to_string()))
+        }
+        "sun_shafts" => {
+            app.settings.sun_shafts = v.round().clamp(0.0, 3.0) as u8;
+            crate::startup::nature_settings(&app.settings);
+            Some(("sun_shafts", app.settings.sun_shafts.to_string()))
+        }
+        "grass" => {
+            app.settings.grass = v.round().clamp(0.0, 3.0) as u8;
+            crate::startup::nature_settings(&app.settings);
+            Some(("grass", app.settings.grass.to_string()))
         }
         "headlamp_range" => {
             app.settings.headlamp_range = v.round().clamp(-4.0, 2.0) as i8;
@@ -1680,6 +1698,11 @@ fn toggle_now(app: &App, id: &str) -> Option<bool> {
         "clouds" => s.clouds,
         "seasonal_foliage" => s.seasonal_foliage,
         "lightning" => s.lightning,
+        "ssr" => s.ssr,
+        "relief" => s.relief,
+        "taa" => s.taa,
+        "sunlit_cab" => s.sunlit_cab,
+        "road_tracks" => s.road_tracks,
         "fullscreen" => s.fullscreen,
         "vsync" => s.vsync,
         "texture_compression" => s.texture_compression,
@@ -1950,6 +1973,18 @@ fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static str, String
             app.settings.lightning = on;
             crate::startup::nature_settings(&app.settings);
             Some(("lightning", bit))
+        }
+        "ssr" | "relief" | "taa" | "sunlit_cab" | "road_tracks" => {
+            let (key, field) = match id {
+                "ssr" => ("ssr", &mut app.settings.ssr),
+                "relief" => ("relief", &mut app.settings.relief),
+                "taa" => ("taa", &mut app.settings.taa),
+                "sunlit_cab" => ("sunlit_cab", &mut app.settings.sunlit_cab),
+                _ => ("road_tracks", &mut app.settings.road_tracks),
+            };
+            *field = on;
+            crate::startup::nature_settings(&app.settings);
+            Some((key, bit))
         }
         "fullscreen" => {
             app.settings.fullscreen = on;
@@ -2631,6 +2666,13 @@ fn options_pages(app: &App) -> Vec<Page> {
         slider_row(app, "wind_sway", "Wind in the trees", "How much trees, bushes and grass move in the wind: 0% still, 100% as nature has it", &|v| if v < 0.5 { "Still".to_string() } else { format!("{}%", v as i64) }),
         switch_row(app, "seasonal_foliage", "Trees through the year", "Autumn colours, bare winter trees and fresh spring green where the map has no seasonal trees of its own"),
         switch_row(app, "lightning", "Lightning and thunder", "Thunderstorms flash in the clouds and to the ground, and the thunder follows"),
+        slider_row(app, "sun_shafts", "Sun shafts", "Beams of sunlight through the trees and between the houses, in fog and a calm morning's mist", &quality_name),
+        switch_row(app, "ssr", "Street reflections on vehicles", "Bus paint and windows mirror the street and the cars round about, not only the sky"),
+        slider_row(app, "grass", "Grass", "Grass grows on the verges and fields and sways in the wind", &|v| ["Off", "Sparse", "Normal", "Dense"][(v.round() as usize).min(3)].to_string()),
+        switch_row(app, "relief", "Relief on old textures", "Cobbles, brick and bark get a soft relief made from their pictures"),
+        switch_row(app, "taa", "Temporal anti-aliasing", "Steadies shimmering branches and wires; lets a lower MSAA look as smooth"),
+        switch_row(app, "sunlit_cab", "Sunlit cab", "Sun patches move over the dash and the floor, the cab is lit from its windows"),
+        switch_row(app, "road_tracks", "Tyre tracks", "Wheel tracks dry first on a drying road and show in the snow"),
     ]
         .into_iter()
         .flatten()
