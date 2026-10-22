@@ -405,6 +405,50 @@ pub(crate) fn debug() -> bool {
     *ON.get_or_init(|| omsi_cfg::env::var_os("OMSI_DEBUG_GRASS").is_some_and(|v| v != "0"))
 }
 
+/// `OMSI_DEBUG_GRASS_ROADS=1` (the offscreen picture, once): the points of the street lanes
+/// on grassy ground that `World::ground_covered` does not see as road - where grass would
+/// grow on the carriageway - logged by tile, with the road's height over the bare ground.
+pub(crate) fn debug_roads() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| omsi_cfg::env::var_os("OMSI_DEBUG_GRASS_ROADS").is_some_and(|v| v != "0"))
+}
+
+/// See `debug_roads`: every 2 m along the loaded street lanes.
+pub(crate) fn log_uncovered_roads(world: &crate::scene::World, net: &omsi_sim::traffic::Network) {
+    let ts = omsi_map::tile_size();
+    // per tile: points looked at, points not seen as road, a few of them (x, y, road over ground)
+    let mut tiles: std::collections::BTreeMap<(i32, i32), (usize, usize, Vec<(f64, f64, f64)>)> = Default::default();
+    for l in net.lanes.iter().filter(|l| l.kind == omsi_sim::traffic::LaneKind::Street && !l.invisible) {
+        for w in l.points.windows(2) {
+            let steps = ((w[1] - w[0]).truncate().length() / 2.0).ceil().max(1.0) as usize;
+            for s in 0..steps {
+                let p = w[0].lerp(w[1], s as f64 / steps as f64);
+                if world.grass_at(p.x, p.y).0 <= 0.0 {
+                    continue;
+                }
+                let Some(z) = world.bare_ground(p.x, p.y) else { continue };
+                let t = tiles.entry(((p.x / ts).floor() as i32, (p.y / ts).floor() as i32)).or_default();
+                t.0 += 1;
+                if !world.ground_covered(p.x, p.y, z) {
+                    t.1 += 1;
+                    if t.2.len() < 4 {
+                        t.2.push((p.x, p.y, p.z - z));
+                    }
+                }
+            }
+        }
+    }
+    let mut bad: Vec<_> = tiles.iter().filter(|t| t.1 .1 > 0).collect();
+    bad.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+    let (all, missed) = tiles.values().fold((0, 0), |a, t| (a.0 + t.0, a.1 + t.1));
+    log::info!("grass roads: {missed} of {all} lane points on grassy ground not seen as road, in {} of {} tiles", bad.len(), tiles.len());
+    for (k, (n, m, at)) in bad.iter().take(40) {
+        let at: Vec<String> = at.iter().map(|(x, y, dz)| format!("({x:.1}, {y:.1}) road {dz:+.1} m")).collect();
+        let surface = if world.surfaces.read().contains_key(*k) { "its surfaces loaded" } else { "NO surfaces loaded" };
+        log::info!("grass roads: tile {k:?} ({surface}): {m} of {n} points, e.g. {}", at.join(", "));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

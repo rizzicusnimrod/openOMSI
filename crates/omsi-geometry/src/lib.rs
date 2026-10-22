@@ -1347,6 +1347,27 @@ mod tests {
     }
 
     #[test]
+    fn no_grass_grows_through_a_road_laid_on_the_ground_and_nothing_else_sees_it() {
+        let quad = |x0: f32, x1: f32, z: f32| MeshData {
+            positions: vec![Vec3::new(x0, 50.0, z), Vec3::new(x1, 50.0, z), Vec3::new(x1, 250.0, z), Vec3::new(x0, 250.0, z)],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            ..Default::default()
+        };
+        // a road at the ground's height that cuts no ground, and one on a bridge 9 m up
+        let mut ts = TileSurface::new(512);
+        ts.block_grass(&quad(100.0, 107.0, 10.0), &Mat4::IDENTITY, DVec3::ZERO, 0, 0);
+        ts.block_grass(&quad(200.0, 207.0, 19.0), &Mat4::IDENTITY, DVec3::ZERO, 0, 0);
+        let bare = |x: f32| ts.no_grass(x, 150.0, 10.0);
+        assert!(bare(103.0) && bare(99.8) && bare(107.2), "on it and at its edge");
+        assert!(!bare(98.5) && !bare(108.5), "a metre and a half off it");
+        assert!(!bare(203.0), "under the bridge");
+        // the ground stays and the wheels do not stand on it: it is no surface
+        let k = ts.texel(103.0, 150.0);
+        assert!(!ts.covered(k) && !ts.road_covered(k) && ts.sample(103.0, 150.0).is_none());
+        assert!(!ts.cuts_anything(&|_, _| 10.0, 0.12));
+    }
+
+    #[test]
     fn a_terrain_hole_is_cut_along_its_rim_not_by_texel() {
         let side = tile_size() as f32;
         let cell = side / 64.0;
@@ -2329,6 +2350,11 @@ pub struct TileSurface {
     /// ([`spline_hole_outlines`]), in tile metres, with their bounds (x0, y0, x1, y1): cut
     /// exactly along them, as Omsi.exe cuts the terrain's triangles, not by texel.
     outlines: Vec<(Vec<Vec2>, [f32; 4])>,
+    /// Roads laid on the ground without cutting it ([`TileSurface::block_grass`]): the
+    /// highest one's height per texel (NaN: none), in blocks like the surfaces. Only the
+    /// grass asks for it - the ground stays, the wheels and the terrain's cut never see it.
+    /// (The grass grew up through every such road, the carriageway at terrain height.)
+    grass: Vec<Option<Box<[f32; BLOCK * BLOCK]>>>,
     /// The faces the wheels stand on over this tile (spline height profiles, surface objects):
     /// a texel of the raster is most of a metre wide and holds one height, which put a wheel
     /// next to a kerb on top of the pavement or into the road's camber.
@@ -2363,12 +2389,13 @@ impl TileSurface {
             rasters += n * 5 + b.low.as_ref().map(|_| n * 4).unwrap_or(0) + b.road.as_ref().map(|_| n * 4).unwrap_or(0);
         }
         rasters += self.holes.iter().flatten().count() * n * 4 + self.hole_cover.iter().flatten().count() * n * 2;
+        rasters += self.grass.capacity() * 8 + self.grass.iter().flatten().count() * n * 4;
         (rasters, self.drive.heap_bytes())
     }
 
     pub fn new(size: usize) -> TileSurface {
         let blocks = size.div_ceil(BLOCK);
-        TileSurface { size, blocks: (0..blocks * blocks).map(|_| None).collect(), holes: (0..blocks * blocks).map(|_| None).collect(), hole_cover: (0..blocks * blocks).map(|_| None).collect(), outlines: Vec::new(), drive: DriveGrid::default() }
+        TileSurface { size, blocks: (0..blocks * blocks).map(|_| None).collect(), holes: (0..blocks * blocks).map(|_| None).collect(), hole_cover: (0..blocks * blocks).map(|_| None).collect(), outlines: Vec::new(), grass: (0..blocks * blocks).map(|_| None).collect(), drive: DriveGrid::default() }
     }
 
     /// Block and index within it of texel `k`.
@@ -2584,9 +2611,9 @@ impl TileSurface {
     /// Whether no grass may grow at tile point (x, y) on ground at height `z`: a surface lies
     /// over it or close beside it (the raster's texel is most of a metre, so its neighbours
     /// within `GRASS_MARGIN` are asked too - a clump at the edge came up through the
-    /// asphalt), a road runs below it in a cutting the ground is cut away for, or a
-    /// `[terrainhole]` or an aligned spline takes the ground away. A bridge high over it does
-    /// not count.
+    /// asphalt), a road runs below it in a cutting the ground is cut away for, a road lies on
+    /// it without cutting it ([`TileSurface::block_grass`]), or a `[terrainhole]` or an
+    /// aligned spline takes the ground away. A bridge high over it does not count.
     pub fn no_grass(&self, x: f32, y: f32, z: f32) -> bool {
         const GRASS_MARGIN: f32 = 0.6;
         const ABOVE: f32 = 2.5;
@@ -2603,7 +2630,9 @@ impl TileSurface {
                     return false;
                 }
                 let k = self.texel(px, py);
-                self.hole_height(k).is_some() || (self.covered(k) && self.low_height(k) <= z + ABOVE && self.height(k) >= z - BELOW)
+                self.hole_height(k).is_some()
+                    || (self.covered(k) && self.low_height(k) <= z + ABOVE && self.height(k) >= z - BELOW)
+                    || self.grass_block(k).is_some_and(|h| h <= z + ABOVE && h >= z - BELOW)
             })
         })
     }
@@ -2718,7 +2747,38 @@ impl TileSurface {
 
     /// `drivable`: this surface also carries vehicles (a road, a crossing plate, a car park).
     pub fn rasterize_kind(&mut self, mesh: &MeshData, transform: &Mat4, origin: DVec3, tx: i32, ty: i32, drivable: bool) {
-        let n = self.size as f32;
+        let size = self.size;
+        Self::each_texel(size, mesh, transform, origin, tx, ty, |i, h| self.add_surface(i, h, drivable));
+    }
+
+    /// A road laid on the ground that cuts none of it (a spline without the terrain cut):
+    /// no grass grows through it ([`TileSurface::no_grass`]), and that is all - the ground
+    /// stays, the wheels and the terrain's cut never see it.
+    pub fn block_grass(&mut self, mesh: &MeshData, transform: &Mat4, origin: DVec3, tx: i32, ty: i32) {
+        let (size, per_row) = (self.size, self.size.div_ceil(BLOCK));
+        let grass = &mut self.grass;
+        Self::each_texel(size, mesh, transform, origin, tx, ty, |k, h| {
+            let (x, y) = (k % size, k / size);
+            let (b, i) = ((y / BLOCK) * per_row + x / BLOCK, (y % BLOCK) * BLOCK + x % BLOCK);
+            let block = grass[b].get_or_insert_with(|| Box::new([f32::NAN; BLOCK * BLOCK]));
+            if block[i].is_nan() || h > block[i] {
+                block[i] = h;
+            }
+        });
+    }
+
+    /// The height of the highest road over texel `k` that cuts no ground
+    /// ([`TileSurface::block_grass`]), if any.
+    fn grass_block(&self, k: usize) -> Option<f32> {
+        let (b, i) = self.at(k);
+        self.grass[b].as_ref().map(|g| g[i]).filter(|h| !h.is_nan())
+    }
+
+    /// Every texel (of a `size`² raster of tile `tx`, `ty`) whose middle a face of `mesh` -
+    /// placed by `transform` at `origin` - lies over, and the face's height there; walls are
+    /// left out.
+    fn each_texel(size: usize, mesh: &MeshData, transform: &Mat4, origin: DVec3, tx: i32, ty: i32, mut f: impl FnMut(usize, f32)) {
+        let n = size as f32;
         let scale = n / tile_size() as f32;
         let ident = *transform == Mat4::IDENTITY;
         // offset from the mesh origin to this tile's corner, in f64
@@ -2761,9 +2821,9 @@ impl TileSurface {
                     let l0 = 1.0 - l1 - l2;
                     let eps = -0.002;
                     if l0 >= eps && l1 >= eps && l2 >= eps {
-                        let i = py as usize * self.size + px as usize;
+                        let i = py as usize * size + px as usize;
                         let h = l0 * p[0].z + l2 * p[1].z + l1 * p[2].z;
-                        self.add_surface(i, h, drivable);
+                        f(i, h);
                     }
                 }
             }

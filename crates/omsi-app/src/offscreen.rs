@@ -2680,6 +2680,11 @@ pub(crate) fn run_offscreen(
     let mut lighting = weather_lighting(&daylight, &weather, cloud_drift_at(&weather, clock.time), wetness, settings.shadows);
     lightning.apply(&mut lighting);
     lighting.foliage = crate::foliage::season(clock.day_of_year.max(1) as u32, settings.seasonal_foliage);
+    if crate::grass::debug_roads() {
+        if let Some(t) = traffic.as_ref() {
+            crate::grass::log_uncovered_roads(&world, &t.net);
+        }
+    }
     // the player's vehicle has moved into `player_ref` by now (after --drive): without
     // this the offscreen picture had no cab box, unlike the window
     lighting.inside = player_ref.as_ref().or(player.as_ref()).and_then(|p| {

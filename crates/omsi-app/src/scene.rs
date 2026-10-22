@@ -5624,7 +5624,16 @@ impl World {
                         // ground of its junctions - cuts no ground away: under it the ground
                         // is what shows through, and cut away it was the sky)
                         // (nor do wires overhead: see `SPLINE_OVERHEAD`)
-                        if !sp.cuts_terrain || sp.overlay || outside(&sp.bounds) {
+                        if outside(&sp.bounds) {
+                            continue;
+                        }
+                        if !sp.cuts_terrain || sp.overlay {
+                            // (but no grass grows up through it: a road drawn only with
+                            // blended profiles lies on the ground as an overlay, and grass stood
+                            // in the carriageway - not through wires overhead, though)
+                            if sp.overlay || sp.drivable {
+                                ts.block_grass(&sp.shape, &Mat4::IDENTITY, q.origin, tx, ty);
+                            }
                             continue;
                         }
                         report(&sp.shape, &Mat4::IDENTITY, q.origin, &sp.bounds, &|| {
