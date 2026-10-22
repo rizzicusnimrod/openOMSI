@@ -11,7 +11,7 @@ pub mod tracks;
 mod rt;
 pub mod shafts;
 mod taa;
-pub use grass::{GrassClump, GRASS_DISTANCE};
+pub use grass::{grass_keep, grass_thin_key, GrassClump, GRASS_DISTANCE};
 pub use looks::Looks;
 mod triple;
 pub use triple::{panel_width, ScreenView, TripleScreen};
@@ -7400,11 +7400,19 @@ impl Renderer {
         }
     }
 
-    /// The grass round the camera (enhanced; `grass.rs`): the clumps the app has placed,
-    /// drawn from the next frame on. None: no grass.
-    pub fn set_grass(&mut self, clumps: Vec<GrassClump>) {
+    /// The grass round the camera (enhanced; `grass.rs`): the clumps the app has placed in
+    /// one cell `key` of its grid, in place of what it had, drawn from the next frame on.
+    /// None: the cell goes.
+    pub fn set_grass_cell(&mut self, key: (i32, i32), clumps: Vec<GrassClump>) {
         if let Some(g) = self.grass.as_mut() {
-            g.set(clumps);
+            g.set_cell(key, clumps);
+        }
+    }
+
+    /// No grass any more (every cell gone).
+    pub fn clear_grass(&mut self) {
+        if let Some(g) = self.grass.as_mut() {
+            g.clear();
         }
     }
 
@@ -8246,8 +8254,10 @@ impl Renderer {
             }
             None => Vec3::ZERO,
         };
-        // the lanes the tyres run along (tracks.rs), the nearest to the camera
-        let (track_rows, track_count) = if lighting.looks.effective().road_tracks {
+        // the lanes the tyres run along (tracks.rs), the nearest to the camera - on a drying
+        // road or in the snow (else the shader's tracks are left out altogether)
+        let tracks_shown = lighting.looks.effective().road_tracks && tracks::shown(lighting.wetness, lighting.rain, lighting.snow);
+        let (track_rows, track_count) = if tracks_shown {
             tracks::rows(&lighting.tracks, (ro + cam_rel.as_dvec3()).truncate(), ro)
         } else {
             ([[0.0; 4]; tracks::TRACK_SEGMENTS], 0)
@@ -8336,7 +8346,13 @@ impl Renderer {
                 Some(f) => [f.dir.normalize().extend(self.flash_e).to_array(), [f.bolt.max(0.0), f.distance.max(50.0), f.base, f.seed]],
                 None => [[0.0; 4]; 2],
             },
-            looks: lighting.looks.effective().row(),
+            looks: {
+                let mut row = lighting.looks.effective().row();
+                if !tracks_shown {
+                    row[3] = 0.0;
+                }
+                row
+            },
             tracks: track_rows,
             track_info: [track_count as f32, tracks::drying(lighting.wetness, lighting.rain), 0.0, 0.0],
         };
@@ -9925,9 +9941,6 @@ impl Renderer {
         let taa_jitter = taa_on.then(|| self.taa.as_mut().unwrap().next_jitter(width, height));
         // the grass round the camera (grass.rs): the window's enhanced picture
         let grass_on = enhanced && with_overlays && projection.is_none() && !second_eye && self.grass.as_ref().is_some_and(|g| g.any());
-        if grass_on {
-            self.grass.as_mut().unwrap().prepare(&self.device, &self.queue, ro, camera.position);
-        }
         let shift = shift.or(taa_jitter);
         let shifted = |m: Mat4| match shift {
             Some(s) => Mat4::from_cols(Vec4::X, Vec4::Y, Vec4::Z, Vec4::new(s[0], s[1], 0.0, 1.0)) * m,
@@ -9936,6 +9949,10 @@ impl Renderer {
         let vp_mat = projection
             .map(|p| p * Mat4::look_to_rh((camera.position - ro).as_vec3(), camera.forward(), camera.up()))
             .unwrap_or_else(|| shifted(camera.view_proj(aspect, ro)));
+        // (the cells that came or changed into their slots; the cells in view and reach)
+        if grass_on {
+            self.grass.as_mut().unwrap().prepare(&self.device, &self.queue, ro, camera.position, &vp_mat);
+        }
         let sun_clip = vp_mat * (cam_rel + sun * 5000.0).extend(1.0);
         let sun_ndc = if sun_clip.w > 0.0 {
             Vec3::new(sun_clip.x / sun_clip.w, sun_clip.y / sun_clip.w, 1.0)

@@ -60,6 +60,13 @@ pub(crate) fn drying(wetness: f32, rain: f32) -> f32 {
     (wet * 4.0).min(1.0) * dry_sky
 }
 
+/// Whether the tracks show anywhere: on a drying road or in the snow. Else the app looks
+/// for no lanes and the road's pixels follow none (a dry road's every pixel near the camera
+/// went through the 48 segments for nothing).
+pub fn shown(wetness: f32, rain: f32, snow: f32) -> bool {
+    drying(wetness, rain) > 0.0 || snow > 0.0
+}
+
 /// The uniform's rows: the segments nearest the camera at `eye`, render-origin relative,
 /// at most `TRACK_SEGMENTS`, the nearest first; and how many there are.
 pub(crate) fn rows(lines: &[[DVec2; 2]], eye: DVec2, origin: DVec3) -> ([[f32; 4]; TRACK_SEGMENTS], usize) {
@@ -87,6 +94,14 @@ pub(crate) fn rows(lines: &[[DVec2; 2]], eye: DVec2, origin: DVec3) -> ([[f32; 4
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tracks_show_on_drying_or_snowy_roads_only() {
+        assert!(!shown(0.0, 0.0, 0.0), "a dry road");
+        assert!(!shown(0.8, 0.6, 0.0), "it rains: the lines as wet as the rest");
+        assert!(shown(0.5, 0.0, 0.0), "drying after the rain");
+        assert!(shown(0.0, 0.0, 0.3), "snow");
+    }
 
     #[test]
     fn the_wheels_run_either_side_of_the_lane_not_on_it() {

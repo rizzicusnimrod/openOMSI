@@ -457,6 +457,7 @@ impl ApplicationHandler for App {
                     self.profile_prev.clone_from(&self.profile);
                 }
                 let dt = raw_dt.min(0.1);
+                self.worst_frame = self.worst_frame.max(raw_dt);
                 self.last = now;
                 // (the cursor over the game menu: a hand over what can be clicked)
                 if self.game_menu.is_some() {
@@ -959,6 +960,22 @@ impl ApplicationHandler for App {
                 // (the cinematic camera places its roadside cameras along the duty's route)
                 if self.view == crate::cinema::CINEMA {
                     self.autopilot_route();
+                }
+                // OMSI_AUTOPILOT_TEST=1 (driving benchmarks, as the offscreen runs have it): once
+                // the engine runs, in D with the parking brake off (the offscreen runs' timed
+                // --triggers), and the autopilot takes the bus once it is ready to go (once)
+                if omsi_cfg::env::var_os("OMSI_AUTOPILOT_TEST").is_some() {
+                    static GEARED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    static TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if let Some(p) = self.player.as_mut().filter(|p| p.vehicle.var("engine_n").is_some_and(|n| n >= 250.0)) {
+                        if !GEARED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            p.vehicle.trigger("automatic_D");
+                            p.vehicle.trigger("parking_brake_release");
+                        }
+                    }
+                    if self.player.as_ref().is_some_and(|p| !p.autopilot.on && crate::acc::ready(&p.vehicle).is_ok()) && !TRIED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        self.toggle_autopilot();
+                    }
                 }
                 // the autopilot's plan (`crate::autopilot`): the way, the steering, the speed
                 if self.player.as_ref().is_some_and(|p| p.autopilot.on || p.autopilot.note.is_some()) {
@@ -2581,29 +2598,23 @@ impl ApplicationHandler for App {
                 }
                 // the trees through the year
                 lighting.foliage = crate::foliage::season(self.clock.day_of_year.max(1) as u32, crate::startup::SEASONAL_FOLIAGE.load(std::sync::atomic::Ordering::Relaxed));
-                // the lanes whose tyre tracks show on drying and snowy roads
-                if let Some(cam) = self.camera.as_ref() {
-                    lighting.tracks = crate::tracks::for_frame(self.traffic.as_ref().map(|t| &t.net), cam.position);
-                }
                 // the grass round the camera, a few cells a frame as it moves on
                 if let (Some(world), Some(cam), Some(r)) = (self.world.as_ref(), self.camera.as_ref(), self.renderer.as_mut()) {
                     let density = if crate::grass::off() || !lighting.enhanced { 0 } else { crate::startup::GRASS.load(std::sync::atomic::Ordering::Relaxed).min(3) as u8 };
-                    let roads = world.surfaces_version.load(std::sync::atomic::Ordering::Relaxed);
                     let grass_far = crate::startup::GRASS_DISTANCE.load(std::sync::atomic::Ordering::Relaxed) as f32;
                     self.grass.reach = grass_far as f64 + 3.0;
                     r.set_grass_distance(grass_far);
-                    let rechecked = self.grass.recheck(roads, &|x, y, z| world.ground_covered(x, y, z));
-                    if self.grass.update(cam.position, density, &|x, y| world.grass_at(x, y), &|x, y| world.bare_ground(x, y), &|x, y, z| world.ground_covered(x, y, z)) | rechecked {
-                        r.set_grass(self.grass.clumps().map(|c| omsi_render::GrassClump { pos: c.pos, seed: c.seed, size: c.size, colour: world.grass_colour(c.layer) }).collect());
-                        if crate::grass::debug() {
-                            log::info!("grass: {} clumps round the camera", self.grass.len());
-                        }
-                    }
+                    crate::grass::sync(&mut self.grass, r, world, cam.position, density, &world.take_new_surfaces());
                 }
                 lighting.wetness = omsi_cfg::env::var("OMSI_WETNESS")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(self.wetness);
+                // the lanes whose tyre tracks show on drying and snowy roads (on a dry road or
+                // in the rain they show nowhere: no lanes looked for)
+                if let Some(cam) = self.camera.as_ref().filter(|_| omsi_render::tracks::shown(lighting.wetness, lighting.rain, lighting.snow)) {
+                    lighting.tracks = crate::tracks::for_frame(self.traffic.as_ref().map(|t| &t.net), cam.position);
+                }
                 lighting.inside = match self.inside_remote.and_then(|id| self.remotes.remotes.get(&id)) {
                     // (in another player's bus: its box is the one the camera is in)
                     Some(rv) => rv.vehicle().ty.def.bounding_box.map(|bb| (rv.vehicle().position, rv.vehicle().heading, bb)),
@@ -3168,8 +3179,10 @@ impl ApplicationHandler for App {
                     if self.fps_t.elapsed().as_secs_f32() >= 1.0 {
                         if omsi_cfg::env::var_os("OMSI_PROFILE").is_some() {
                             let secs = self.fps_t.elapsed().as_secs_f32();
-                            log::info!("profile interval: {:.1} fps over {secs:.2} s", self.frames as f32 / secs);
+                            let kmh = self.player.as_ref().map_or(0.0, |p| p.vehicle.physics.velocity_kmh());
+                            log::info!("profile interval: {:.1} fps over {secs:.2} s, worst frame {:.1} ms, {kmh:.0} km/h", self.frames as f32 / secs, self.worst_frame * 1000.0);
                         }
+                        self.worst_frame = 0.0;
                         let speed = self
                             .player
                             .as_ref()

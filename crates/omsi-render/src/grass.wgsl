@@ -9,6 +9,8 @@ const GRASS_HEIGHT: f32 = 0.38;
 const GRASS_WIDTH: f32 = 0.07;
 // the share of the reach over which it fades out (grass.rs `FADE`)
 const GRASS_FADE: f32 = 0.38;
+// within it every clump is drawn, beyond it fewer (grass.rs `FULL`)
+const GRASS_FULL: f32 = 45.0;
 
 struct GrassIn {
     @location(0) pos: vec3<f32>,
@@ -31,6 +33,15 @@ struct GrassOut {
 // How tall the grass stands at `dist` metres with a reach of `far` (grass.rs `fade`).
 fn grass_fade(dist: f32, far: f32) -> f32 {
     return 1.0 - smoothstep(far * (1.0 - GRASS_FADE), far, dist);
+}
+
+// The share of the clumps drawn at `dist` metres (grass.rs `grass_keep`).
+fn grass_keep(dist: f32) -> f32 {
+    if (dist <= GRASS_FULL) {
+        return 1.0;
+    }
+    let r = GRASS_FULL / dist;
+    return r * r;
 }
 
 // The wind's push on a blade at `place` (map metres): its lean along the wind, as a share of
@@ -66,11 +77,24 @@ fn vs_grass_enhanced(@builtin(vertex_index) vi: u32, g: GrassIn) -> GrassOut {
     let top = corner == 2u || corner == 4u || corner == 5u;
     let t = f32(seg + select(0u, 1u, top)) / 3.0;
     let dist = distance(g.pos, camera.cam_pos.xyz);
+    var out: GrassOut;
+    // beyond the full distance fewer clumps, each a little bigger (grass.rs `thinned`); one
+    // thinned out is a point, which draws nothing
+    let keep = grass_keep(dist);
+    if (keep < 1.0 && fract(g.seed * 7.13) >= keep) {
+        out.clip = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        out.world = vec3<f32>(0.0);
+        out.colour = vec3<f32>(0.0);
+        out.up = 0.0;
+        out.normal = vec3<f32>(0.0, 0.0, 1.0);
+        return out;
+    }
+    let size = g.size * min(sqrt(sqrt(1.0 / keep)), 1.6);
     // (under snow the grass is gone; in winter it lies low)
     let snow = clamp(enh.weather.y * 1.5, 0.0, 1.0);
     let winter = camera.season.y * camera.season.w;
     let bf = f32(blade);
-    let h = GRASS_HEIGHT * g.size * grass_fade(dist, g.far) * (1.0 - snow) * (1.0 - 0.4 * winter)
+    let h = GRASS_HEIGHT * size * grass_fade(dist, g.far) * (1.0 - snow) * (1.0 - 0.4 * winter)
         * (0.75 + 0.5 * fract(g.seed * 7.31 + bf * 0.37));
     let ang = g.seed * 6.2832 + bf * 2.094;
     let facing = vec2<f32>(cos(ang), sin(ang));
@@ -78,11 +102,10 @@ fn vs_grass_enhanced(@builtin(vertex_index) vi: u32, g: GrassIn) -> GrassOut {
     let foot = g.pos + vec3<f32>(vec2<f32>(cos(ang * 1.7), sin(ang * 1.7)) * 0.06, 0.0);
     let place = g.pos.xy + camera.world_origin.zw;
     let bend = facing * 0.3 + grass_wind(place, fract(g.seed + bf * 0.31));
-    let width = GRASS_WIDTH * g.size * (1.0 - 0.85 * t);
+    let width = GRASS_WIDTH * size * (1.0 - 0.85 * t);
     var p = foot + vec3<f32>(across * side * width * 0.5 + bend * h * t * t, h * t);
     // (the tip comes down a little as it bends over)
     p.z = p.z - 0.5 * dot(bend, bend) * h * t * t * t;
-    var out: GrassOut;
     out.clip = camera.view_proj * vec4<f32>(p, 1.0);
     out.world = p;
     // the year's straw: autumn yellows it, winter greys it

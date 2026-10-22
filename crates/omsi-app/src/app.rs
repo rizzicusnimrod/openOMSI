@@ -333,6 +333,8 @@ pub(crate) struct App {
     pub(crate) orbit: f32,
     pub(crate) frames: u32,
     pub(crate) fps_t: Instant,
+    /// The longest frame since `fps_t` (s): `OMSI_PROFILE`'s intervals log it (hitches).
+    pub(crate) worst_frame: f32,
     /// Last workshop / fuel pump / wash message, and how long it still shows.
     pub(crate) service_msg: Option<(String, f32)>,
     /// The server's notifications on the screen (`notify`), oldest first.

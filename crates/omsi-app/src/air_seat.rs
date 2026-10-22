@@ -258,13 +258,15 @@ pub(crate) fn tank_pressure(var: impl Fn(&str) -> Option<f32>) -> Option<f32> {
 }
 
 /// The seat height a held key makes of `height` over `dt` seconds (`dir` +1 raising, -1
-/// lowering): at the air's speeds, within the seat's range.
+/// lowering): at the air's speeds, no further than the seat's range. A height the seat
+/// slider set beyond that range stays where it is the way out and comes back from there
+/// the way in (the keys used to snap it to the range's end at the first touch).
 pub(crate) fn held_height(height: f32, dir: i8, dt: f32) -> f32 {
     let speed = if dir > 0 { RAISE_SPEED } else { LOWER_SPEED };
     if dir == 0 {
         return height;
     }
-    (height + dir as f32 * speed * dt.clamp(0.0, MAX_FRAME)).clamp(-HEIGHT_RANGE, HEIGHT_RANGE)
+    (height + dir as f32 * speed * dt.clamp(0.0, MAX_FRAME)).clamp(height.min(-HEIGHT_RANGE), height.max(HEIGHT_RANGE))
 }
 
 /// What the keys say of the height: "Seat +2 cm".
@@ -325,8 +327,14 @@ mod tests {
         assert!((held_height(0.0, 1, 1.0 / 60.0) - RAISE_SPEED / 60.0).abs() < 1e-6);
         assert!((held_height(0.0, -1, 0.25) + LOWER_SPEED * 0.25).abs() < 1e-6);
         assert_eq!(held_height(0.079, 1, 0.25), HEIGHT_RANGE);
-        assert_eq!(held_height(-0.2, -1, 0.1), -HEIGHT_RANGE);
+        assert_eq!(held_height(-0.079, -1, 0.25), -HEIGHT_RANGE);
         assert_eq!(held_height(0.03, 0, 0.1), 0.03);
+        // a height the slider put beyond the range is not snapped back by a touch of a key:
+        // further out it stays, back in it moves at the air's speed
+        assert_eq!(held_height(-0.2, -1, 0.1), -0.2);
+        assert_eq!(held_height(0.15, 1, 0.1), 0.15);
+        assert!((held_height(-0.2, 1, 0.1) - (-0.2 + RAISE_SPEED * 0.1)).abs() < 1e-6);
+        assert!((held_height(0.15, -1, 0.1) - (0.15 - LOWER_SPEED * 0.1)).abs() < 1e-6);
         assert_eq!(height_text(0.02), "Seat +2 cm");
         assert_eq!(height_text(-0.035), "Seat -4 cm");
         assert_eq!(height_text(0.001), "Seat 0 cm");

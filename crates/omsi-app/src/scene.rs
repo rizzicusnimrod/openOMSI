@@ -2010,8 +2010,9 @@ pub struct World {
     /// How much of each loaded tile's ground is grass (`crate::grass`); a tile with none has
     /// no entry.
     pub grass_maps: RwLock<HashMap<(i32, i32), Arc<crate::grass::GrassMap>>>,
-    /// Counts the tiles' surfaces as they come (the grass checks its clumps again).
-    pub surfaces_version: std::sync::atomic::AtomicU64,
+    /// The tiles whose surfaces came since `take_new_surfaces` was last asked (the grass
+    /// there checks its clumps again).
+    new_surfaces: Mutex<Vec<(i32, i32)>>,
     /// Per `[groundtex]`: whether grass grows on it and its colour (sRGB), worked out when
     /// first asked.
     grass_layers: std::sync::OnceLock<Vec<(bool, [u8; 3])>>,
@@ -2806,6 +2807,11 @@ impl World {
         self.grass_layers().get(layer as usize).map_or([78, 104, 46], |l| l.1)
     }
 
+    /// The tiles whose surfaces (roads, pavements) came since this was last asked.
+    pub(crate) fn take_new_surfaces(&self) -> Vec<(i32, i32)> {
+        std::mem::take(&mut *self.new_surfaces.lock())
+    }
+
     /// The bare ground's height at a world point (the terrain, of a loaded tile).
     pub(crate) fn bare_ground(&self, x: f64, y: f64) -> Option<f64> {
         let key = tile_key(x, y);
@@ -3024,7 +3030,7 @@ impl World {
             terrains: Arc::new(RwLock::new(HashMap::new())),
             surfaces: Arc::new(RwLock::new(HashMap::new())),
             grass_maps: RwLock::new(HashMap::new()),
-            surfaces_version: std::sync::atomic::AtomicU64::new(0),
+            new_surfaces: Mutex::new(Vec::new()),
             grass_layers: std::sync::OnceLock::new(),
             vehicle_gpu: Mutex::new(HashMap::new()),
             vehicle_textures: Default::default(),
@@ -5900,7 +5906,13 @@ impl World {
             wheel_meshes += wheels;
             // the wheel surfaces come and go with the tile (World::unload_tile)
             self.surfaces.write().insert((p.tx, p.ty), ts);
-            self.surfaces_version.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            {
+                // (asked every frame; bounded for a run that never asks)
+                let mut new = self.new_surfaces.lock();
+                if new.len() < 4096 {
+                    new.push((p.tx, p.ty));
+                }
+            }
             holes += check.0;
             cells += check.1;
             where_.extend(check.2);

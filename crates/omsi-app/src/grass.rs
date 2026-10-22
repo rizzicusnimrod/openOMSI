@@ -163,10 +163,13 @@ fn hash(cell: (i32, i32), i: u32, salt: u32) -> f32 {
 
 /// The clumps of one cell, `spacing` apart on a jittered grid: kept as far as `grass(x, y)`
 /// says the ground is grass, at `ground(x, y)`'s height, unless `covered(x, y, z)` (a road
-/// or a pavement over the ground there).
+/// or a pavement over the ground there). Only the share `keep` (0..1) the renderer draws as
+/// far out as the cell is (`omsi_render::grass_keep`): the clumps that thin out there are
+/// not even looked for.
 pub(crate) fn cell_clumps(
     cell: (i32, i32),
     spacing: f64,
+    keep: f32,
     grass: impl Fn(f64, f64) -> (f32, u8),
     ground: impl Fn(f64, f64) -> Option<f64>,
     covered: impl Fn(f64, f64, f64) -> bool,
@@ -177,6 +180,9 @@ pub(crate) fn cell_clumps(
     for j in 0..n {
         for i in 0..n {
             let k = j * n + i;
+            if keep < 1.0 && omsi_render::grass_thin_key(hash(cell, k, 4)) >= keep {
+                continue;
+            }
             let x = cell.0 as f64 * CELL + (i as f64 + 0.15 + 0.7 * hash(cell, k, 1) as f64) * step;
             let y = cell.1 as f64 * CELL + (j as f64 + 0.15 + 0.7 * hash(cell, k, 2) as f64) * step;
             let (cover, layer) = grass(x, y);
@@ -193,17 +199,46 @@ pub(crate) fn cell_clumps(
     out
 }
 
+/// The share of a cell's clumps placed when its middle is `d` metres from the camera: what
+/// the renderer draws a cell's breadth nearer than its nearest edge, so the camera can come
+/// that much closer before the cell is placed again, more densely.
+fn placed_keep(d: f64) -> f32 {
+    omsi_render::grass_keep((d - CELL * 1.5).max(0.0) as f32)
+}
+
+/// The share the renderer may draw of a cell whose middle is `d` metres away (at its nearest
+/// edge, the blades' reach in it).
+fn needed_keep(d: f64) -> f32 {
+    omsi_render::grass_keep((d - CELL * 0.8).max(0.0) as f32)
+}
+
+/// One cell's clumps and the share of them placed (`placed_keep`).
+struct Placed {
+    clumps: Vec<Clump>,
+    keep: f32,
+}
+
+/// What changed since `Field::take_changes`: every cell gone (`cleared`), the cells whose
+/// clumps are new, and those that went.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Changes {
+    pub cleared: bool,
+    pub set: Vec<(i32, i32)>,
+    pub gone: Vec<(i32, i32)>,
+}
+
 /// The clumps around the camera, cell by cell.
 #[derive(Default)]
 pub(crate) struct Field {
-    cells: HashMap<(i32, i32), Vec<Clump>>,
+    cells: HashMap<(i32, i32), Placed>,
     spacing: Option<f64>,
-    /// The roads' version the clumps were checked against (`Field::recheck`).
-    roads: u64,
-    /// Cells filled this many per frame at most (the rest the next frames).
+    /// Cells filled (or filled again, more densely) this many per frame at most (the rest
+    /// the next frames).
     pub per_frame: usize,
     /// How far from the camera clumps are kept (m: `Settings::grass_distance` and a little).
     pub reach: f64,
+    /// Since `take_changes`.
+    changes: Changes,
 }
 
 impl Field {
@@ -211,8 +246,16 @@ impl Field {
         Self { per_frame: 6, reach: REACH, ..Default::default() }
     }
 
-    /// Keep the cells within reach of `eye` and fill the missing ones (at most `per_frame`,
-    /// the nearest first) at the density's spacing. Whether the clumps changed.
+    fn changed(&mut self, c: (i32, i32)) {
+        self.changes.gone.retain(|g| *g != c);
+        if !self.changes.set.contains(&c) {
+            self.changes.set.push(c);
+        }
+    }
+
+    /// Keep the cells within reach of `eye` and fill the missing ones - and those the camera
+    /// came near enough to show more of - at most `per_frame`, the nearest first, at the
+    /// density's spacing. Whether the clumps changed (`take_changes` says how).
     pub(crate) fn update(
         &mut self,
         eye: DVec3,
@@ -224,7 +267,10 @@ impl Field {
         let spacing = spacing(density);
         let mut changed = false;
         if spacing != self.spacing {
-            changed = !self.cells.is_empty();
+            if !self.cells.is_empty() {
+                changed = true;
+                self.changes = Changes { cleared: true, ..Default::default() };
+            }
             self.cells.clear();
             self.spacing = spacing;
         }
@@ -237,57 +283,113 @@ impl Field {
         };
         let far = self.reach.max(REACH);
         let reach = far + CELL;
-        let before = self.cells.len();
-        self.cells.retain(|c, _| near(*c) <= reach);
-        changed |= self.cells.len() != before;
-        let mut missing: Vec<(f64, (i32, i32))> = Vec::new();
+        let gone: Vec<(i32, i32)> = self.cells.keys().copied().filter(|c| near(*c) > reach).collect();
+        for c in gone {
+            self.cells.remove(&c);
+            self.changes.set.retain(|s| *s != c);
+            self.changes.gone.push(c);
+            changed = true;
+        }
+        let mut wanted: Vec<(f64, (i32, i32))> = Vec::new();
         for x in cell(eye.x - reach)..=cell(eye.x + reach) {
             for y in cell(eye.y - reach)..=cell(eye.y + reach) {
                 let d = near((x, y));
-                if d <= far + CELL * 0.75 && !self.cells.contains_key(&(x, y)) {
-                    missing.push((d, (x, y)));
+                let thin = self.cells.get(&(x, y)).is_some_and(|p| needed_keep(d) > p.keep);
+                if d <= far + CELL * 0.75 && (thin || !self.cells.contains_key(&(x, y))) {
+                    wanted.push((d, (x, y)));
                 }
             }
         }
-        missing.sort_by(|a, b| a.0.total_cmp(&b.0));
+        wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
         // (a cell whose tile is not loaded yet waits for it: filled now, it stayed bare)
         let mut filled = 0;
-        for (_, c) in missing {
+        for (d, c) in wanted {
             if filled >= self.per_frame.max(1) {
                 break;
             }
             if ground((c.0 as f64 + 0.5) * CELL, (c.1 as f64 + 0.5) * CELL).is_none() {
                 continue;
             }
-            self.cells.insert(c, cell_clumps(c, spacing, grass, ground, covered));
+            let keep = placed_keep(d);
+            self.cells.insert(c, Placed { clumps: cell_clumps(c, spacing, keep, grass, ground, covered), keep });
+            self.changed(c);
             filled += 1;
             changed = true;
         }
         changed
     }
 
-    /// The roads (`World::surfaces_version`) changed since the clumps were placed - a tile's
-    /// roads and pavements come after its ground: take away the clumps they now cover.
-    /// Whether any went.
-    pub(crate) fn recheck(&mut self, roads: u64, covered: &dyn Fn(f64, f64, f64) -> bool) -> bool {
-        if roads == self.roads {
-            return false;
+    /// Roads and pavements came for the tiles `rects` (world x0, y0, x1, y1) - a tile's come
+    /// after its ground: take away the clumps of the cells there that they now cover. Whether
+    /// any went.
+    pub(crate) fn recheck_tiles(&mut self, rects: &[[f64; 4]], covered: &dyn Fn(f64, f64, f64) -> bool) -> bool {
+        let mut any = false;
+        let keys: Vec<(i32, i32)> = self
+            .cells
+            .keys()
+            .copied()
+            .filter(|c| {
+                let (x0, y0) = (c.0 as f64 * CELL, c.1 as f64 * CELL);
+                rects.iter().any(|r| x0 < r[2] && x0 + CELL > r[0] && y0 < r[3] && y0 + CELL > r[1])
+            })
+            .collect();
+        for k in keys {
+            let p = self.cells.get_mut(&k).unwrap();
+            let before = p.clumps.len();
+            p.clumps.retain(|c| !covered(c.pos.x, c.pos.y, c.pos.z));
+            if p.clumps.len() != before {
+                self.changed(k);
+                any = true;
+            }
         }
-        self.roads = roads;
-        let before = self.len();
-        for c in self.cells.values_mut() {
-            c.retain(|c| !covered(c.pos.x, c.pos.y, c.pos.z));
-        }
-        self.len() != before
+        any
+    }
+
+    /// What changed since this was last asked.
+    pub(crate) fn take_changes(&mut self) -> Changes {
+        std::mem::take(&mut self.changes)
+    }
+
+    /// The clumps of cell `c` (none if it has none).
+    pub(crate) fn cell(&self, c: (i32, i32)) -> &[Clump] {
+        self.cells.get(&c).map_or(&[], |p| p.clumps.as_slice())
     }
 
     /// Every clump kept.
+    #[cfg(test)]
     pub(crate) fn clumps(&self) -> impl Iterator<Item = &Clump> {
-        self.cells.values().flatten()
+        self.cells.values().flat_map(|p| p.clumps.iter())
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.cells.values().map(|c| c.len()).sum()
+        self.cells.values().map(|p| p.clumps.len()).sum()
+    }
+}
+
+/// Keep the grass round the camera at `eye` (`Field::update`) and hand the renderer the cells
+/// that changed - the window's and the offscreen picture's alike. `arrived`: the tiles whose
+/// roads came since the last frame (`World::take_new_surfaces`). `density` 0: none.
+pub(crate) fn sync(field: &mut Field, renderer: &mut omsi_render::Renderer, world: &crate::scene::World, eye: DVec3, density: u8, arrived: &[(i32, i32)]) {
+    let covered = |x: f64, y: f64, z: f64| world.ground_covered(x, y, z);
+    let ts = omsi_map::tile_size();
+    let rects: Vec<[f64; 4]> = arrived.iter().map(|k| [k.0 as f64 * ts, k.1 as f64 * ts, (k.0 + 1) as f64 * ts, (k.1 + 1) as f64 * ts]).collect();
+    let rechecked = !rects.is_empty() && field.recheck_tiles(&rects, &covered);
+    let placed = field.update(eye, density, &|x, y| world.grass_at(x, y), &|x, y| world.bare_ground(x, y), &covered);
+    if !(rechecked | placed) {
+        return;
+    }
+    let ch = field.take_changes();
+    if ch.cleared {
+        renderer.clear_grass();
+    }
+    for c in ch.gone {
+        renderer.set_grass_cell(c, Vec::new());
+    }
+    for c in &ch.set {
+        renderer.set_grass_cell(*c, field.cell(*c).iter().map(|c| omsi_render::GrassClump { pos: c.pos, seed: c.seed, size: c.size, colour: world.grass_colour(c.layer) }).collect());
+    }
+    if debug() {
+        log::info!("grass: {} clumps round the camera ({} cells new or changed)", field.len(), ch.set.len());
     }
 }
 
@@ -337,17 +439,17 @@ mod tests {
     #[test]
     fn clumps_grow_on_grass_and_never_on_a_road() {
         // grass everywhere at height 2, a road along y < 8 of the cell
-        let clumps = cell_clumps((0, 0), 0.5, |_, _| (1.0, 0), |_, _| Some(2.0), |_, y, _| y < 8.0);
+        let clumps = cell_clumps((0, 0), 0.5, 1.0, |_, _| (1.0, 0), |_, _| Some(2.0), |_, y, _| y < 8.0);
         assert!(clumps.len() > 400 && clumps.len() <= 32 * 16, "{}", clumps.len());
         assert!(clumps.iter().all(|c| c.pos.y >= 8.0 && c.pos.z == 2.0));
         assert!(clumps.iter().all(|c| (0.0..16.0).contains(&c.pos.x)));
         // half grass: about half the clumps
-        let half = cell_clumps((3, -2), 0.5, |_, _| (0.5, 0), |_, _| Some(0.0), |_, _, _| false).len();
+        let half = cell_clumps((3, -2), 0.5, 1.0, |_, _| (0.5, 0), |_, _| Some(0.0), |_, _, _| false).len();
         assert!((400..640).contains(&half), "{half}");
         // the same clumps each time
-        assert_eq!(cell_clumps((3, -2), 0.5, |_, _| (0.5, 0), |_, _| Some(0.0), |_, _, _| false).len(), half);
+        assert_eq!(cell_clumps((3, -2), 0.5, 1.0, |_, _| (0.5, 0), |_, _| Some(0.0), |_, _, _| false).len(), half);
         // no ground (off the map): none
-        assert!(cell_clumps((0, 0), 0.5, |_, _| (1.0, 0), |_, _| None, |_, _, _| false).is_empty());
+        assert!(cell_clumps((0, 0), 0.5, 1.0, |_, _| (1.0, 0), |_, _| None, |_, _, _| false).is_empty());
     }
 
     #[test]
@@ -387,7 +489,7 @@ mod tests {
         let mut clumps = Vec::new();
         for cy in 0..4 {
             for cx in 8..11 {
-                clumps.extend(cell_clumps((cx, cy), 0.4, |x, y| m.at(x, y, side), |_, _| Some(0.0), |_, _, _| false));
+                clumps.extend(cell_clumps((cx, cy), 0.4, 1.0, |x, y| m.at(x, y, side), |_, _| Some(0.0), |_, _, _| false));
             }
         }
         let on = clumps.iter().filter(|c| (149.7..154.3).contains(&c.pos.x)).count();
@@ -406,15 +508,71 @@ mod tests {
             f.update(DVec3::ZERO, 1, &grass, &ground, &|_, _, _| false);
         }
         let before = f.len();
-        // the same roads as when it was placed: nothing to do
-        assert!(!f.recheck(0, &|_, _, _| true));
+        f.take_changes();
+        // no roads came, or only a tile's far away: nothing to do
+        assert!(!f.recheck_tiles(&[], &|_, _, _| true));
+        assert!(!f.recheck_tiles(&[[1000.0, 1000.0, 1300.0, 1300.0]], &|_, _, _| true));
         assert_eq!(f.len(), before);
         // the tile's roads arrive: a road along x < 4 m
         let road = |x: f64, _: f64, _: f64| (0.0..4.0).contains(&x);
-        assert!(f.recheck(1, &road));
+        assert!(f.recheck_tiles(&[[-300.0, -300.0, 300.0, 300.0]], &road));
         assert!(f.len() < before && f.len() > 0);
         assert!(f.clumps().all(|c| !(0.0..4.0).contains(&c.pos.x)));
-        assert!(!f.recheck(1, &road));
+        // only the cells the road crosses changed
+        let ch = f.take_changes();
+        assert!(!ch.set.is_empty() && ch.set.iter().all(|c| c.0 == 0));
+        assert!(!f.recheck_tiles(&[[-300.0, -300.0, 300.0, 300.0]], &road));
+    }
+
+    #[test]
+    fn far_cells_are_placed_thinly_and_filled_in_as_the_camera_comes() {
+        let grass = |_: f64, _: f64| (1.0, 0u8);
+        let ground = |_: f64, _: f64| Some(0.0);
+        let covered = |_: f64, _: f64, _: f64| false;
+        let mut f = Field::new();
+        f.reach = 180.0;
+        f.per_frame = usize::MAX;
+        f.update(DVec3::ZERO, 3, &grass, &ground, &covered);
+        let (near, far) = (f.cell((0, 0)).len(), f.cell((8, 0)).len());
+        // (a dense cell holds 40 x 40; one some 136 m off a sixth of them or so, the renderer
+        // drawing fewer still there)
+        assert_eq!(near, 1600);
+        assert!(far > 0 && far * 5 < near, "{near} {far}");
+        // every clump the renderer may draw of it from here (its nearest edge) is placed
+        let keep = omsi_render::grass_keep((DVec3::new(8.5 * CELL, 0.5 * CELL, 0.0).length() - CELL * 0.8) as f32);
+        let drawn = |cs: &[Clump]| cs.iter().filter(|c| omsi_render::grass_thin_key(c.seed) < keep).count();
+        let all = cell_clumps((8, 0), spacing(3).unwrap(), 1.0, grass, ground, covered);
+        assert_eq!(drawn(f.cell((8, 0))), drawn(&all));
+        assert!(drawn(&all) < far, "placed with room to come nearer");
+        // driving towards it: it is placed again, more densely, and said to have changed
+        f.take_changes();
+        f.update(DVec3::new(100.0, 0.0, 0.0), 3, &grass, &ground, &covered);
+        assert!(f.cell((8, 0)).len() > far * 3, "{} {far}", f.cell((8, 0)).len());
+        assert!(f.take_changes().set.contains(&(8, 0)));
+        // standing still nothing more changes
+        assert!(!f.update(DVec3::new(100.0, 0.0, 0.0), 3, &grass, &ground, &covered));
+    }
+
+    #[test]
+    fn the_changes_name_the_cells_that_came_went_or_were_cleared() {
+        let grass = |_: f64, _: f64| (1.0, 0u8);
+        let ground = |_: f64, _: f64| Some(0.0);
+        let covered = |_: f64, _: f64, _: f64| false;
+        let mut f = Field::new();
+        f.per_frame = usize::MAX;
+        f.update(DVec3::ZERO, 1, &grass, &ground, &covered);
+        let first = f.take_changes();
+        assert!(!first.cleared && first.gone.is_empty() && first.set.len() == f.cells.len());
+        assert_eq!(f.take_changes(), Changes::default());
+        // a kilometre on: the old cells gone, the new ones set
+        f.update(DVec3::new(1000.0, 0.0, 0.0), 1, &grass, &ground, &covered);
+        let moved = f.take_changes();
+        assert_eq!(moved.gone.len(), first.set.len());
+        assert!(moved.set.iter().all(|c| c.0 > 50));
+        // another density: all cleared, the cells placed anew
+        f.update(DVec3::new(1000.0, 0.0, 0.0), 2, &grass, &ground, &covered);
+        let ch = f.take_changes();
+        assert!(ch.cleared && ch.gone.is_empty() && !ch.set.is_empty());
     }
 
     #[test]

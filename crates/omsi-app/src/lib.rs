@@ -629,6 +629,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         orbit: ORBIT_DEFAULT,
         frames: 0,
         fps_t: Instant::now(),
+        worst_frame: 0.0,
         service_msg: clock_note.map(|m| (m, 10.0)),
         notices: Vec::new(),
         update_watch: crate::update_watch::UpdateWatch::new(),
