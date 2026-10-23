@@ -266,7 +266,7 @@ pub const OPTIONS: &[PageDef] = &[
             sec("Quality", &[
                 it("preset", "Quality preset", "Sets most of the graphics settings at once"),
                 it("sel graphics", "Renderer", "Vanilla looks as OMSI 2 does; Enhanced adds modern lighting"),
-                it("sel render_scale", "Render resolution", "Lower is faster, higher is sharper"),
+                it("sel render_scale", "Render resolution", "What the 3D picture is drawn at, scaled up to the screen: lower is faster, the menus stay sharp. Applies at once"),
                 it("sel msaa", "Anti-aliasing", "Smooths jagged edges"),
                 it("sel anisotropy", "Texture filtering", "Keeps roads and walls sharp at a slant"),
             ]),

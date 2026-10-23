@@ -392,6 +392,8 @@ impl ApplicationHandler for Launcher {
                 return;
             }
         };
+        // (the screen the game will open on: the render resolutions are named by it)
+        crate::display::note_screen(event_loop.primary_monitor().or_else(|| window.current_monitor()));
         let settings = crate::settings::Settings::load();
         let renderer = match crate::startup::window_renderer(&mut self.instance, &window, showroom_options(&settings)) {
             Ok(r) => r,

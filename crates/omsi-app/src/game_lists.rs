@@ -2345,6 +2345,13 @@ pub(crate) fn dropdown_for(app: &App, row: usize, id: &str) -> Option<Dropdown> 
         }
         "gfxprofile" => omsi_launcher_lib::graphics_profiles().into_keys().map(|n| (n.clone(), format!("gfxprofile {n}"))).collect(),
         "reset" => vec![(tr("Cancel"), "noop".to_string()), (tr("Reset all settings"), "reset_all".to_string())],
+        // (the render resolutions are named by the window's size: `render_scale_choices`)
+        "sel render_scale" => {
+            let now = app.settings.render_scale;
+            let choices = render_scale_choices(window_size(app), &format!("{now}"));
+            current = choices.iter().position(|o| (render_scale_value(&o.0) - now).abs() < 1e-3);
+            choices.iter().map(|o| (tr(&o.1), format!("pick render_scale {}", o.0))).collect()
+        }
         key if key.starts_with("sel ") => {
             let key = &key[4..];
             let (options, at, _) = select_state(&settings_file(), key);
@@ -2408,6 +2415,14 @@ pub(crate) fn dropdown_apply(app: &mut App, action: &str) {
                 if key == "resolution" && !app.spanned {
                     if let Some(w) = app.window.as_ref() {
                         crate::display::apply(w, app.settings.fullscreen, crate::settings::Settings::resolution());
+                    }
+                }
+                // (and the 3D picture its render resolution: the renderer sizes its targets
+                // by it every frame, as for the automatic scale)
+                if key == "render_scale" {
+                    if let Some(r) = app.renderer.as_mut() {
+                        r.options.render_scale = app.settings.render_scale;
+                        log::info!("render resolution: {}", window_size(app).map_or_else(|| app.settings.render_scale_text(), |s| render_scale_label(app.settings.render_scale, s)));
                     }
                 }
             }
@@ -2501,6 +2516,62 @@ fn same_value(a: &str, b: &str) -> bool {
 pub(crate) const GRAPHICS_OPTIONS: &[(&str, &str)] = &[("vanilla", "Vanilla (as OMSI 2)"), ("vanilla_plus", "Vanilla+"), ("enhanced", "Enhanced (recommended)"), ("enhanced_plus", "Enhanced+")];
 pub(crate) const MSAA_OPTIONS: &[(&str, &str)] = &[("1", "Off"), ("2", "2x MSAA"), ("4", "4x MSAA"), ("8", "8x MSAA (recommended)")];
 pub(crate) const RENDER_SCALE_OPTIONS: &[(&str, &str)] = &[("auto", "Auto (lower when slow)"), ("1", "100% (recommended)"), ("0.85", "85%"), ("0.75", "75%"), ("0.67", "67%"), ("0.5", "50%")];
+
+/// The picture heights a render resolution is offered at, the usual ones of screens and
+/// videos.
+const RENDER_HEIGHTS: &[u32] = &[2160, 1800, 1620, 1440, 1260, 1080, 900, 720, 540];
+
+/// The render scale's choices on a picture of `screen` pixels (the window, or what the
+/// game's will be; None: not known - the plain percentages): Automatic, the screen's own
+/// size and the usual smaller heights of its shape down to half of it, each kept as the
+/// fraction of the screen that `render_scale` is and named by its size in pixels - 1920 x
+/// 1080 on a 2560 x 1440 screen is 0.75. (as a percentage only, nobody found that a 1440p
+/// screen played at 1080p was "75%")
+pub(crate) fn render_scale_choices(screen: Option<(u32, u32)>, current: &str) -> Vec<(String, String)> {
+    let Some((w, h)) = screen.filter(|s| s.0 > 0 && s.1 > 0) else {
+        return RENDER_SCALE_OPTIONS.iter().map(|o| (o.0.to_string(), o.1.to_string())).collect();
+    };
+    let mut out = vec![("auto".to_string(), render_scale_label(0.0, (w, h))), ("1".to_string(), format!("{} (recommended)", render_scale_label(1.0, (w, h))))];
+    for &rh in RENDER_HEIGHTS.iter().filter(|&&rh| rh < h && rh * 2 >= h) {
+        let s = (rh as f64 / h as f64 * 10_000.0).round() / 10_000.0;
+        out.push((format!("{s}"), render_scale_label(s as f32, (w, h))));
+    }
+    // (a scale set by hand, or kept from another screen, stays in the list)
+    let now = render_scale_value(current);
+    if !out.iter().any(|o| (render_scale_value(&o.0) - now).abs() < 1e-3) {
+        out.push((current.to_string(), render_scale_label(now, (w, h))));
+    }
+    out
+}
+
+/// What the render scale `s` (0: automatic) draws on a screen of `screen` pixels: "1920 x
+/// 1080 (75%)" - as the renderer rounds it (`Renderer::scene_size`).
+pub(crate) fn render_scale_label(s: f32, screen: (u32, u32)) -> String {
+    if s <= 0.0 {
+        return "Auto (lower when slow)".into();
+    }
+    let s = s.clamp(0.5, 1.0);
+    let (w, h) = ((screen.0 as f32 * s).round() as u32, (screen.1 as f32 * s).round() as u32);
+    if s >= 0.999 {
+        format!("{w} x {h} - the screen's own")
+    } else {
+        format!("{w} x {h} ({}%)", (s * 100.0).round() as i32)
+    }
+}
+
+/// `render_scale` as the settings read it: 0 automatic, else a fraction 0.5..1 (written as
+/// a fraction or a percentage).
+pub(crate) fn render_scale_value(text: &str) -> f32 {
+    let t = text.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("auto") {
+        return 0.0;
+    }
+    match t.trim_end_matches('%').parse::<f32>() {
+        Ok(x) if x > 1.5 => (x / 100.0).clamp(0.5, 1.0),
+        Ok(x) if x > 0.0 => x.clamp(0.5, 1.0),
+        _ => 0.0,
+    }
+}
 pub(crate) const ANISOTROPY_OPTIONS: &[(&str, &str)] = &[("1", "Off"), ("2", "2x"), ("4", "4x"), ("8", "8x"), ("16", "16x (recommended)")];
 pub(crate) const SHADOW_SIZE_OPTIONS: &[(&str, &str)] = &[("1024", "1024"), ("2048", "2048"), ("4096", "4096 (recommended)"), ("8192", "8192")];
 pub(crate) const MIRROR_OPTIONS: &[(&str, &str)] = &[("0", "Off"), ("128", "Low (128)"), ("256", "Normal (256)"), ("512", "High (512, recommended)"), ("1024", "Very high (1024)")];
@@ -2543,6 +2614,20 @@ fn select_state(file: &serde_json::Value, key: &str) -> (Vec<(&'static str, &'st
     let cur = value_text(file.get(key).unwrap_or(&serde_json::Value::Null));
     let at = options.iter().position(|o| same_value(o.0, &cur));
     (options, at, cur)
+}
+
+/// The game window's size in pixels.
+fn window_size(app: &App) -> Option<(u32, u32)> {
+    app.surface.as_ref().map(|s| (s.config.width, s.config.height))
+}
+
+/// The render resolution's row: what the 3D picture is drawn at, in the window's pixels.
+fn render_scale_row(app: &App, name: &str, desc: &str) -> Option<(String, String)> {
+    let label = match window_size(app) {
+        Some(screen) => render_scale_label(app.settings.render_scale, screen),
+        None => return select_row(&settings_file(), "render_scale", name, desc),
+    };
+    Some((row(name, 'o', &omsi_ui::tr(&label), desc, None), "sel render_scale".to_string()))
 }
 
 fn select_row(file: &serde_json::Value, key: &str, name: &str, desc: &str) -> Option<(String, String)> {
@@ -2670,7 +2755,7 @@ fn options_pages(app: &App) -> Vec<Page> {
         preset_row(&file, "Quality preset", "Sets most of the graphics options at once"),
         pick("graphics", "Graphics", later),
         pick("msaa", "Anti-aliasing", later),
-        pick("render_scale", "Render scale", later),
+        render_scale_row(app, "Render resolution", "The size the 3D picture is drawn at, scaled up to the screen; the menus stay sharp. Lower runs faster. Applies at once"),
         pick("anisotropy", "Anisotropic", later),
         // (Enhanced+ traces its shadows, occlusion and reflections: always on there)
         switch_row(app, "shadows", "Sun shadows", "Enables/Disabled shadows").filter(|_| !app.settings.ray_tracing()),
@@ -2702,7 +2787,7 @@ fn options_pages(app: &App) -> Vec<Page> {
         .collect();
     let mut display = vec![
         switch_row(app, "fullscreen", "Fullscreen", "Switches the window between windowed and fullscreen"),
-        pick("resolution", "Window size", "The window's size; in fullscreen the screen's resolution. Applies at once"),
+        pick("resolution", "Window size", "The window's size; in fullscreen the screen is switched to it and scales it (Render resolution keeps the screen's own and sharp menus). Applies at once"),
         switch_row(
             app,
             "triple_screen",
@@ -3433,6 +3518,31 @@ mod tests {
         let file = serde_json::json!({ "anisotropy": 16 });
         let (options, at, _) = super::select_state(&file, "anisotropy");
         assert_eq!(at.map(|i| options[i]), Some(("16", "16x (recommended)")));
+    }
+
+    /// A 1440p screen offers to draw at 1080p by name (as 0.75 of it), the usual smaller
+    /// heights down to half the screen, and the scale it has now if that is none of them.
+    #[test]
+    fn render_resolutions_are_named_in_pixels() {
+        let c = super::render_scale_choices(Some((2560, 1440)), "1");
+        let pairs: Vec<(&str, &str)> = c.iter().map(|o| (o.0.as_str(), o.1.as_str())).collect();
+        assert_eq!(pairs[0], ("auto", "Auto (lower when slow)"));
+        assert_eq!(pairs[1], ("1", "2560 x 1440 - the screen's own (recommended)"));
+        assert!(pairs.contains(&("0.75", "1920 x 1080 (75%)")), "{pairs:?}");
+        assert!(pairs.contains(&("0.625", "1600 x 900 (63%)")), "{pairs:?}");
+        assert!(pairs.contains(&("0.5", "1280 x 720 (50%)")), "{pairs:?}");
+        assert!(!pairs.iter().any(|p| p.1.starts_with("960 x")), "{pairs:?}");
+        // (a 4K screen: 1440p is two thirds of it, drawn at exactly 2560 x 1440)
+        let k = super::render_scale_choices(Some((3840, 2160)), "auto");
+        let s = k.iter().find(|o| o.1.starts_with("2560 x 1440")).map(|o| super::render_scale_value(&o.0)).expect("1440p on 4K");
+        assert_eq!(((3840.0 * s).round(), (2160.0 * s).round()), (2560.0, 1440.0));
+        // a scale written by hand keeps its entry, named too
+        let odd = super::render_scale_choices(Some((2560, 1440)), "0.85");
+        assert_eq!(odd.last().map(|o| (o.0.as_str(), o.1.as_str())), Some(("0.85", "2176 x 1224 (85%)")));
+        // unknown screen: the percentages
+        assert_eq!(super::render_scale_choices(None, "1")[1].1, "100% (recommended)");
+        assert_eq!(super::render_scale_value("75"), 0.75);
+        assert_eq!(super::render_scale_value("auto"), 0.0);
     }
 
     #[test]

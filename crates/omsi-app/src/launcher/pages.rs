@@ -587,7 +587,20 @@ fn graphics_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, cols: [Rect; 2]) ->
     let classic = get(s, "graphics").as_str() == Some("vanilla");
     let traced = get(s, "graphics").as_str() == Some("enhanced_plus");
     sel_setting(ui, s, dirty, "s-msaa", c.row(), "Anti-aliasing", "msaa", crate::game_lists::MSAA_OPTIONS);
-    sel_setting(ui, s, dirty, "s-scale", c.row(), "Render scale", "render_scale", crate::game_lists::RENDER_SCALE_OPTIONS);
+    {
+        // (named by their size in pixels on the screen the game opens on, with the window
+        // size and fullscreen chosen: a 1440p screen played at 1080p is 0.75 of it)
+        let text = |v: &Value| match v {
+            Value::String(x) => x.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => String::new(),
+        };
+        let want = crate::settings::resolution_of(&format!("resolution={}", text(get(s, "resolution"))));
+        let picture = crate::display::picture_size(get(s, "fullscreen").as_bool().unwrap_or(false), want);
+        let choices = crate::game_lists::render_scale_choices(picture, &text(get(s, "render_scale")));
+        let options: Vec<(&str, &str)> = choices.iter().map(|o| (o.0.as_str(), o.1.as_str())).collect();
+        sel_setting(ui, s, dirty, "s-scale", c.row(), "Render resolution", "render_scale", &options);
+    }
     sel_setting(ui, s, dirty, "s-af", c.row(), "Anisotropic", "anisotropy", crate::game_lists::ANISOTROPY_OPTIONS);
     if !classic {
         sel_setting(ui, s, dirty, "s-shadow", c.row(), "Shadow map", "shadow_size", crate::game_lists::SHADOW_SIZE_OPTIONS);

@@ -463,7 +463,11 @@ impl App {
             log::info!("gamescope (Steam Deck Gaming Mode): the window fills the screen");
         }
         if self.settings.fullscreen || gamescope {
-            attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            // (at the window size setting's resolution - the screen's video mode of it, as
+            // the menu's *Window size* sets it; it opened at the desktop's whatever it said.
+            // Automatic, and gamescope: the desktop's, borderless)
+            let primary = event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next());
+            attrs = attrs.with_fullscreen(Some(crate::display::fullscreen_mode(primary.as_ref(), resolution)));
         }
         if self.settings.triple.enabled
             && self.settings.triple_span
