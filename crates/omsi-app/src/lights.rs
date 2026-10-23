@@ -162,6 +162,7 @@ pub fn vehicle_lights(
         }
     };
     let first_corona = coronas.len();
+    let first_light = lights.len();
     // (the lamps it has: halogen bulbs, xenon or LED - `lamp_kind`)
     let kind = lamp_kind(v);
     // (bulbs: their light goes with the vehicle's voltage)
@@ -356,6 +357,16 @@ pub fn vehicle_lights(
     // term, see MeshProps::interior); what of the saloon's light gets out through the
     // windows falls on the pavement beside the bus (`saloon_spill`)
     saloon_spill(v, &value_of, volts, camera, lights);
+    // (a car just put on the road: its lamps and their light come up together)
+    if v.lamps_in < 1.0 {
+        let k = v.lamps_in.max(0.0);
+        for c in &mut coronas[first_corona..] {
+            c.brightness *= k;
+        }
+        for l in &mut lights[first_light..] {
+            l.intensity *= k;
+        }
+    }
 }
 
 /// The red light the rear lamps throw on the road behind a vehicle: a brake light's against

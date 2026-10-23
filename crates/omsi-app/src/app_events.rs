@@ -553,6 +553,7 @@ impl ApplicationHandler for App {
                         .as_ref()
                         .map(|s| s.config.width as f64 / s.config.height.max(1) as f64)
                         .unwrap_or(16.0 / 9.0);
+                    let px_h = self.surface.as_ref().map_or(0.0, |s| s.config.height as f64);
                     let fog = self
                         .weather
                         .as_ref()
@@ -562,6 +563,7 @@ impl ApplicationHandler for App {
                         t,
                         self.camera.as_ref(),
                         aspect,
+                        px_h,
                         sight,
                         fog,
                         &self.clock,

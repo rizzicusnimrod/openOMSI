@@ -518,10 +518,35 @@ pub struct Viewer {
     pub min_size: f64,
     pub max_dist: f64,
     pub fov: f64,
+    /// The picture's height in pixels (0: not known - a 900-line screen is assumed).
+    pub px_h: f64,
 }
 
 /// A car further away than this is below two pixels on a 900-line screen (m).
 const VISIBLE_RANGE: f64 = 900.0;
+
+/// How tall a car stands (m) and how many pixels of the picture it may take at most to come
+/// into being or go in plain view: two pixels of a car at the end of a road are not seen
+/// popping up (`Viewer::appear_range`).
+const CAR_HEIGHT: f64 = 1.5;
+const APPEAR_PX: f64 = 2.0;
+
+/// `OMSI_OLD_POPULATION=1`: cars appear as before the road ahead was filled - within 400 m
+/// of the player only, beyond 900 m counted as out of sight on any screen (A/B runs).
+fn old_population() -> bool {
+    static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OLD.get_or_init(|| omsi_cfg::env::var_os("OMSI_OLD_POPULATION").is_some())
+}
+
+/// Beyond how many metres a car is below `APPEAR_PX` on a picture `px_h` pixels high whose
+/// half vertical field of view has the tangent `tan_y` (`VISIBLE_RANGE` when the picture's
+/// size is not known): 800 m on a 1440-line screen at 68 degrees, 1200 m at 2160 lines.
+fn appear_range(px_h: f64, tan_y: f64) -> f64 {
+    if px_h <= 0.0 || old_population() {
+        return VISIBLE_RANGE;
+    }
+    (CAR_HEIGHT * px_h / (2.0 * APPEAR_PX * tan_y.max(1e-3))).clamp(300.0, 3000.0)
+}
 
 /// Within this distance (m) of the camera a timetable bus has its driver at the wheel.
 const DRIVER_NEAR: f64 = 70.0;
@@ -553,18 +578,26 @@ pub(crate) const UNSEEN_STEP: f32 = 0.1;
 const SKIN_DISTANCE: f64 = 200.0;
 
 impl Viewer {
-    pub fn new(cam: &omsi_render::Camera, aspect: f64, fog_range: f64) -> Viewer {
+    /// The camera's view on a picture `px_h` pixels high (0: not known).
+    pub fn new(cam: &omsi_render::Camera, aspect: f64, fog_range: f64, px_h: f64) -> Viewer {
         let tan_y = (cam.fov_deg as f64 * 0.5).to_radians().tan();
         Viewer {
             pos: cam.position,
             forward: cam.forward().as_dvec3().normalize_or_zero(),
             tan_x: tan_y * aspect.max(0.2),
             tan_y,
-            range: fog_range.min(VISIBLE_RANGE).min(cam.far as f64),
+            range: fog_range.min(appear_range(px_h, tan_y)).min(cam.far as f64),
             min_size: 0.0,
             max_dist: 0.0,
             fov: (cam.fov_deg as f64).to_radians(),
+            px_h,
         }
+    }
+
+    /// How many pixels high a car `d` metres away stands in the picture.
+    pub fn car_pixels(&self, d: f64) -> f64 {
+        let px_h = if self.px_h > 0.0 { self.px_h } else { 900.0 };
+        CAR_HEIGHT * px_h / (2.0 * d.max(0.01) * self.tan_y.max(1e-3))
     }
 
     /// A wider picture than the camera's own (a triple screen's side panels): the tangents
@@ -626,6 +659,58 @@ impl Viewer {
 /// How far from the player cars are kept (m) and how far out of sight one may be before it
 /// is taken off (m); in plain view a car stays until it is too small to see.
 const DESPAWN_FACTOR: f64 = 1.6;
+
+/// The road ahead of the player's vehicle is kept as full of cars as the roads round it,
+/// out to where a car is too small to see (`Viewer::range`) and this much further (m),
+/// within `AHEAD_HALF_ANGLE` degrees either side of its heading. Within `spawn_radius`
+/// alone, a car could only ever appear out of the picture - behind the bus on an open
+/// road: everything in front of it was in view up to 900 m, and the cars coming the other
+/// way slept through the bus and woke up behind it.
+const AHEAD_MARGIN: f64 = 150.0;
+const AHEAD_HALF_ANGLE: f64 = 70.0;
+/// A car on that stretch stays awake this much further out (m) than one is woken there:
+/// woken and put to sleep again at the same line, a car at the far end of the view came
+/// and went every population pass.
+const AHEAD_KEEP_SLACK: f64 = 120.0;
+/// At most this many cars on the stretch ahead, as a share of those asked for round the
+/// player: a town seen down a long street has more lanes in it than the player's own
+/// neighbourhood.
+const AHEAD_CAP: f64 = 0.6;
+/// Seconds over which a car put on the road lets its lamps come up (`Traffic::appeared`).
+const LAMPS_IN_SECS: f32 = 2.5;
+/// Whether a lane of the road ahead is in sight is known for this long (s), and at most
+/// this many lanes are looked at again in a population pass: a line of sight 800 m long
+/// past the town's buildings costs a fifth of a millisecond, and looked at for every lane
+/// every pass it held up the frame for 10-25 ms every two seconds. 800 m off, what can be
+/// seen changes slowly.
+const SIGHT_KEEP: f32 = 12.0;
+const SIGHT_TESTS: usize = 6;
+
+/// `OMSI_DEBUG_POPULATION`: where the cars came from, counted for a line in the log every
+/// minute.
+#[derive(Default)]
+struct PopStats {
+    /// [new, woken] x [ahead, beside, behind] the player's vehicle.
+    appeared: [[u32; 3]; 2],
+    /// Appeared in the picture, not behind anything (at the far end of the view), and the
+    /// most pixels high one of them was.
+    seen: u32,
+    seen_px: f64,
+    /// The longest `populate_ahead` took (ms), and the most lanes of road in sight ahead.
+    ahead_ms: f64,
+    ahead_lanes: u32,
+    /// ... of which looking for the road in sight (ms).
+    scan_ms: f64,
+    /// The longest a whole population pass took (ms), and one making no car on the road
+    /// ahead.
+    pass_ms: f64,
+    /// Cars awake on the road ahead and behind (within the view's range), summed per
+    /// population pass, and the passes.
+    ahead: u32,
+    behind: u32,
+    passes: u32,
+    since: f32,
+}
 
 /// A random car out of the player's range: still on the map and still driving, but without
 /// a body, a script or a picture - a few numbers. It comes back as the same car (type,
@@ -792,6 +877,10 @@ pub struct Traffic {
     light_prev: Vec<Vec<i32>>,
     /// `OMSI_DEBUG_POPULATION`: log where cars appear and vanish relative to the view.
     debug_population: bool,
+    pop_stats: PopStats,
+    /// The lanes of the road ahead and whether their start was in sight when last looked at
+    /// (and when: `time`), see `SIGHT_KEEP`.
+    sight: HashMap<usize, (bool, f32)>,
     /// `OMSI_DEBUG_DRIVERS`: what the drivers do, in the log.
     debug_drivers: bool,
     /// `OMSI_DEBUG_RVL`: how fast the cars came into junctions by the rule of the right
@@ -1824,6 +1913,8 @@ impl Traffic {
             light_log,
             light_prev,
             debug_population: omsi_cfg::env::var_os("OMSI_DEBUG_POPULATION").is_some(),
+            pop_stats: PopStats::default(),
+            sight: HashMap::new(),
             debug_drivers: omsi_cfg::env::var_os("OMSI_DEBUG_DRIVERS").is_some(),
             rvl_entries: {
                 omsi_sim::traffic::RIGHT_BEFORE_LEFT_CAUTION.store(omsi_cfg::env::var_os("OMSI_NO_RVL_CAUTION").is_none(), std::sync::atomic::Ordering::Relaxed);
@@ -2319,6 +2410,36 @@ impl Traffic {
         self.initial || self.hidden(world, p, 8.0)
     }
 
+    /// How far ahead of the player's vehicle the road is kept filled (m; see
+    /// `AHEAD_MARGIN`), 0 for no such stretch (no player, or `OMSI_OLD_POPULATION`).
+    fn ahead_reach(&self) -> f64 {
+        if self.player.is_none() || old_population() {
+            return 0.0;
+        }
+        let range = self.viewer.map_or(VISIBLE_RANGE, |v| v.range);
+        range + AHEAD_MARGIN
+    }
+
+    /// Is `p` within `reach` m of the player's vehicle and in front of it (within
+    /// `AHEAD_HALF_ANGLE` of its heading)?
+    fn ahead_of_player(&self, p: DVec3, reach: f64) -> bool {
+        let Some((c, h, ..)) = self.player else { return false };
+        ahead_within(p, c, h, reach)
+    }
+
+    /// Does a sphere of radius `r` at `p` lie in the picture of `v`, however far off, and
+    /// nothing in front of it - a building, the ground?
+    fn in_sight(&self, world: &World, v: &Viewer, p: DVec3, r: f64) -> bool {
+        let unlimited = Viewer { range: f64::MAX, ..*v };
+        unlimited.frames(p, r) && !self.occluded(world, v, p, r)
+    }
+
+    /// A car at `p` is there for the road ahead only: in front of the player's vehicle,
+    /// beyond the neighbourhood round `center` whose cars the target counts.
+    fn ahead_only(&self, p: DVec3, center: DVec3, reach: f64) -> bool {
+        reach > self.spawn_radius && (p - center).truncate().length() >= self.spawn_radius && self.ahead_of_player(p, reach)
+    }
+
     /// The world is still being built (the first populate, the first seconds): vehicles
     /// may be put anywhere.
     pub fn loading_phase(&self) -> bool {
@@ -2374,6 +2495,8 @@ impl Traffic {
         if self.mirror {
             return;
         }
+        let pass_started = std::time::Instant::now();
+        let was_initial = self.initial;
         if self.viewer.is_none() {
             if let Some(f) = view {
                 self.viewer = Some(Viewer {
@@ -2385,10 +2508,17 @@ impl Traffic {
                     min_size: 0.0,
                     max_dist: 0.0,
                     fov: 1.0,
+                    px_h: 0.0,
                 });
             }
         }
         let far = self.spawn_radius * DESPAWN_FACTOR;
+        // (the stretch ahead of the player's vehicle stays filled, see `AHEAD_MARGIN`)
+        let reach = self.ahead_reach();
+        let keep_reach = if reach > 0.0 { reach + AHEAD_KEEP_SLACK } else { 0.0 };
+        // (a big screen sees cars further: on a 2160-line one they are two pixels high at
+        // 1200 m)
+        let seen_range = self.viewer.map_or(VISIBLE_RANGE, |v| v.range.max(VISIBLE_RANGE));
         self.advance_dormant();
         // the cars somebody stands behind
         let queued: std::collections::HashSet<u64> = self.cars.iter().filter(|c| c.stopped > 5.0).filter_map(|c| c.lead_car).collect();
@@ -2453,6 +2583,10 @@ impl Traffic {
                 // road in view, and the queue behind it - timetable buses with their
                 // passengers among them - never moved again)
                 true
+            } else if !c.gone && self.ahead_of_player(p, keep_reach) {
+                // (on the road ahead of the player it stays, out to a little beyond where
+                // cars are woken there)
+                false
             } else if c.gone || dist > far {
                 // in plain view a car stays until the renderer leaves it out anyway, and
                 // close by (the mirrors, a turn of the head) it stays in any case
@@ -2463,7 +2597,7 @@ impl Traffic {
                 // nobody it gives way to - goes then: whatever held it, it stood against
                 // an invisible wall with the traffic queued up behind it for as long as the
                 // player looked)
-                (dist > VISIBLE_RANGE * 1.3 && from_eye > NEAR_HIDE)
+                (dist > seen_range * 1.3 && from_eye > NEAR_HIDE)
                     || self.hidden(world, p, r)
                     || (c.gone && c.stopped > 240.0 && from_eye > 40.0)
                     || (c.gone && c.progress.1 > PHANTOM_WAIT && matches!(c.why.0, "" | "parked" | "people") && from_eye > 25.0)
@@ -2559,6 +2693,8 @@ impl Traffic {
         // the whole map's population: as dense as around the player, on every street the
         // map has shown so far (sleeping where the player is not)
         self.fill_map(center, street_target);
+        // the road ahead, out to where cars are too small to see
+        self.populate_ahead(world, renderer, scene, center, street_target, reach);
         for (kind, target) in [
             (LaneKind::Street, street_target),
             (LaneKind::Air, if has_air { 3 } else { 0 }),
@@ -2577,6 +2713,10 @@ impl Traffic {
             self.park_in(world, center);
         }
         self.initial = false;
+        if self.debug_population && !was_initial {
+            self.pop_stats.pass_ms = self.pop_stats.pass_ms.max(pass_started.elapsed().as_secs_f64() * 1000.0);
+        }
+        self.note_population();
     }
 
     /// Now and then a car near the player parks: a space at the kerb that a parked car has
@@ -2811,6 +2951,8 @@ impl Traffic {
         let total_w = acc.max(1e-3);
         let mut attempts = 0;
         let counted_near = self.count_near.take();
+        // (the cars on the road ahead have a number of their own, `populate_ahead`)
+        let reach = if kind == LaneKind::Street { self.ahead_reach() } else { 0.0 };
         let unscheduled = self
             .cars
             .iter()
@@ -2820,6 +2962,7 @@ impl Traffic {
                     && counted_near
                         .map(|(p, r)| (c.vehicle.position - p).length() < r)
                         .unwrap_or(true)
+                    && !self.ahead_only(c.vehicle.position, center, reach)
                     && self
                         .net
                         .lanes
@@ -2843,48 +2986,10 @@ impl Traffic {
             if kind == LaneKind::Street && !self.initial && !self.may_appear(world, p) {
                 continue;
             }
-            if self
-                .cars
-                .iter()
-                .any(|c| (c.vehicle.position - p).length() < 14.0)
-            {
-                continue;
-            }
-            // only on loaded ground (a lane's tile may have gone again)
-            if kind != LaneKind::Air && !world.has_ground(p.x, p.y) {
+            if !self.spot_free(world, kind, lane, s, p) {
                 continue;
             }
             let heading = self.net.lanes[lane].at(s).1 as f64;
-            // nor just in front of one driving up to that place (it would have to stop hard)
-            let in_front_of_someone = self.cars.iter().any(|c| {
-                let rel = p - c.vehicle.position;
-                let h = c.vehicle.heading.to_radians();
-                let (along, across) = (
-                    rel.x * h.sin() + rel.y * h.cos(),
-                    (rel.x * h.cos() - rel.y * h.sin()).abs(),
-                );
-                along > 0.0
-                    && along
-                        < 20.0
-                            + (c.state.speed * c.state.speed / (2.0 * c.state.decel.max(1.0)))
-                                as f64
-                                * 1.5
-                    && across < 3.0
-            });
-            if in_front_of_someone {
-                continue;
-            }
-            if self
-                .parked
-                .get(&lane)
-                .map(|l| {
-                    l.iter()
-                        .any(|&(ps, lat)| (ps - s).abs() < 8.0 && lat.abs() < 1.5)
-                })
-                .unwrap_or(false)
-            {
-                continue; // not into a car parked in the lane
-            }
             // (a lane may carry none of the groups that drive now: try another)
             let Some(ty) = self.pick_type(kind, Some(lane)) else {
                 continue;
@@ -2895,7 +3000,221 @@ impl Traffic {
             }
             let seed = self.rand();
             self.create_car(world, renderer, scene, center, kind, lane, s, ty, seed, None, None, None, None);
+            if kind == LaneKind::Street {
+                self.appeared(world, p, false);
+            }
             count += 1;
+        }
+    }
+
+    /// The random car just made (the last of `cars`) came onto the road at `p` (`woken`:
+    /// one that slept out of range): its lamps come up over `LAMPS_IN_SECS` - put at the
+    /// far end of the view at night, two points of light came out of nothing. And
+    /// `OMSI_DEBUG_POPULATION` counts it by where it stands from the player's vehicle, and
+    /// by how big it was if it appeared in the picture, not behind anything.
+    fn appeared(&mut self, world: &World, p: DVec3, woken: bool) {
+        if self.initial {
+            return;
+        }
+        if let Some(c) = self.cars.last_mut() {
+            c.vehicle.lamps_in = 0.0;
+        }
+        if !self.debug_population {
+            return;
+        }
+        let side = match self.player {
+            Some((c, h, ..)) if ahead_within(p, c, h, f64::MAX) => 0,
+            Some((c, h, ..)) if ahead_within(p, c, h + 180.0, f64::MAX) => 2,
+            _ => 1,
+        };
+        self.pop_stats.appeared[usize::from(woken)][side] += 1;
+        if let Some(v) = self.viewer.filter(|v| self.in_sight(world, v, p, 2.5)) {
+            let d = (p - v.pos).length();
+            let px = v.car_pixels(d);
+            self.pop_stats.seen += 1;
+            self.pop_stats.seen_px = self.pop_stats.seen_px.max(px);
+            log::info!("population t={:.1}: a car appeared in the picture at ({:.0}, {:.0}), {d:.0} m from the camera, {px:.1} px high", self.time, p.x, p.y);
+        }
+    }
+
+    /// `OMSI_DEBUG_POPULATION`: how many cars are awake on the road ahead of the player's
+    /// vehicle and behind it, within the view's range, every population pass; a line with
+    /// the counts every minute.
+    fn note_population(&mut self) {
+        if !self.debug_population {
+            return;
+        }
+        if let (Some((c, h, ..)), Some(v)) = (self.player, self.viewer) {
+            let random = || self.cars.iter().filter(|c| !c.is_bus() && !c.gone);
+            let ahead = random().filter(|car| ahead_within(car.vehicle.position, c, h, v.range)).count();
+            let behind = random().filter(|car| ahead_within(car.vehicle.position, c, h + 180.0, v.range)).count();
+            self.pop_stats.ahead += ahead as u32;
+            self.pop_stats.behind += behind as u32;
+            self.pop_stats.passes += 1;
+        }
+        if self.time - self.pop_stats.since < 60.0 {
+            return;
+        }
+        let s = std::mem::take(&mut self.pop_stats);
+        self.pop_stats.since = self.time;
+        let n = s.passes.max(1) as f32;
+        let range = self.viewer.map_or(0.0, |v| v.range);
+        log::info!(
+            "population t={:.0}: in the last minute {} new cars ahead / {} beside / {} behind, {} woken ahead / {} beside / {} behind, {} appeared in the picture (at most {:.1} px high); on average {:.1} cars ahead and {:.1} behind within {range:.0} m; road ahead in sight up to {} lanes, found in {:.2} ms and filled in {:.2} ms at most; a population pass {:.2} ms at most",
+            self.time, s.appeared[0][0], s.appeared[0][1], s.appeared[0][2], s.appeared[1][0], s.appeared[1][1], s.appeared[1][2], s.seen, s.seen_px, s.ahead as f32 / n, s.behind as f32 / n, s.ahead_lanes, s.scan_ms, s.ahead_ms, s.pass_ms
+        );
+    }
+
+    /// Is there room for a new car at `p`, `s` metres into `lane`: no car within 14 m, on
+    /// loaded ground, not just in front of a car driving up to it, not in a car parked in
+    /// the lane?
+    fn spot_free(&self, world: &World, kind: LaneKind, lane: usize, s: f32, p: DVec3) -> bool {
+        if self
+            .cars
+            .iter()
+            .any(|c| (c.vehicle.position - p).length() < 14.0)
+        {
+            return false;
+        }
+        // only on loaded ground (a lane's tile may have gone again)
+        if kind != LaneKind::Air && !world.has_ground(p.x, p.y) {
+            return false;
+        }
+        // nor just in front of one driving up to that place (it would have to stop hard)
+        let in_front_of_someone = self.cars.iter().any(|c| {
+            let rel = p - c.vehicle.position;
+            let h = c.vehicle.heading.to_radians();
+            let (along, across) = (
+                rel.x * h.sin() + rel.y * h.cos(),
+                (rel.x * h.cos() - rel.y * h.sin()).abs(),
+            );
+            along > 0.0
+                && along
+                    < 20.0
+                        + (c.state.speed * c.state.speed / (2.0 * c.state.decel.max(1.0)))
+                            as f64
+                            * 1.5
+                && across < 3.0
+        });
+        if in_front_of_someone {
+            return false;
+        }
+        // not into a car parked in the lane
+        !self
+            .parked
+            .get(&lane)
+            .map(|l| {
+                l.iter()
+                    .any(|&(ps, lat)| (ps - s).abs() < 8.0 && lat.abs() < 1.5)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Keep the road ahead of the player's vehicle that the player can see as full as the
+    /// roads round it, out to `reach` (see `AHEAD_MARGIN`): cars sleeping there wake at the
+    /// far end of the view, too small to see, and new ones are put there as `populate_kind`
+    /// puts them round the player, as many per metre of road as `street_target` round
+    /// `center` comes to. Only the road in sight: filled behind the houses as well, a town
+    /// ahead drew twice the cars and cost a millisecond a frame for cars nobody saw (where
+    /// nothing is seen, `populate_kind` puts them behind the houses as it always has).
+    fn populate_ahead(&mut self, world: &World, renderer: &Renderer, scene: &mut Scene, center: DVec3, street_target: usize, reach: f64) {
+        if reach <= self.spawn_radius || street_target == 0 || self.lights_only || self.types.is_empty() {
+            return;
+        }
+        let Some(viewer) = self.viewer else { return };
+        let started = std::time::Instant::now();
+        let mut near_w = 0.0f64;
+        let mut ahead: Vec<(usize, f32)> = Vec::new();
+        // (lanes in the picture whose sight is not known or is old: the oldest looked at)
+        let mut unknown: Vec<(usize, f32, f32)> = Vec::new();
+        let in_picture = Viewer { range: f64::MAX, ..viewer };
+        for i in self.net.lanes_starting_near(center, reach) {
+            let l = &self.net.lanes[i];
+            let Some(w) = street_lane_weight(l) else { continue };
+            let start = l.start();
+            if (start - center).truncate().length() < self.spawn_radius {
+                near_w += w;
+            } else if self.ahead_of_player(start, reach) && in_picture.frames(start, 3.0) {
+                match self.sight.get(&i) {
+                    Some(&(seen, at)) if self.time - at < SIGHT_KEEP => {
+                        if seen {
+                            ahead.push((i, w as f32));
+                        }
+                    }
+                    known => unknown.push((i, w as f32, known.map_or(f32::MAX, |k| self.time - k.1))),
+                }
+            }
+        }
+        unknown.sort_by(|a, b| b.2.total_cmp(&a.2));
+        for &(i, w, _) in unknown.iter().take(SIGHT_TESTS) {
+            let seen = !self.occluded(world, &viewer, self.net.lanes[i].start(), 3.0);
+            self.sight.insert(i, (seen, self.time));
+            if seen {
+                ahead.push((i, w));
+            }
+        }
+        let now = self.time;
+        self.sight.retain(|_, s| now - s.1 < SIGHT_KEEP * 3.0);
+        if self.debug_population {
+            self.pop_stats.scan_ms = self.pop_stats.scan_ms.max(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        if near_w < 50.0 || ahead.is_empty() {
+            return;
+        }
+        let ahead_w: f64 = ahead.iter().map(|a| a.1 as f64).sum();
+        let target = ((street_target as f64 * ahead_w / near_w).min(street_target as f64 * AHEAD_CAP)).round() as usize;
+        let mut count = self.cars.iter().filter(|c| !c.is_bus() && !c.gone && self.ahead_only(c.vehicle.position, center, reach)).count();
+        // first the cars sleeping there (the map's own, still on their way)
+        let mut i = 0;
+        while i < self.dormant.len() && count < target {
+            let (p, h, ty) = {
+                let d = &self.dormant[i];
+                let l = &self.net.lanes[d.lane];
+                let (p, h) = l.at(d.s.clamp(0.0, (l.length() - 0.1).max(0.0)));
+                (p, h as f64, d.ty.clone())
+            };
+            let ok = self.ahead_only(p, center, reach)
+                && ahead.iter().any(|a| a.0 == self.dormant[i].lane)
+                && world.has_ground(p.x, p.y)
+                && self.may_appear(world, p)
+                && !self.cars.iter().any(|c| (c.vehicle.position - p).length() < 14.0)
+                && self.spawn_clear(&ty, p, h);
+            if ok {
+                let d = self.dormant.swap_remove(i);
+                self.create_car(world, renderer, scene, center, d.kind, d.lane, d.s, d.ty, d.seed, Some(d.scheme), Some(d.id), Some(d.speed), None);
+                self.appeared(world, p, true);
+                count += 1;
+            } else {
+                i += 1;
+            }
+        }
+        // then new ones
+        let mut acc = 0.0f32;
+        let cumulative: Vec<f32> = ahead.iter().map(|a| { acc += a.1; acc }).collect();
+        let mut attempts = 0;
+        while count < target && attempts < target * 12 {
+            attempts += 1;
+            let x = self.rand_f() as f32 * acc;
+            let lane = ahead[cumulative.partition_point(|&c| c < x).min(ahead.len() - 1)].0;
+            let s = (self.rand_f() * (self.net.lanes[lane].length() as f64 - 6.0)) as f32 + 3.0;
+            let (p, h) = self.net.lanes[lane].at(s);
+            if !self.ahead_only(p, center, reach) || !(self.initial || self.may_appear(world, p)) || !self.spot_free(world, LaneKind::Street, lane, s, p) {
+                continue;
+            }
+            let Some(ty) = self.pick_type(LaneKind::Street, Some(lane)) else {
+                continue;
+            };
+            if !self.spawn_clear(&ty, p, h as f64) {
+                continue;
+            }
+            let seed = self.rand();
+            self.create_car(world, renderer, scene, center, LaneKind::Street, lane, s, ty, seed, None, None, None, None);
+            self.appeared(world, p, false);
+            count += 1;
+        }
+        if self.debug_population {
+            self.pop_stats.ahead_ms = self.pop_stats.ahead_ms.max(started.elapsed().as_secs_f64() * 1000.0);
+            self.pop_stats.ahead_lanes = self.pop_stats.ahead_lanes.max(ahead.len() as u32);
         }
     }
 
@@ -2972,7 +3291,9 @@ impl Traffic {
         if self.dormant.is_empty() {
             return;
         }
-        let active = self.cars.iter().filter(|c| !c.is_bus() && !c.gone).count();
+        // (the cars on the road ahead have a number of their own, `populate_ahead`)
+        let reach = self.ahead_reach();
+        let active = self.cars.iter().filter(|c| !c.is_bus() && !c.gone && !self.ahead_only(c.vehicle.position, center, reach)).count();
         let mut budget = (target as f32 * 1.25).ceil() as usize;
         budget = budget.saturating_sub(active);
         let centers: Vec<DVec3> = std::iter::once(center).chain(self.lan_centers.iter().copied()).collect();
@@ -2996,6 +3317,7 @@ impl Traffic {
             if ok {
                 let d = self.dormant.swap_remove(i);
                 self.create_car(world, renderer, scene, center, d.kind, d.lane, d.s, d.ty, d.seed, Some(d.scheme), Some(d.id), Some(d.speed), None);
+                self.appeared(world, p, true);
                 budget -= 1;
             } else {
                 i += 1;
@@ -7444,6 +7766,9 @@ impl Traffic {
                 (true, _) => (why.0, why.1 - car.state.front),
                 _ => ("", 0.0),
             };
+            if car.vehicle.lamps_in < 1.0 {
+                car.vehicle.lamps_in = (car.vehicle.lamps_in + dt / LAMPS_IN_SECS).min(1.0);
+            }
             if car.fresh > 0.0 {
                 car.fresh -= dt;
                 // placed moving before a queue or a red light: arrive slower rather than
@@ -9319,6 +9644,18 @@ fn road_scale(near_density: &[f32]) -> f32 {
     road * mean.clamp(0.0, 2.0)
 }
 
+/// Whether `p` lies within `reach` m of `centre` and in front of it, within
+/// `AHEAD_HALF_ANGLE` of the heading `heading` (degrees, 0 = +y, 90 = +x).
+fn ahead_within(p: DVec3, centre: DVec3, heading: f64, reach: f64) -> bool {
+    let rel = (p - centre).truncate();
+    let d = rel.length();
+    if d > reach || d < 1e-6 {
+        return false;
+    }
+    let h = heading.to_radians();
+    rel.dot(DVec2::new(h.sin(), h.cos())) >= d * AHEAD_HALF_ANGLE.to_radians().cos()
+}
+
 /// Whether the point `p` of a car's way lies in the player's box round `centre` (`wide` to
 /// either side, `ahead` in front and `behind` behind it) - on the same level only: a bus
 /// under a bridge held up the traffic on the bridge above it (#753). 4 m, as for the other
@@ -9433,6 +9770,45 @@ mod road_scale_tests {
         assert!((road_scale(&[0.2; 100]) - 0.2).abs() < 1e-6);
         assert_eq!(road_scale(&[0.0; 100]), 0.0);
         assert!((road_scale(&[1.0; 500]) - 2.0).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod ahead_tests {
+    use super::{ahead_within, appear_range, VISIBLE_RANGE};
+    use glam::DVec3;
+
+    /// A car is two pixels high at 800 m on a 1440-line picture with a 68 degree field of
+    /// view, at 1200 m on a 2160-line one; an unknown picture keeps the old 900 m.
+    #[test]
+    fn cars_may_appear_where_they_are_two_pixels_high() {
+        let tan_y = 34f64.to_radians().tan();
+        assert!((appear_range(1440.0, tan_y) - 800.0).abs() < 5.0, "{}", appear_range(1440.0, tan_y));
+        assert!((appear_range(2160.0, tan_y) - 1200.0).abs() < 5.0);
+        assert_eq!(appear_range(0.0, tan_y), VISIBLE_RANGE);
+        // (a zoomed-in view sees further, up to a limit)
+        assert!(appear_range(1440.0, 10f64.to_radians().tan()) > 2000.0);
+        assert_eq!(appear_range(2160.0, 0.01), 3000.0);
+    }
+
+    /// The road ahead is the part in front of the vehicle's heading (0 = north, 90 = east),
+    /// within 70 degrees of it and the reach.
+    #[test]
+    fn the_road_ahead_lies_in_front_of_the_heading() {
+        let bus = DVec3::new(100.0, 100.0, 0.0);
+        // heading north
+        assert!(ahead_within(DVec3::new(100.0, 700.0, 0.0), bus, 0.0, 900.0));
+        assert!(ahead_within(DVec3::new(300.0, 300.0, 0.0), bus, 0.0, 900.0));
+        assert!(!ahead_within(DVec3::new(100.0, 1100.0, 0.0), bus, 0.0, 900.0));
+        assert!(!ahead_within(DVec3::new(100.0, -500.0, 0.0), bus, 0.0, 900.0));
+        assert!(!ahead_within(DVec3::new(600.0, 120.0, 0.0), bus, 0.0, 900.0));
+        // heading east: north is beside it, east ahead, west behind (180 degrees about)
+        assert!(ahead_within(DVec3::new(600.0, 120.0, 0.0), bus, 90.0, 900.0));
+        assert!(!ahead_within(DVec3::new(100.0, 700.0, 0.0), bus, 90.0, 900.0));
+        assert!(ahead_within(DVec3::new(-400.0, 100.0, 0.0), bus, 270.0, 900.0));
+        assert!(ahead_within(DVec3::new(-400.0, 100.0, 0.0), bus, 90.0 + 180.0, 900.0));
+        // the height does not count
+        assert!(ahead_within(DVec3::new(100.0, 700.0, 80.0), bus, 0.0, 900.0));
     }
 }
 

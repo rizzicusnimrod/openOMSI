@@ -83,11 +83,14 @@ pub(crate) fn lan_signals(game: &lan::LanGame) -> hashbrown::HashMap<u32, (bool,
 }
 
 /// What the traffic needs to know every frame besides the time: where the player looks
-/// from, the day of the week, who walks the footpaths, what hides what.
+/// from (on a picture `px_h` pixels high), the day of the week, who walks the footpaths,
+/// what hides what.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn traffic_inputs(
     t: &mut traffic::Traffic,
     cam: Option<&Camera>,
     aspect: f64,
+    px_h: f64,
     extent: Option<(f64, f64)>,
     fog: f64,
     clock: &omsi_sim::SimClock,
@@ -97,7 +100,7 @@ pub(crate) fn traffic_inputs(
 ) {
     if let Some(c) = cam {
         t.viewer = Some(
-            traffic::Viewer::new(c, aspect, fog)
+            traffic::Viewer::new(c, aspect, fog, px_h)
                 .with_extent(extent)
                 .with_culling(render.min_obj_size, render.max_obj_dist),
         );

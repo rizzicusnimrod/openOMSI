@@ -994,6 +994,10 @@ pub struct VehicleInstance {
     /// The headlamp range control (degrees, + lowers the beams): the driver's wheel on the
     /// dashboard, on top of the levelling (`beam_trim`). 0 for every vehicle but the own bus.
     pub beam_aim: f32,
+    /// How far its lamps have come on (0..1), all of them together: an AI car just put on
+    /// the road at the far end of the view lets its lights come up over a few seconds
+    /// instead of two points of light appearing out of nothing. 1 for every other vehicle.
+    pub lamps_in: f32,
     /// The meshes' transforms in the modelled pose, for `[smoothskin]` (made when needed).
     skin_rest: Vec<Mat4>,
     /// Static obstacles; the vehicle's `[boundingbox]` is kept out of them.
@@ -1275,6 +1279,7 @@ impl VehicleInstance {
             spot_fade: Vec::new(),
             beam_trim: None,
             beam_aim: 0.0,
+            lamps_in: 1.0,
             v_springfactor,
             rest_sag,
             ai_lift,
