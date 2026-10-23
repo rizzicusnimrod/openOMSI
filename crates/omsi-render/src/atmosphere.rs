@@ -906,6 +906,19 @@ pub fn f16_bits(v: f32) -> u16 {
     sign | ((exp as u16) << 10) | (((mant + 0x1000) >> 13) as u16).min(0x3ff)
 }
 
+/// A half float's value (`f16_bits` read back).
+pub fn f16_value(h: u16) -> f32 {
+    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let e = ((h >> 10) & 0x1f) as i32;
+    let m = (h & 0x3ff) as f32;
+    match e {
+        0 => sign * m / 1024.0 * 2f32.powi(-14),
+        31 if m == 0.0 => sign * f32::INFINITY,
+        31 => f32::NAN,
+        _ => sign * (1.0 + m / 1024.0) * 2f32.powi(e - 15),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1077,6 +1090,11 @@ mod tests {
             assert!((back - v).abs() <= v.abs() * 1e-3 + 1e-6, "{v} -> {back}");
         }
         assert_eq!(f16_bits(1e9), 0x7c00);
+        // and read back
+        for v in [0.0f32, 1.0, -2.5, 0.5, 65504.0, 3.140625, 0.78125] {
+            assert_eq!(f16_value(f16_bits(v)), v);
+        }
+        assert!((f16_value(f16_bits(1e-5)) - 1e-5).abs() < 1e-7, "a subnormal");
     }
 }
 

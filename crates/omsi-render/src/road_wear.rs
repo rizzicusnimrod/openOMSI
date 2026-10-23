@@ -6,13 +6,15 @@
 //! (snow_cover.wgsl `road_wear`) for the tyres' ruts in the snow, the snow left between them
 //! and at the kerb, the slush between the lanes, and the drier lines of a drying road.
 //!
-//! A texel holds four numbers (`Rgba8Unorm`, read with linear filtering): the distance to
-//! the nearest lane's centre line (0..`WEAR_RANGE` m), that lane's traffic (0..1), its half
-//! width (0..`MAX_HALF_WIDTH` m), and how much further the next lane is than the nearest
-//! (0..`WEAR_RANGE` m: about naught on the line between two lanes, the whole range by the
-//! kerb). A distance is linear across a texel except where the nearest lane changes - on
-//! that line the filtered map reads up to half a texel short, which the shader's soft
-//! thresholds take in.
+//! A texel holds four numbers as half floats (`Rgba16Float`, read with linear filtering):
+//! the distance to the nearest lane's centre line (0..`WEAR_RANGE` m), that lane's traffic
+//! (0..1), its half width (0..`MAX_HALF_WIDTH` m), and how much further the next lane is
+//! than the nearest (0..`WEAR_RANGE` m: about naught on the line between two lanes, the
+//! whole range by the kerb). A distance is linear across a texel except where the nearest
+//! lane changes - on that line the filtered map reads up to half a texel short, which the
+//! shader's thresholds take in. (In eight bits a distance was held to 2.4 cm only, and the
+//! ruts' sharp walls wobbled by a centimetre every half metre; a half float holds it to
+//! half a millimetre at the ruts.)
 
 use glam::DVec2;
 use rayon::prelude::*;
@@ -61,17 +63,28 @@ impl Wear {
     /// No lane near.
     pub const NONE: Wear = Wear { d: WEAR_RANGE, traffic: 0.0, half_width: 1.6, sep: WEAR_RANGE };
 
-    /// A texel's four numbers (0..1 each) read back.
+    /// A texel's four numbers read back.
     pub fn decode(t: [f32; 4]) -> Wear {
-        Wear { d: t[0] * WEAR_RANGE, traffic: t[1], half_width: t[2] * MAX_HALF_WIDTH, sep: t[3] * WEAR_RANGE }
+        Wear { d: t[0], traffic: t[1], half_width: t[2], sep: t[3] }
+    }
+
+    /// The texel that holds it (half floats).
+    fn texel(self) -> [u16; 4] {
+        use crate::atmosphere::f16_bits;
+        [
+            f16_bits(self.d.clamp(0.0, WEAR_RANGE)),
+            f16_bits(self.traffic.clamp(0.0, 1.0)),
+            f16_bits(self.half_width.clamp(0.0, MAX_HALF_WIDTH)),
+            f16_bits(self.sep.clamp(0.0, WEAR_RANGE)),
+        ]
     }
 }
 
-/// The map drawn round a place: its south-west corner (world) and its texels, row by row
-/// from the south.
+/// The map drawn round a place: its south-west corner (world) and its texels (half floats,
+/// `Wear`'s four numbers), row by row from the south.
 pub struct WearField {
     pub origin: DVec2,
-    pub texels: Vec<[u8; 4]>,
+    pub texels: Vec<[u16; 4]>,
 }
 
 impl WearField {
@@ -89,7 +102,7 @@ impl WearField {
         let (fx, fy) = ((f.x - i0) as f32, (f.y - j0) as f32);
         let texel = |i: f64, j: f64| {
             let (i, j) = (i.clamp(0.0, n as f64 - 1.0) as usize, j.clamp(0.0, n as f64 - 1.0) as usize);
-            self.texels[j * n + i].map(|v| v as f32 / 255.0)
+            self.texels[j * n + i].map(crate::atmosphere::f16_value)
         };
         let (a, b, c, d) = (texel(i0, j0), texel(i0 + 1.0, j0), texel(i0, j0 + 1.0), texel(i0 + 1.0, j0 + 1.0));
         let mix = |k: usize| {
@@ -123,10 +136,6 @@ fn closest(p: DVec2, a: DVec2, b: DVec2) -> (f64, DVec2) {
     ((p - c).length(), c)
 }
 
-fn unorm(v: f64) -> u8 {
-    (v.clamp(0.0, 1.0) * 255.0).round() as u8
-}
-
 /// Draw the map with its corner at `origin` from the lanes.
 pub fn raster(lanes: &[WearLane], origin: DVec2) -> WearField {
     let n = WEAR_SIZE as usize;
@@ -155,7 +164,7 @@ pub fn raster(lanes: &[WearLane], origin: DVec2) -> WearField {
             }
         }
     }
-    let mut texels = vec![[255u8, 0, unorm(Wear::NONE.half_width as f64 / MAX_HALF_WIDTH as f64), 255]; n * n];
+    let mut texels = vec![Wear::NONE.texel(); n * n];
     texels.par_chunks_mut(n).enumerate().for_each(|(j, row)| {
         // per lane: its nearest distance and point
         let mut best: Vec<(u32, f64, DVec2)> = Vec::new();
@@ -185,7 +194,7 @@ pub fn raster(lanes: &[WearLane], origin: DVec2) -> WearField {
             };
             let d2 = best.iter().filter(|e| e.0 != l1 && (e.2 - c1).length() >= SAME_TARMAC).map(|e| e.1).fold(f64::INFINITY, f64::min);
             let lane = &lanes[l1 as usize];
-            *t = [unorm(d1 / reach), unorm(lane.traffic as f64), unorm(lane.half_width as f64 / MAX_HALF_WIDTH as f64), unorm((d2 - d1) / reach)];
+            *t = Wear { d: d1 as f32, traffic: lane.traffic, half_width: lane.half_width, sep: (d2 - d1).min(reach) as f32 }.texel();
         }
     });
     WearField { origin, texels }
@@ -213,6 +222,28 @@ mod tests {
         assert!((beside.d - 1.0).abs() < 0.05, "{beside:?}");
         assert!((beside.traffic - 0.8).abs() < 0.01, "{beside:?}");
         assert!((beside.half_width - 1.75).abs() < 0.02, "{beside:?}");
+    }
+
+    #[test]
+    fn the_distance_between_texels_is_held_to_a_millimetre() {
+        // (a lane at an angle to the texels, read off its centre line where the distance is
+        // linear across a texel: in eight bits the map was up to 1.2 cm off, which a rut's
+        // sharp wall showed as a wobble every half metre)
+        let dir = DVec2::new(30f64.to_radians().cos(), 30f64.to_radians().sin());
+        let normal = DVec2::new(-dir.y, dir.x);
+        let points = (0..=80).map(|k| dir * (-200.0 + 5.0 * k as f64)).collect();
+        let f = field(&[WearLane { points, half_width: 1.75, traffic: 1.0 }]);
+        let mut worst = 0.0f32;
+        for k in 0..400 {
+            let along = -40.0 + 0.193 * k as f64;
+            for off in [0.78, 0.91, 1.02, 1.14, 1.5, 1.9] {
+                for side in [-1.0, 1.0] {
+                    let w = f.at(dir * along + normal * off * side).unwrap();
+                    worst = worst.max((w.d - off as f32).abs());
+                }
+            }
+        }
+        assert!(worst < 0.001, "{worst}");
     }
 
     #[test]

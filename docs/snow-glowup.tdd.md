@@ -72,3 +72,4 @@ on a texel's middle - the bilinear map reads up to half a texel short across tha
 - Not tested: a live session (sound, LAN, a weather change mid-session reloading the season), the
   wear map's worker thread under a long drive, Vanilla+ beyond compile/validation.
 - Phase 3 (real tyre marks) not built.
+- Follow-up: sharper road snow and fewer glints, `docs/snow-sharpness.tdd.md`.

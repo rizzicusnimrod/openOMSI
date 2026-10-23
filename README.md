@@ -104,8 +104,9 @@ plain openOMSI's releases. *Settings → Install updates without asking* skips t
 * **Snow:** a snow weather without snow on the road (`[snowOnRoad]`) leaves the roads cleared
   - dark and wet in a thaw, dry in a hard frost - with the plough's snow banked at the kerb;
   with it the roads lie under snow worn into ruts by the traffic (busier lanes wear more),
-  pressed grey in a frost and churned to slush near 0 °C. Thin snow lies in patches, fresh
-  snow glitters in the sun, and the falling flakes streak past as you drive (Enhanced
+  pressed grey in a frost and churned to slush near 0 °C - sharp-edged and grainy close up,
+  the tyres' lines running along them. Thin snow lies in patches, fresh snow glints here and
+  there in the sun, and the falling flakes streak past as you drive (Enhanced
   graphics; *openOMSI snowy roads* in the Graphics settings switches back to the maps' own
   snowy road pictures).
 
