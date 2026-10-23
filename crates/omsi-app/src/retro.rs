@@ -71,6 +71,48 @@ impl Rules {
         self.matches(texture, object)
     }
 
+    /// [`Rules::matches`] with a rule's part of letters taken only at the start or the end of
+    /// a word of the texture's name (its runs of letters: `Laubbaum`, `Zierbaum`, `grass02`),
+    /// never in the middle of one - `eiche` (oak) is no part of `Verkehrszeichen`, nor `riet`
+    /// (reeds) of `variety`. `skip` leaves words of the name out (a map's place names, see
+    /// `crate::foliage::Places`). The `!` rules, the `object:` ones and parts with other
+    /// characters than letters (`fir_`) take any part of the name, as in `matches`.
+    pub(crate) fn matches_words(&self, texture: &str, object: &Path, skip: &dyn Fn(&str) -> bool) -> bool {
+        let name = texture.replace('\\', "/");
+        let stem = Path::new(&name).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if stem.is_empty() {
+            return false;
+        }
+        let words: Vec<&str> = stem.split(|c: char| !c.is_alphabetic()).filter(|w| !w.is_empty() && !skip(w)).collect();
+        let mut path = None;
+        let mut out = false;
+        for r in &self.rules {
+            let hit = if r.object {
+                path.get_or_insert_with(|| {
+                    let p = object.to_string_lossy().replace('\\', "/").to_lowercase();
+                    match p.rfind("sceneryobjects/") {
+                        Some(i) => p[i..].to_string(),
+                        None => p,
+                    }
+                })
+                .contains(&r.part)
+            } else if r.sheeting && r.part.chars().all(char::is_alphabetic) {
+                words.iter().any(|w| w.starts_with(&r.part) || w.ends_with(&r.part))
+            } else {
+                stem.contains(&r.part)
+            };
+            if hit {
+                out = r.sheeting;
+            }
+        }
+        out
+    }
+
+    /// Whether `word` is, all of it, one of the parts the rules take (not one they refuse).
+    pub(crate) fn takes_word(&self, word: &str) -> bool {
+        self.rules.iter().any(|r| r.sheeting && !r.object && r.part == word)
+    }
+
     /// Whether the rules take `texture` of the object at `object` (the same rules serve
     /// other lists of names than the sheeting, `crate::foliage`'s plants).
     pub(crate) fn matches(&self, texture: &str, object: &Path) -> bool {

@@ -61,6 +61,8 @@ pub(crate) struct Config {
     pub grain: f32,
     pub flare: bool,
     pub streaks: f32,
+    /// How much of their glow the headlamps shining into the camera keep (1 all).
+    pub headlamps: f32,
     /// The dashcam's lens across the picture's diagonal (degrees) and its quality (0 a cheap
     /// camera .. 1 a good one).
     pub dash_fov: f32,
@@ -85,6 +87,7 @@ impl Default for Config {
             grain: 0.25,
             flare: true,
             streaks: 0.3,
+            headlamps: 0.35,
             dash_fov: 130.0,
             dash_quality: 0.5,
             dash_lines: 1080.0,
@@ -108,6 +111,7 @@ impl Config {
             grain: s.cinematic_grain.clamp(0.0, 1.0),
             flare: s.cinematic_flare,
             streaks: s.cinematic_streaks.clamp(0.0, 1.0),
+            headlamps: s.cinematic_headlamps.clamp(0.1, 1.0),
             dash_fov: s.dashcam_fov.clamp(90.0, 160.0),
             dash_quality: s.dashcam_quality.clamp(0.0, 1.0),
             dash_lines: s.dashcam_lines.clamp(240, 1440) as f32,
@@ -1026,6 +1030,9 @@ fn look_fx(cfg: &Config) -> LensFx {
         // (an anamorphic lens's streak through the lights, as strong as the setting says)
         streak: cfg.streaks,
         flare: if cfg.flare { 0.8 } else { 0.0 },
+        // (the headlamps that shine into it taken down, as a camera operator exposes for the
+        // bus and not for its lamps)
+        lamp_dim: 1.0 - cfg.headlamps,
         look: cfg.look,
         look_amount: 1.0,
         saturation: 1.04,
@@ -1297,6 +1304,21 @@ fn moving_box(s: &Subject, prev: Option<(DVec3, Mat3)>) -> Option<omsi_render::M
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The film camera takes the headlamps that shine into it down by the setting (Settings
+    /// → Cameras, "Headlamps into the camera": the share they keep); the dashcam does not.
+    #[test]
+    fn the_film_camera_takes_the_headlamps_down_by_the_setting() {
+        let mut s = crate::settings::Settings::default();
+        s.cinematic_headlamps = 0.35;
+        let cfg = Config::from_settings(&s);
+        assert!((look_fx(&cfg).lamp_dim - 0.65).abs() < 1e-6);
+        s.cinematic_headlamps = 1.0;
+        assert_eq!(look_fx(&Config::from_settings(&s)).lamp_dim, 0.0);
+        assert_eq!(Dashcam::default().lens(&cfg, 1.0 / 60.0, 16.0 / 9.0, 1.0, 0).lamp_dim, 0.0);
+        // (and the setting's default takes them down)
+        assert!(Config::from_settings(&crate::settings::Settings::default()).headlamps < 1.0);
+    }
 
     #[test]
     fn the_spring_settles_on_its_target() {

@@ -36,6 +36,8 @@ struct Camera {
     breeze: vec4<f32>,
     // the trees through the year (shader.wgsl `seasonal_colour`)
     season: vec4<f32>,
+    // x: falling snow settles on the glass films (`Lighting::glass_snow`)
+    glass: vec4<f32>,
 };
 
 // 1 when the point lies inside the player's vehicle (its [boundingbox], shrunk a little so
@@ -654,6 +656,8 @@ struct VsOut {
     @location(6) spec_sky: vec3<f32>,
     // where a [matl_envmap] reads its sphere map, made at the vertex (see `sphere_map_uv`)
     @location(7) env_uv: vec2<f32>,
+    // the vertex in the mesh's own frame (a tyre's snow turns with it, `tyre_snow`)
+    @location(8) local: vec3<f32>,
 };
 // What the fragment shaders take: VsOut without the invariant on the position. The
 // invariant belongs to the vertex output; on a fragment input naga's GLSL writer turns it
@@ -668,6 +672,7 @@ struct FsIn {
     @location(5) spec_sun: vec3<f32>,
     @location(6) spec_sky: vec3<f32>,
     @location(7) env_uv: vec2<f32>,
+    @location(8) local: vec3<f32>,
 };
 
 // Direct3D's D3DTSS_TCI_SPHEREMAP, by which Omsi.exe's environment stage reads the sphere
@@ -761,6 +766,12 @@ fn vs_main(in: VsIn) -> VsOut {
     out.uv = in.uv + pr.zw;
     out.params = pr;
     out.params2 = inst_params[e * 2u + 1u];
+    out.local = in.pos;
+    // a tyre's snow (`Instance::coat`, 1 + coat in params.y): most on the tread, less on the
+    // sidewalls - a wheel turns about its mesh's x (OMSI's vehicles: x to the right)
+    if (pr.y > 1.0) {
+        out.params.y = 1.0 + (pr.y - 1.0) * (0.3 + 0.7 * (1.0 - abs(safe_normal(in.normal).x)));
+    }
     if (pr.y < 0.5) {
         // invisible: collapse the triangle
         out.clip = vec4<f32>(0.0, 0.0, 2.0, 1.0);
@@ -1445,6 +1456,8 @@ struct RainGlass {
     out: vec3<f32>,
     // the fine mist of droplets (0..1)
     mist: f32,
+    // the haze of the water lying between the drops (0..1, `RAIN_HAZE`)
+    haze: f32,
 };
 
 // One drop of radius `r` (metres) centred `d` (metres, across / down the glass) away:
@@ -1487,6 +1500,7 @@ fn rain_glass(world: vec3<f32>, uv: vec2<f32>, n: vec3<f32>, wet: f32, t: f32, o
     g.out = n;
     g.cover = 0.0;
     g.mist = 0.0;
+    g.haze = 0.0;
     // (the derivatives first, while every pixel of the quad still takes part)
     let dpx = dpdx(world);
     let dpy = dpdy(world);
@@ -1640,7 +1654,7 @@ fn rain_glass(world: vec3<f32>, uv: vec2<f32>, n: vec3<f32>, wet: f32, t: f32, o
         let ph = fract(t / life + h2.x);
         // landed, grown, drying: a drop comes and goes; more of them the wetter the pane,
         // and the big ones only on a wet pane
-        let dens = wet * wetter * select(select(select(0.45, 0.36, layer == 2), 0.42 * smoothstep(0.15, 0.6, wet), layer == 0), 0.1 * smoothstep(0.3, 0.8, wet), layer == 3);
+        let dens = min(wet * wetter * RAIN_DROP_DENSITY * select(select(select(0.45, 0.36, layer == 2), 0.42 * smoothstep(0.15, 0.6, wet), layer == 0), 0.1 * smoothstep(0.3, 0.8, wet), layer == 3), 0.9);
         let present = step(h.x, dens) * smoothstep(0.0, 0.04, ph) * (1.0 - smoothstep(0.85, 1.0, ph)) * (1.0 - track);
         if (present <= 0.0) {
             continue;
@@ -1697,6 +1711,8 @@ fn rain_glass(world: vec3<f32>, uv: vec2<f32>, n: vec3<f32>, wet: f32, t: f32, o
     // (seen from further than a millimetre a pixel: their average)
     let mist = mix(wet * wetter * 0.35 * 0.12, grain, smoothstep(0.0015, 0.0006, px));
     g.mist = mist * (1.0 - track) * clamp(wet * 1.4, 0.0, 1.0);
+    // (and the water lying between them: a soaked pane veils the street, not only bends it)
+    g.haze = RAIN_HAZE * clamp(wet, 0.0, 1.0) * (1.0 - track);
 
     g.cover = best;
     let nz = sqrt(max(1.0 - dot(slope, slope), 0.02));
@@ -1769,9 +1785,74 @@ fn rain_light(g: RainGlass, v: vec3<f32>, d_thru: vec3<f32>, refl: vec3<f32>, th
     }
     let a_drop = g.cover * 0.94;
     let a_mist = g.mist * 0.2 * (1.0 - a_drop);
-    let a = a_drop + a_mist;
-    let col = (c * a_drop + mist_col * a_mist) / max(a, 1e-4);
+    // the haze between the drops: what lies behind, greyed by the light the water scatters
+    let a_haze = g.haze * (1.0 - a_drop - a_mist);
+    let haze_col = mix(thru, mist_col, 0.6);
+    let a = a_drop + a_mist + a_haze;
+    let col = (c * a_drop + mist_col * a_mist + haze_col * a_haze) / max(a, 1e-4);
     return vec4<f32>(col, a);
+}
+
+// Snow packed on a tyre (`Instance::coat` by the vertex, `coat` 0..1): the dark rubber
+// whitened in clumps that fill as the coat grows - the rims, the hub caps and anything
+// lighter stay as they are. `local` the point in the mesh's frame (the clumps turn with the
+// wheel), `fw` its pixel's footprint there (clumps smaller than a pixel give way to their
+// mean). The share whitened, and the colour: packed snow, or brown-grey slush (`slush`).
+fn tyre_snow(tex: vec3<f32>, local: vec3<f32>, coat: f32, fw: f32, slush: f32) -> vec4<f32> {
+    let lum = dot(tex, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let rubber = 1.0 - smoothstep(0.035, 0.12, lum);
+    let p = local.yz + local.xx * vec2<f32>(0.71, -0.53);
+    let fine = vnoise_f(p, 55.0, vec2<f32>(3.1, 7.7));
+    let coarse = vnoise_f(p, 14.0, vec2<f32>(-5.3, 1.9));
+    let n = mix(0.5, fine, 1.0 - smoothstep(0.004, 0.02, fw)) * 0.4 + coarse * 0.6;
+    // (clumps in the tread, and a grey dusting of the grooves between them)
+    let clumps = smoothstep(0.75 - 0.7 * coat, 0.9 - 0.5 * coat, n);
+    let w = rubber * max(clumps, 0.3 * coat) * smoothstep(0.0, 0.1, coat);
+    let colour = mix(vec3<f32>(0.66, 0.68, 0.72), vec3<f32>(0.36, 0.33, 0.30), clamp(slush, 0.0, 1.0));
+    return vec4<f32>(colour, clamp(w, 0.0, 1.0));
+}
+
+// The crystals on a pane: a little below the snow on the ground, and seen from inside the
+// bus against the light, by their shaded side. They take the light that comes down onto the
+// glass as much as the light that meets its face (`glass_snow_light_dir`): lit by the face
+// alone, a windscreen's crystals were grey specks against the white street behind them.
+const GLASS_SNOW_ALBEDO: vec3<f32> = vec3<f32>(0.9, 0.92, 0.95);
+const GLASS_SNOW_INSIDE: f32 = 0.85;
+
+// How much of the view a pane's film takes away (glass_film.rs keeps the same numbers): the
+// haze of a soaked pane between its drops, the drops' density against the first design, the
+// snow's cover against its picture's and the frosty veil it lays over the whole pane. A pane
+// in the rain or the snow was a clear window with a few specks on it.
+const RAIN_HAZE: f32 = 0.22;
+const RAIN_DROP_DENSITY: f32 = 1.35;
+const GLASS_SNOW_GAIN: f32 = 1.8;
+const GLASS_SNOW_VEIL: f32 = 0.12;
+// ... and they let a share of the light behind them through, scattered: lit by the sky
+// alone, at night they were dark specks over the street in the headlamps, like dirt.
+const GLASS_SNOW_THROUGH: f32 = 0.85;
+
+// The direction the crystals on a pane facing `out` take their light from: half up.
+fn glass_snow_light_dir(out: vec3<f32>) -> vec3<f32> {
+    return normalize(out + vec3<f32>(0.0, 0.0, 1.5));
+}
+
+// Snow settled on a pane while it snows (`camera.glass.x`, `Lighting::glass_snow`): the
+// film's own picture - openOMSI's crystals (`rain::snow_on_glass`) or the vehicle's own
+// winter one - as thick as the film is wet, and held still on the glass (without the
+// sliding rain texture's offset). Before, the film was chosen once, by the weather when the
+// vehicle was loaded: a bus that set out in the rain wore drops through any snowstorm.
+fn glass_snow_cover(uv: vec2<f32>, wet: f32) -> f32 {
+    let s = textureSample(t_diffuse, s_diffuse, uv);
+    let w = clamp(wet, 0.0, 1.0);
+    return clamp(s.a * material.color.a * w * GLASS_SNOW_GAIN + w * GLASS_SNOW_VEIL, 0.0, 1.0);
+}
+
+// A pane's normal on the side the weather is - the side facing the eye, turned round from
+// inside the bus: where the crystals on it take their light from.
+fn glass_weather_side(n: vec3<f32>, world: vec3<f32>, outside_in: bool) -> vec3<f32> {
+    var out = safe_normal(n);
+    out = select(-out, out, dot(out, camera.cam_pos.xyz - world) >= 0.0);
+    return select(out, -out, outside_in);
 }
 
 // What a drop shows in the classic picture: the sky from the weather's colours, the
@@ -1819,6 +1900,16 @@ fn shade_vanilla(in: FsIn, puddle_weight: ptr<function, f32>, eye: vec3<f32>) ->
         // a pane's film of water: drops, not the sliding texture
         let v = normalize(camera.cam_pos.xyz - in.world);
         let in_cab = inside_vehicle(camera.cam_pos.xyz) * near_player_vehicle(in.world) > 0.5;
+        if (camera.glass.x > 0.5) {
+            // snow: crystals lit as the snow on the ground is (`shade_vanilla`'s cover)
+            let cover = glass_snow_cover(in.uv - in.params.zw, in.params.x);
+            let out_n = glass_weather_side(in.normal, in.world, in_cab);
+            let sun = camera.sun_color.rgb * camera.sun_dir.w * max(dot(glass_snow_light_dir(out_n), camera.sun_dir.xyz), 0.0) * 0.6;
+            var light = (sun + camera.sky_color.rgb * 0.7 + camera.ambient.xyz) * select(1.0, GLASS_SNOW_INSIDE, in_cab);
+            light = select(light, srgb_decode(light), camera.sky_color.w > 0.5);
+            let behind = rain_behind(in.world, -v, rain_env_vanilla(-v), 1.0);
+            return vec4<f32>(min(GLASS_SNOW_ALBEDO * light + behind * GLASS_SNOW_THROUGH, vec3<f32>(1.5)), cover);
+        }
         let g = rain_glass(in.world, in.uv - in.params.zw, in.normal, in.params.x, camera.post.y, in_cab);
         let through = rain_through(g, v);
         let seen = select(rain_behind(in.world, through, rain_env_vanilla(normalize(through)), 1.0), vec3<f32>(0.0), dot(through, through) < 1e-4);
@@ -1894,6 +1985,12 @@ fn shade_vanilla(in: FsIn, puddle_weight: ptr<function, f32>, eye: vec3<f32>) ->
     }
     var diffuse = camera.sun_color.rgb * camera.sun_dir.w * ndl * shadow + (camera.sky_color.rgb * from_above * (0.6 + 0.4 * shadow) + camera.ambient.xyz) * ao;
     var albedo = seasonal_colour(tex.rgb, in.world);
+    // the snow packed on a tyre (`tyre_snow`; not in OMSI 2's own picture, Vanilla)
+    let coat = clamp(in.params.y - 1.0, 0.0, 1.0);
+    if (coat > 0.0 && camera.sky_color.w < 0.5) {
+        let ts = tyre_snow(tex.rgb, in.local, coat, 0.01, 0.0);
+        albedo = mix(albedo, ts.rgb, ts.a);
+    }
     if (camera.flags.x > 0.5 && (material.extra.x > 0.5 || in.params2.w > 0.5)) {
         // detail texturing (setting): procedural grain on the ground and the roads, fading out with distance
         let dist0 = distance(in.world, camera.cam_pos.xyz);

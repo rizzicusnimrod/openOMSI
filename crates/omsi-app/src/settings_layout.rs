@@ -95,6 +95,7 @@ pub const OPTIONS: &[PageDef] = &[
                 it("cinematic_grain", "Film grain", "The grain of film over the picture"),
                 it("cinematic_flare", "Lens flares", "The sun's reflections in the lens"),
                 it("cinematic_streaks", "Light streaks", "The horizontal streaks through headlights, tail lights and lamps (0: none)"),
+                it("cinematic_headlamps", "Headlamps into the camera", "How bright the headlamps shining into the camera stay at night (100%: as they are, blinding up close)"),
             ]),
             sec("Dashcam (Ctrl+F1)", &[
                 it("dashcam_fov", "Lens", "How wide the dashcam sees, across the picture's diagonal"),
@@ -300,6 +301,7 @@ pub const OPTIONS: &[PageDef] = &[
             sec("Detail", &[
                 it("detail_textures", "Fine detail up close", "The ground and large walls get a fine grain when you are near"),
                 it("sel mirror_size", "Mirror quality", "How sharp the mirrors are"),
+                it("mirror_matched", "Mirrors as the windscreen", "The mirrors show the enhanced picture's snow and light (off: plainer, a little faster)"),
                 it("led_glow", "LED display glow", "How strongly the dots of LED destination displays glow"),
                 it("led_mips", "LED display smoothing", "How smooth LED displays look from a distance"),
             ]),

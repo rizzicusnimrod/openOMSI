@@ -1133,6 +1133,7 @@ fn steps_of(verb: &str) -> Option<Vec<f32>> {
         "cinematic_dof" => (0..=8).map(|v| v as f32 * 0.5).collect(),
         "cinematic_shake" => (0..=12).map(|v| v as f32 * 0.25).collect(),
         "cinematic_grain" | "cinematic_streaks" => (0..=10).map(|v| v as f32 * 0.1).collect(),
+        "cinematic_headlamps" => (1..=10).map(|v| v as f32 * 0.1).collect(),
         "dashcam_fov" => vec![110.0, 120.0, 130.0, 140.0, 150.0],
         "dashcam_quality" => vec![0.0, 0.5, 1.0],
         "led_mips" => (0..=80).map(|v| v as f32 * 0.05).collect(),
@@ -1295,6 +1296,7 @@ fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
         "cinematic_shake" => s.cinematic_shake,
         "cinematic_grain" => s.cinematic_grain,
         "cinematic_streaks" => s.cinematic_streaks,
+        "cinematic_headlamps" => s.cinematic_headlamps,
         "dashcam_fov" => s.dashcam_fov,
         "dashcam_quality" => s.dashcam_quality,
         "led_mips" => s.led_mips,
@@ -1468,6 +1470,10 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
         "cinematic_streaks" => {
             app.settings.cinematic_streaks = v.clamp(0.0, 1.0);
             Some(("cinematic_streaks", app.settings.cinematic_streaks.to_string()))
+        }
+        "cinematic_headlamps" => {
+            app.settings.cinematic_headlamps = v.clamp(0.1, 1.0);
+            Some(("cinematic_headlamps", app.settings.cinematic_headlamps.to_string()))
         }
         "dashcam_fov" => {
             app.settings.dashcam_fov = v.clamp(90.0, 160.0);
@@ -1717,6 +1723,7 @@ fn toggle_now(app: &App, id: &str) -> Option<bool> {
         "sunlit_cab" => s.sunlit_cab,
         "road_tracks" => s.road_tracks,
         "own_snowy_roads" => s.own_snowy_roads,
+        "mirror_matched" => s.mirror_matched,
         "fullscreen" => s.fullscreen,
         "vsync" => s.vsync,
         "texture_compression" => s.texture_compression,
@@ -1973,6 +1980,14 @@ fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static str, String
         "reflections" => {
             app.settings.reflections = on;
             Some(("reflections", bit))
+        }
+        "mirror_matched" => {
+            // (at once: the next mirror drawn takes it)
+            app.settings.mirror_matched = on;
+            if let Some(r) = app.renderer.as_mut() {
+                r.options.matched_mirrors = on;
+            }
+            Some(("mirror_matched", bit))
         }
         "clouds" => {
             app.settings.clouds = on;
@@ -2728,6 +2743,7 @@ fn options_pages(app: &App) -> Vec<Page> {
         slider_row(app, "cinematic_grain", "Cinematic camera: film grain", "The grain of film over the picture", &|v| format!("{:.0}%", v * 100.0)),
         switch_row(app, "cinematic_flare", "Cinematic camera: lens flares", "The sun's reflections in the lens"),
         slider_row(app, "cinematic_streaks", "Cinematic camera: light streaks", "The streaks through headlights and lamps", &|v| if v <= 0.0 { "Off".to_string() } else { format!("{:.0}%", v * 100.0) }),
+        slider_row(app, "cinematic_headlamps", "Cinematic camera: headlamps into the camera", "How bright the headlamps shining into the camera stay (100%: as they are)", &|v| format!("{:.0}%", v * 100.0)),
         slider_row(app, "dashcam_fov", "Dashcam: lens", "How wide the dashcam sees, across the picture's diagonal", &|v| format!("{v:.0}°")),
         switch_row(app, "dashcam_stamp", "Dashcam: date, time and speed", "The dashcam's stamp in the picture"),
         slider_row(app, "dashcam_lines", "Dashcam: resolution", "The dashcam's picture: fewer lines look softer, like real footage scaled up", &|v| format!("{}p", v as i64)),
@@ -2785,6 +2801,7 @@ fn options_pages(app: &App) -> Vec<Page> {
         switch_row(app, "sunlit_cab", "Sunlit cab", "Sun patches move over the dash and the floor, the cab is lit from its windows"),
         switch_row(app, "road_tracks", "Tyre tracks", "Wheel tracks dry first on a drying road and show in the snow"),
         switch_row(app, "own_snowy_roads", "openOMSI snowy roads", "Ruts, banked snow and slush on the roads instead of the map's snowy road pictures (next map load)"),
+        switch_row(app, "mirror_matched", "Mirrors as the windscreen", "The mirrors drawn with the enhanced picture's snow and light (off: plainer, a little faster)"),
     ]
         .into_iter()
         .flatten()

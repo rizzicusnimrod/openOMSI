@@ -1777,6 +1777,7 @@ pub(crate) fn run_offscreen(
             if let Some(rb) = &player.vehicle.rigid {
                 log::info!("rigid: pos ({:.1}, {:.1}, {:.2}) heading {:.1} pitch {:.2} bank {:.2} v {:?} compressions {:?}", player.vehicle.position.x, player.vehicle.position.y, player.vehicle.position.z, player.vehicle.heading, player.vehicle.pitch, player.vehicle.bank, rb.velocity, rb.wheels.iter().map(|w| (w.compression * 1000.0).round() / 1000.0).collect::<Vec<_>>());
             }
+            log::info!("tyre snow: {:.2} (the roads' snow and wetness {:?})", player.vehicle.tyre_snow, omsi_sim::host::road_surface());
             log::info!(
                 "drove {:.1} m in {secs} s, now {:.1} km/h, engine_n={:?} M_Wheel={:?} gear={:?}",
                 (player.vehicle.position - start).length(),

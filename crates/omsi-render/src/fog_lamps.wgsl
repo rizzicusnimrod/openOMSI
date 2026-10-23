@@ -40,6 +40,8 @@ struct Camera {
     breeze: vec4<f32>,
     // the trees through the year (shader.wgsl `seasonal_colour`)
     season: vec4<f32>,
+    // x: falling snow settles on the glass films (`Lighting::glass_snow`)
+    glass: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 

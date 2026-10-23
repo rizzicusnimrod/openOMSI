@@ -608,6 +608,18 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
                 wet = swept;
             }
         }
+        if (camera.glass.x > 0.5) {
+            // snow (`glass_snow_cover`): the crystals are white and lit by the sky and the
+            // sun on the weather's side, the wipers' arcs swept out of them as of the water
+            let cover = glass_snow_cover(in.uv - in.params.zw, wet);
+            let out_n = glass_weather_side(in.normal, in.world, in_cab);
+            let lit_from = glass_snow_light_dir(out_n);
+            let e = sh_irradiance(lit_from) / PI + enh.sun.rgb / PI * max(dot(lit_from, camera.sun_dir.xyz), 0.0);
+            let behind = rain_behind(in.world, -vn, rain_env_enhanced(-vn, 2.0), 1.0 / max(enh.exposure.x, 1e-6));
+            let c = GLASS_SNOW_ALBEDO * e * select(1.0, GLASS_SNOW_INSIDE, in_cab) + behind * GLASS_SNOW_THROUGH;
+            let aer = air(-vn, fog_distance(in.world), camera.cam_pos.z - enh.fog.z, in.world.z - enh.fog.z);
+            return vec4<f32>(c * enh.exposure.x * aer.a, cover);
+        }
         let g = rain_glass(in.world, in.uv - in.params.zw, in.normal, wet, camera.post.y, in_cab);
         let through = rain_through(g, vn);
         let valid = dot(through, through) > 1e-4;
@@ -759,6 +771,8 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
     var n = safe_normal(in.normal);
     // how much ground a pixel spans here (m): the snow's glints fade where it holds many
     let footprint = length(fwidth(in.world));
+    // (and in the mesh's own frame: a tyre's snow, `tyre_snow`)
+    let local_fw = length(fwidth(in.local));
     // the map's water (`MaterialExtra::water`): small waves running over it ripple its
     // normal - fading with the distance, where they would only flicker - so that what it
     // mirrors breaks up as on a lake instead of standing in it as in a pane of glass (#841)
@@ -837,6 +851,13 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
         detail_factor = 1.0 + (detail_noise(pattern_xy) - 0.5) * 0.42 * k;
         albedo = albedo * detail_factor;
         ambient_albedo = ambient_albedo * detail_factor;
+    }
+    // the snow packed on a tyre (`Instance::coat`: 1 + coat in params.y)
+    let coat = clamp(in.params.y - 1.0, 0.0, 1.0);
+    if (coat > 0.0) {
+        let ts = tyre_snow(tex.rgb, in.local, coat, local_fw, enh.snow.z);
+        albedo = mix(albedo, ts.rgb, ts.a);
+        ambient_albedo = mix(ambient_albedo, ts.rgb, ts.a);
     }
     // --- the material in physical terms
     var refl = 0.0;

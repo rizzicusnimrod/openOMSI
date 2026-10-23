@@ -441,6 +441,16 @@ fn doorways(ty: &omsi_sim::VehicleType) -> Option<Vec<Vec<String>>> {
 
 /// The door keys of a vehicle type: its doorways from the model ([`doorways`]), else the
 /// trigger names ([`door_trigger_groups`]).
+/// The snow a mesh of a vehicle shows (`Renderer::set_coat`): the vehicle's tyre snow on its
+/// tyres, none elsewhere (and nothing looked up while there is none).
+pub(crate) fn tyre_coat(coat: f32, def: &omsi_model::MeshDef) -> f32 {
+    if coat > 0.0 && omsi_sim::tyre_snow::is_tyre(def) {
+        coat
+    } else {
+        0.0
+    }
+}
+
 pub(crate) fn door_keys(ty: &omsi_sim::VehicleType) -> Vec<Vec<String>> {
     doorways(ty).unwrap_or_else(|| door_trigger_groups(&ty.program))
 }
@@ -2405,6 +2415,7 @@ pub(crate) fn sync_vehicle_transforms(
         renderer.set_slot_light(scene, *inst, &p.slot_light);
         renderer.set_slot_night(scene, *inst, &p.slot_night);
         renderer.set_interior(scene, *inst, p.interior);
+        renderer.set_coat(scene, *inst, tyre_coat(vehicle.tyre_snow, def));
     }
     for (t, r) in vehicle.trailers.iter().zip(trailer_renders.iter()) {
         for (i, inst) in r.instances.iter().enumerate() {
@@ -2431,6 +2442,7 @@ pub(crate) fn sync_vehicle_transforms(
             renderer.set_slot_light(scene, *inst, &p.slot_light);
             renderer.set_slot_night(scene, *inst, &p.slot_night);
             renderer.set_interior(scene, *inst, p.interior);
+            renderer.set_coat(scene, *inst, tyre_coat(vehicle.tyre_snow, def));
         }
     }
     scene::sync_vehicle_textures(renderer, scene, vehicle, render, &mut { usize::MAX });

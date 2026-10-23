@@ -264,6 +264,19 @@ pub(crate) fn follow_camera(traffic: Option<&traffic::Traffic>, id: u64) -> Opti
 /// as bright).
 const MIRROR_NIGHT_DIM: f32 = 0.8;
 
+/// The share of the plain light a mirror keeps (`render_rig_mirrors`): a plainly shaded
+/// mirror in the enhanced graphics loses it with the night (`MIRROR_NIGHT_DIM`, by the
+/// sun's height `sun_z`); a mirror drawn with the enhanced shading (`plain` false) takes
+/// the window's light as it is.
+fn mirror_light_scale(sun_z: f32, plain: bool) -> f32 {
+    if !plain {
+        return 1.0;
+    }
+    let alt = sun_z.clamp(-1.0, 1.0).asin().to_degrees();
+    let dark = 1.0 - ((alt + 6.0) / 12.0).clamp(0.0, 1.0);
+    1.0 - MIRROR_NIGHT_DIM * dark
+}
+
 /// The least radius a mirror's camera counts with in the visibility test (m). A mirror's
 /// camera sits in the middle of its glass; with the file's radius 0 (`[add_camera_reflexion]`)
 /// a mirror whose lower half shows at the edge of the picture - the SD200's right mirror
@@ -451,10 +464,11 @@ fn render_rig_mirrors(
     // (By the sun's darkness, Envir_Brightness's ramp from +6 to -6 degrees: `night` is
     // whole at sunset already, from +10 degrees on, and rain raises it by day, and the
     // mirrors were a fifth of the window's light through the whole dusk, #432.)
-    if lighting.enhanced && omsi_cfg::env::var_os("OMSI_MIRROR_ENHANCED").is_none() {
-        let alt = lighting.sun_dir.z.clamp(-1.0, 1.0).asin().to_degrees();
-        let dark = 1.0 - ((alt + 6.0) / 12.0).clamp(0.0, 1.0);
-        let k = 1.0 - MIRROR_NIGHT_DIM * dark;
+    // (mirrors that look as the windscreen does are drawn with the enhanced shading and
+    // keep the window's light: `RenderOptions::matched_mirrors`)
+    let plain = lighting.enhanced && !renderer.options.matched_mirrors && omsi_cfg::env::var_os("OMSI_MIRROR_ENHANCED").is_none();
+    if plain {
+        let k = mirror_light_scale(lighting.sun_dir.z, plain);
         lighting.ambient *= k;
         lighting.secondary *= k;
         lighting.sun_color *= k;
@@ -503,6 +517,21 @@ fn render_rig_mirrors(
         renderer.render_to_texture(scene, *tex, &cam, &lighting, MIRROR_ASPECT);
     }
     seen.len()
+}
+
+#[cfg(test)]
+mod light_tests {
+    /// A plain mirror is taken down with the night to the enhanced picture's level; a
+    /// matched one (the enhanced shading) keeps the light the window has, by day and night.
+    #[test]
+    fn only_a_plain_mirror_is_dimmed_at_night() {
+        let night = (-20f32).to_radians().sin();
+        let day = 30f32.to_radians().sin();
+        assert!((super::mirror_light_scale(night, true) - 0.2).abs() < 1e-5);
+        assert_eq!(super::mirror_light_scale(day, true), 1.0);
+        assert_eq!(super::mirror_light_scale(night, false), 1.0);
+        assert_eq!(super::mirror_light_scale(day, false), 1.0);
+    }
 }
 
 #[cfg(test)]

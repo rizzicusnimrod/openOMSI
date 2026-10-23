@@ -210,6 +210,9 @@ pub struct Settings {
     pub cinematic_flare: bool,
     /// The streaks through bright lights (an anamorphic lens's, 0 none .. 1 strong).
     pub cinematic_streaks: f32,
+    /// How much of their glow the headlamps that shine into the cinematic camera keep (1 as
+    /// they are .. 0.1): at night they were two blinding discs (`LensFx::lamp_dim`).
+    pub cinematic_headlamps: f32,
     /// The dashcam (Ctrl+F1): its lens across the diagonal (degrees), the date, time and
     /// speed in the picture, and its quality (0 a cheap camera .. 1 a good one).
     pub dashcam_fov: f32,
@@ -323,6 +326,9 @@ pub struct Settings {
     /// over the roads' own pictures, instead of the maps' `WinterSnowfall` road pictures
     /// (taken at the next map load).
     pub own_snowy_roads: bool,
+    /// The mirrors look as the windscreen does (`RenderOptions::matched_mirrors`): drawn with
+    /// the enhanced shading in the enhanced graphics; off, plainly - a little faster.
+    pub mirror_matched: bool,
     /// The driver's air-suspended seat (`crate::air_seat`): "off" (the old head movement),
     /// "firm", "normal" (the default) or "soft".
     pub air_seat: String,
@@ -489,7 +495,7 @@ impl Settings {
     /// picture go soft for seconds. An 8192 shadow map took a fifth of a day's frame on an
     /// RX 6700 XT, 1024 mirrors another tenth, for little to be seen; 8x MSAA a twentieth.)
     fn desktop() -> Self {
-        Self { msaa: 8, anisotropy: 16, ssao: true, shadows: true, shadow_size: 4096, shadow_blobs: true, navigator: true, ui_opacity: 0.85, notes: true, ui_scale: 1.0, ui_scale_window: true, navigator_corner: "bottom-left".into(), boarding: "auto".into(), detail_textures: true, exact_fare: true, enhanced: true, graphics: "enhanced".into(), triple: Default::default(), triple_span: true, triple_hud_center: true, vr: false, vr_scale: 0.65, vr_head_smoothing_ms: 0.0, vr_mirror_rate: 16.0, vr_desktop_mirror: true, fullscreen: false, vsync: true, volume: 0.6, drive_keys: "simple".into(), post_aa: "fxaa".into(), render_scale: 1.0, language: "ENG".into(), pax_voices: "all".into(), nav_arrows: false, nav_ai: true, get_up: false, texture_compression: true, texture_memory: 0, auto_clutch: true, momentary_gears: false, auto_shift: false, min_obj_size: 0.013, max_obj_dist: -1.0, max_fps: 0, chat: true, chat_size: 1.0, tooltips: true, name_tags: true, show_fps: false, clouds: true, pax_density: 1.0, vol_ai: 1.0, vol_scenery: 1.0, mirror_size: 512, mirror_hud: 0, mirror_refresh: "full".into(), doppler: true, driver: true, maintenance: 0, ai_unsched_factor: 1.0, ai_max_scheduled: 0, ai_max_parked: 0, ai_max_humans: 200, ai_drivers: Default::default(), exhaust: 0.67, classic_ui: false, advanced_settings: false, collision_vehicles: true, collision_objects: true, collision_pedestrians: true, head_movement: true, driverview_smooth: true, hands_in_cab: false, alt_view: true, precision_zoom: false, time_speed: 1.0, time_sync: false, metar_sync: false, metar_station: String::new(), machine_translation: false, shadow_casters: "all".into(), ctrl_deadzone: 0.0, right_stick_look: true, ctrl_off: String::new(), steering_linear: false, old_steering: false, red_steer_spd: false, reflections: true, led_glow: 6, led_mips: 1.3, night_brightness: 100, wind_sway: 100, seasonal_foliage: true, lightning: true, sun_shafts: 2, ssr: true, grass: 2, grass_distance: 45, relief: true, taa: false, sunlit_cab: true, road_tracks: true, own_snowy_roads: true, air_seat: "normal".into(), mouse_sens: 1.0, graphics_api: "auto".into(), ff_invert: false, ff_enabled: true, ff_road_vib: 1.0, ff_engine_vib: 1.0, ff_fade: 0.28, ff_realistic: true, traffic_events: "normal".into(), traffic_event_breakdown: true, traffic_event_delivery: true, traffic_event_stop: true, traffic_event_emergency: true, traffic_event_slow: true, traffic_event_learner: true, brake_hold: true, mouse_steering: false, mouse_right_off: false, mouse_smooth: true, look_sens: 1.0, look_smoothing_ms: 0.0, blinker_cancel: true, wheel_range: 900.0, wheel_lock: 0.0, fov: 0.0, camera_collision: true, steer_look: false, steer_look_angle: 30.0, steer_look_response: 0.25, head_idle: 0.0, head_idle_pace: 1.0, pedal_throttle: 1.0, pedal_brake: 1.0, seat: [0.0; 3], seat_pitch_deg: 0.0, head_tracking: false, head_tracking_port: 4242, head_tracking_invert: String::new(), discord_status: true, discord_app_id: String::new(), voice_chat: true, info_bar: false, autopilot_style: 0.5, autopilot_max_kmh: 80.0, autopilot_limit_pct: 100.0, autopilot_gap: 2.0, autopilot_indicate: true, autopilot_steer_takeover: true, autopilot_stop_gap: 2.0, headlamp_range: 0, dash_dimmer: 100, cinematic_shot_secs: 9.0, cinematic_look: 1.0, cinematic_letterbox: 2.39, cinematic_dof: 1.5, cinematic_motion_blur: true, cinematic_glide: false, cinematic_drone: true, cinematic_inside: true, cinematic_roadside: true, cinematic_shake: 1.0, cinematic_grain: 0.25, cinematic_flare: true, cinematic_streaks: 0.3, dashcam_fov: 130.0, dashcam_stamp: true, dashcam_quality: 0.5, dashcam_lines: 1080 }
+        Self { msaa: 8, anisotropy: 16, ssao: true, shadows: true, shadow_size: 4096, shadow_blobs: true, navigator: true, ui_opacity: 0.85, notes: true, ui_scale: 1.0, ui_scale_window: true, navigator_corner: "bottom-left".into(), boarding: "auto".into(), detail_textures: true, exact_fare: true, enhanced: true, graphics: "enhanced".into(), triple: Default::default(), triple_span: true, triple_hud_center: true, vr: false, vr_scale: 0.65, vr_head_smoothing_ms: 0.0, vr_mirror_rate: 16.0, vr_desktop_mirror: true, fullscreen: false, vsync: true, volume: 0.6, drive_keys: "simple".into(), post_aa: "fxaa".into(), render_scale: 1.0, language: "ENG".into(), pax_voices: "all".into(), nav_arrows: false, nav_ai: true, get_up: false, texture_compression: true, texture_memory: 0, auto_clutch: true, momentary_gears: false, auto_shift: false, min_obj_size: 0.013, max_obj_dist: -1.0, max_fps: 0, chat: true, chat_size: 1.0, tooltips: true, name_tags: true, show_fps: false, clouds: true, pax_density: 1.0, vol_ai: 1.0, vol_scenery: 1.0, mirror_size: 512, mirror_hud: 0, mirror_refresh: "full".into(), doppler: true, driver: true, maintenance: 0, ai_unsched_factor: 1.0, ai_max_scheduled: 0, ai_max_parked: 0, ai_max_humans: 200, ai_drivers: Default::default(), exhaust: 0.67, classic_ui: false, advanced_settings: false, collision_vehicles: true, collision_objects: true, collision_pedestrians: true, head_movement: true, driverview_smooth: true, hands_in_cab: false, alt_view: true, precision_zoom: false, time_speed: 1.0, time_sync: false, metar_sync: false, metar_station: String::new(), machine_translation: false, shadow_casters: "all".into(), ctrl_deadzone: 0.0, right_stick_look: true, ctrl_off: String::new(), steering_linear: false, old_steering: false, red_steer_spd: false, reflections: true, led_glow: 6, led_mips: 1.3, night_brightness: 100, wind_sway: 100, seasonal_foliage: true, lightning: true, sun_shafts: 2, ssr: true, grass: 2, grass_distance: 45, relief: true, taa: false, sunlit_cab: true, road_tracks: true, own_snowy_roads: true, mirror_matched: true, air_seat: "normal".into(), mouse_sens: 1.0, graphics_api: "auto".into(), ff_invert: false, ff_enabled: true, ff_road_vib: 1.0, ff_engine_vib: 1.0, ff_fade: 0.28, ff_realistic: true, traffic_events: "normal".into(), traffic_event_breakdown: true, traffic_event_delivery: true, traffic_event_stop: true, traffic_event_emergency: true, traffic_event_slow: true, traffic_event_learner: true, brake_hold: true, mouse_steering: false, mouse_right_off: false, mouse_smooth: true, look_sens: 1.0, look_smoothing_ms: 0.0, blinker_cancel: true, wheel_range: 900.0, wheel_lock: 0.0, fov: 0.0, camera_collision: true, steer_look: false, steer_look_angle: 30.0, steer_look_response: 0.25, head_idle: 0.0, head_idle_pace: 1.0, pedal_throttle: 1.0, pedal_brake: 1.0, seat: [0.0; 3], seat_pitch_deg: 0.0, head_tracking: false, head_tracking_port: 4242, head_tracking_invert: String::new(), discord_status: true, discord_app_id: String::new(), voice_chat: true, info_bar: false, autopilot_style: 0.5, autopilot_max_kmh: 80.0, autopilot_limit_pct: 100.0, autopilot_gap: 2.0, autopilot_indicate: true, autopilot_steer_takeover: true, autopilot_stop_gap: 2.0, headlamp_range: 0, dash_dimmer: 100, cinematic_shot_secs: 9.0, cinematic_look: 1.0, cinematic_letterbox: 2.39, cinematic_dof: 1.5, cinematic_motion_blur: true, cinematic_glide: false, cinematic_drone: true, cinematic_inside: true, cinematic_roadside: true, cinematic_shake: 1.0, cinematic_grain: 0.25, cinematic_flare: true, cinematic_streaks: 0.3, cinematic_headlamps: 0.35, dashcam_fov: 130.0, dashcam_stamp: true, dashcam_quality: 0.5, dashcam_lines: 1080 }
     }
 }
 
@@ -717,6 +723,7 @@ impl Settings {
                 "sunlit_cab" => s.sunlit_cab = b(v),
                 "road_tracks" => s.road_tracks = b(v),
                 "own_snowy_roads" => s.own_snowy_roads = b(v),
+                "mirror_matched" => s.mirror_matched = b(v),
                 "air_seat" => {
                     let a = v.trim().to_ascii_lowercase();
                     s.air_seat = if matches!(a.as_str(), "off" | "firm" | "normal" | "soft") { a } else { "normal".into() };
@@ -792,6 +799,7 @@ impl Settings {
                 "cinematic_roadside" => s.cinematic_roadside = b(v),
                 "cinematic_flare" => s.cinematic_flare = b(v),
                 "cinematic_streaks" => s.cinematic_streaks = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 1.0)).unwrap_or(s.cinematic_streaks),
+                "cinematic_headlamps" => s.cinematic_headlamps = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.1, 1.0)).unwrap_or(s.cinematic_headlamps),
                 "dashcam_stamp" => s.dashcam_stamp = b(v),
                 "cinematic_shake" => s.cinematic_shake = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 3.0)).unwrap_or(s.cinematic_shake),
                 "cinematic_grain" => s.cinematic_grain = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 1.0)).unwrap_or(s.cinematic_grain),
@@ -851,8 +859,8 @@ impl Settings {
             self.wind_sway, self.seasonal_foliage as u8, self.lightning as u8,
         ));
         text.push_str(&format!(
-            "sun_shafts={}\nssr={}\ngrass={}\ngrass_distance={}\nrelief={}\ntaa={}\nsunlit_cab={}\nroad_tracks={}\nown_snowy_roads={}\n",
-            self.sun_shafts, self.ssr as u8, self.grass, self.grass_distance, self.relief as u8, self.taa as u8, self.sunlit_cab as u8, self.road_tracks as u8, self.own_snowy_roads as u8,
+            "sun_shafts={}\nssr={}\ngrass={}\ngrass_distance={}\nrelief={}\ntaa={}\nsunlit_cab={}\nroad_tracks={}\nown_snowy_roads={}\nmirror_matched={}\n",
+            self.sun_shafts, self.ssr as u8, self.grass, self.grass_distance, self.relief as u8, self.taa as u8, self.sunlit_cab as u8, self.road_tracks as u8, self.own_snowy_roads as u8, self.mirror_matched as u8,
         ));
         text.push_str(&format!("air_seat={}\n", self.air_seat));
         text.push_str(&format!(
@@ -925,7 +933,7 @@ impl Settings {
     }
 
     pub fn render_options(&self) -> omsi_render::RenderOptions {
-        omsi_render::RenderOptions { msaa: self.msaa, anisotropy: self.anisotropy, shadow_size: self.shadow_size, ssao: self.ssao, render_scale: self.render_scale, compress_textures: self.texture_compression, fxaa: self.post_aa != "off", min_obj_size: self.min_obj_size, max_obj_dist: self.object_distance(), omsi_shadow_casters: self.shadow_casters == "omsi", shadow_blobs: self.shadow_blobs, reflections: self.reflections, no_enhanced: !matches!(graphics_mode(&self.graphics), "enhanced" | "enhanced_plus"), ray_tracing: self.ray_tracing() || crate::ENHANCED_PLUS.load(std::sync::atomic::Ordering::Relaxed) }
+        omsi_render::RenderOptions { msaa: self.msaa, anisotropy: self.anisotropy, shadow_size: self.shadow_size, ssao: self.ssao, render_scale: self.render_scale, compress_textures: self.texture_compression, fxaa: self.post_aa != "off", min_obj_size: self.min_obj_size, max_obj_dist: self.object_distance(), omsi_shadow_casters: self.shadow_casters == "omsi", shadow_blobs: self.shadow_blobs, reflections: self.reflections, no_enhanced: !matches!(graphics_mode(&self.graphics), "enhanced" | "enhanced_plus"), ray_tracing: self.ray_tracing() || crate::ENHANCED_PLUS.load(std::sync::atomic::Ordering::Relaxed), matched_mirrors: self.mirror_matched }
     }
 }
 
@@ -1141,6 +1149,12 @@ mod tests {
         assert_eq!((d.sun_shafts, d.ssr, d.grass, d.relief, d.taa, d.sunlit_cab, d.road_tracks), (2, true, 2, true, false, true, true));
         assert_eq!((d.grass_distance, d.dashcam_lines), (45, 1080));
         assert!(d.own_snowy_roads, "openOMSI's snowy roads by default");
+        assert!(d.mirror_matched, "mirrors as the windscreen by default");
+        assert!(!Settings::from_text("mirror_matched=0
+").mirror_matched);
+        let fast = Settings { mirror_matched: false, ..Default::default() };
+        assert!(!Settings::from_text(&fast.to_text()).mirror_matched);
+        assert!(!fast.render_options().matched_mirrors && d.render_options().matched_mirrors);
         let s = Settings { sun_shafts: 3, ssr: false, grass: 0, grass_distance: 120, relief: false, taa: true, sunlit_cab: false, road_tracks: false, own_snowy_roads: false, ..Default::default() };
         assert_eq!(Settings::from_text(&s.to_text()), s);
         // out of range and junk keep to the range or the default

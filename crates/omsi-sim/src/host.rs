@@ -156,6 +156,23 @@ fn st_load(path: &std::path::Path) -> Result<Arc<omsi_texture::Image>, String> {
 /// weather is loaded or changes; NaN until then.
 static AMBIENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 
+/// The roads as the picture lays them: their snow (0..1) and how wet they are (0..1), for
+/// the snow on every vehicle's tyres (`crate::tyre_snow`). Set by the game with the weather's
+/// light; bare and dry until then.
+static ROAD_SURFACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Tell the vehicles how the roads are (see [`ROAD_SURFACE`]).
+pub fn set_road_surface(snow: f32, wet: f32) {
+    let bits = ((snow.clamp(0.0, 1.0).to_bits() as u64) << 32) | wet.clamp(0.0, 1.0).to_bits() as u64;
+    ROAD_SURFACE.store(bits, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The roads' snow and wetness (see [`set_road_surface`]).
+pub fn road_surface() -> (f32, f32) {
+    let bits = ROAD_SURFACE.load(std::sync::atomic::Ordering::Relaxed);
+    (f32::from_bits((bits >> 32) as u32), f32::from_bits(bits as u32))
+}
+
 /// Tell vehicles made from now on what the weather is (see [`VehicleHost::new`]).
 pub fn set_ambient_weather(temperature: f32, abs_humidity: f32) {
     let bits = ((temperature.to_bits() as u64) << 32) | abs_humidity.to_bits() as u64;

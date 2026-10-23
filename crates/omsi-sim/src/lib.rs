@@ -22,6 +22,7 @@ pub mod scripttex;
 pub mod startup;
 pub mod texttex;
 pub mod traffic;
+pub mod tyre_snow;
 pub mod vehicle;
 pub mod vehicle_api;
 

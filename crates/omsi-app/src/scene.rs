@@ -1883,6 +1883,61 @@ fn snowing() -> bool {
     SNOW_WEATHER.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// How a vehicle's film of water on the glass (`[alphascale] Rain_Window_…`) is drawn:
+/// with openOMSI's snow on the glass as its picture (`rain::snow_on_glass`), and as the
+/// shaders' own drops (`MaterialExtra::rain_film`) rather than its sliding texture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FilmLook {
+    snow_picture: bool,
+    procedural: bool,
+}
+
+/// [`FilmLook`] of a material slot: `rain_layer` the slot is a rain film, `own_winter` its
+/// texture is the season's own copy that the vehicle brings, `texture_rain` the original's
+/// sliding texture was asked for (`OMSI_TEXTURE_RAIN`), `snowing` it snows now.
+fn film_look(rain_layer: bool, own_winter: bool, texture_rain: bool, snowing: bool) -> FilmLook {
+    if !rain_layer {
+        return FilmLook { snow_picture: false, procedural: false };
+    }
+    if texture_rain {
+        // (the original's way: the picture of the weather at load time, drawn as it is)
+        return FilmLook { snow_picture: snowing && !own_winter, procedural: false };
+    }
+    FilmLook { snow_picture: !own_winter, procedural: true }
+}
+
+#[cfg(test)]
+mod film_look_tests {
+    use super::{film_look, FilmLook};
+
+    /// A bus loaded in the dry or in the rain still has the snow ready in its film: the
+    /// weather turned to snow later showed raindrops on the windscreen to the end of the
+    /// drive, as the film was chosen once, by the weather of the moment it was loaded.
+    #[test]
+    fn a_film_loaded_before_the_snow_can_show_it_later() {
+        assert_eq!(film_look(true, false, false, false), FilmLook { snow_picture: true, procedural: true });
+    }
+
+    /// The weather at load time no longer decides how the film looks: the shaders choose
+    /// drops or snow frame by frame (`Lighting::glass_snow`).
+    #[test]
+    fn the_weather_at_load_time_does_not_decide_the_film() {
+        for own_winter in [false, true] {
+            assert_eq!(film_look(true, own_winter, false, false), film_look(true, own_winter, false, true), "own winter picture {own_winter}");
+        }
+    }
+
+    /// A vehicle's own winter picture is its snow; the original's sliding texture (asked for
+    /// by `OMSI_TEXTURE_RAIN`) stays as it was; other slots are no film at all.
+    #[test]
+    fn own_pictures_and_the_sliding_texture_keep_their_ways() {
+        assert_eq!(film_look(true, true, false, false), FilmLook { snow_picture: false, procedural: true });
+        assert_eq!(film_look(true, false, true, true), FilmLook { snow_picture: true, procedural: false });
+        assert_eq!(film_look(true, false, true, false), FilmLook { snow_picture: false, procedural: false });
+        assert_eq!(film_look(false, false, false, true), FilmLook { snow_picture: false, procedural: false });
+    }
+}
+
 /// Whether a texture name resolves to the season's own copy of it (`texture\WinterSnow\…`,
 /// or a folder the season falls back to):
 /// a vehicle that brings its own winter picture keeps it.
@@ -6286,7 +6341,7 @@ impl World {
         // A plant (`crate::foliage`): one of its see-through textures is leaves. Then the
         // whole object bends in the wind, its trunk too, and those textures flutter on top.
         // (Never what lies on the ground.)
-        let plant = !(ot.sco.render_type.is_ground_layer() || ot.sco.surface || ot.sco.is_help_arrow)
+        let plant = !(ot.sco.render_type.is_ground_layer() || ot.sco.surface || ot.sco.is_help_arrow || crate::foliage::never_a_plant(&ot.sco.path))
             && ot.meshes.iter().any(|(_, mats, ov)| {
                 mats.iter().enumerate().any(|(slot, m)| crate::foliage::leaves(&m.texture, &ot.sco.path, material_alpha(mats, slot, ov) != AlphaMode::Opaque))
             });
@@ -12565,8 +12620,11 @@ impl World {
                     let tex_name = subst(&m.texture);
                     // The film of water on the glass (`[alphascale] Rain_Window_…`) wears
                     // snow crystals while it snows, unless the vehicle brings a seasonal
-                    // texture of its own: see `rain::snow_on_glass`.
+                    // texture of its own: see `rain::snow_on_glass`. The crystals are its
+                    // picture from the start - the drops are the shaders' own - and the
+                    // shaders show the one or the other as the weather goes (`film_look`).
                     let rain_layer = vm.overrides.iter().filter(of_slot).any(|o| o.alphascale.as_deref().is_some_and(|v| v.trim().to_ascii_lowercase().starts_with("rain_window")));
+                    let film = film_look(rain_layer, rain_layer && seasonal_texture(&tex_name, &dirs_ref), omsi_cfg::env::var_os("OMSI_TEXTURE_RAIN").is_some(), snowing());
                     let tex = if is_null_texture(&m.texture) || text_base.is_some() || script_base.is_some() || vt.texchange(&m.texture).is_some() {
                         // a slot fed by [useTextTexture] / [useScriptTexture] gets a
                         // generated picture; the name in the mesh is a placeholder and
@@ -12577,7 +12635,7 @@ impl World {
                             self.note_mirror_aspect(mi, &vm.data, slot);
                         }
                         Some(self.mirror_texture(renderer, scene, mi))
-                    } else if rain_layer && snowing() && !seasonal_texture(&tex_name, &dirs_ref) {
+                    } else if film.snow_picture {
                         tex!("", &dirs_ref, snow_glass_texture)
                     } else {
                         tex!(&tex_name, &dirs_ref)
@@ -12785,10 +12843,10 @@ impl World {
                         && alpha == AlphaMode::Blend
                         && !dirt_overlay
                         && !rain_layer;
-                    // (while it snows the film is the snow-crystal texture, drawn as it is)
                     // (all three graphics: OMSI 2's own rain, its texture sliding down the
-                    // pane, looked like wet paper next to drops that bend the street)
-                    extra.rain_film = rain_layer && !snowing() && omsi_cfg::env::var_os("OMSI_TEXTURE_RAIN").is_none();
+                    // pane, looked like wet paper next to drops that bend the street; while
+                    // it snows the shaders draw the film's snow-crystal picture instead)
+                    extra.rain_film = film.procedural;
                     // the film the wipers sweep: its water spot by spot from the wipe map
                     // (`crate::wipers`), in its light map's place - on the player's bus, and
                     // on any other of the type, which another player's may be, ridden in (the

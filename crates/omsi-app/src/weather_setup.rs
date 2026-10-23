@@ -508,6 +508,8 @@ pub(crate) fn weather_lighting(
     let lying = snow_lying(w, crate::weather_model::snow_now());
     lights::apply_weather(&mut lighting, density, kind, rate, lying.ground);
     lighting.road_snow = lying.road;
+    // (and to the tyres of every vehicle: `omsi_sim::tyre_snow`)
+    omsi_sim::host::set_road_surface(lying.road, wetness);
     lighting.slush = lying.slush;
     if let Some(custom)=CustomWeather::parse(&w.path.to_string_lossy()){
         let k=custom.brightness;
@@ -588,6 +590,8 @@ pub(crate) fn apply_weather(
     v.host.precip_type = kind as f32;
     v.host.precip_rate = rate;
     v.host.street_cond = street_condition(w, wetness);
+    // (the roads' snow for the tyres, from the start: `weather_lighting` follows it after)
+    omsi_sim::host::set_road_surface(snow_lying(w, crate::weather_model::snow_now()).road, wetness);
     v.set_var("PrecipType", kind as f32);
     v.set_var("PrecipRate", rate);
     v.host.temperature = w.temp.0;

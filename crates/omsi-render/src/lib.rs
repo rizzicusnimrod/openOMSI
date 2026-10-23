@@ -9,6 +9,7 @@ mod puddles;
 mod relief;
 pub mod road_wear;
 mod snow_cover;
+mod glass_film;
 mod snowfall;
 pub mod tracks;
 mod rt;
@@ -92,6 +93,8 @@ struct CameraUniform {
     breeze: [f32; 4],
     /// The trees through the year (`Lighting::foliage`, shader.wgsl `seasonal_colour`).
     season: [f32; 4],
+    /// x: the glass films wear snow, not drops (`Lighting::glass_snow`).
+    glass: [f32; 4],
 }
 
 /// The period the sky's cloud patterns repeat with (m): 5 x the cloud field (14 km), 8 x
@@ -210,6 +213,9 @@ pub struct LensFx {
     /// The camera sensor's lines (lens.wgsl `src`): a picture of fewer lines than the window
     /// has, scaled up to it - 0 (or more lines than the window has) the window's own.
     pub lines: f32,
+    /// How much a film camera takes down the white lamps that shine into it (0 none, 1
+    /// all): their glow, their glare and the exposure they force (`lens_lamp_kept`).
+    pub lamp_dim: f32,
 }
 
 /// How many of a sensor's pixels of `lines` make one of an output `height` px tall
@@ -257,6 +263,7 @@ impl Default for LensFx {
             soften: 0.0,
             bleed: 0.0,
             lines: 0.0,
+            lamp_dim: 0.0,
         }
     }
 }
@@ -1213,6 +1220,10 @@ pub struct Lighting {
     /// enhanced picture the view they take (`enhanced_weather_fog`) - falling snow takes far
     /// more of it than rain of the same water does.
     pub snowfall: f32,
+    /// What falls on the glass settles as snow (1) or runs as drops (0): the films of
+    /// water on the vehicles' panes (`MaterialExtra::rain_film`) show the one or the other
+    /// frame by frame, whatever the weather was when the vehicle was loaded.
+    pub glass_snow: f32,
     /// The weather's wind (m/s, world): the snowfall drifts with it, and the plants sway in
     /// it (shader.wgsl `swayed`).
     pub wind: Vec3,
@@ -1326,6 +1337,7 @@ impl Default for Lighting {
             cloud_offset: [0.0; 2],
             shadows: true,
             snowfall: 0.0,
+            glass_snow: 0.0,
             wind: Vec3::ZERO,
             gust: 0.3,
             flash: None,
@@ -1804,6 +1816,9 @@ pub struct Instance {
     /// picture: the driver at the wheel while the player looks from the driver's seat (the
     /// figure would fill the view, but the mirrors show him as OMSI does).
     pub mirror_only: bool,
+    /// The snow packed on it, a vehicle's tyre (0..1, `set_coat`): its rubber whitened. Sent
+    /// with its visibility (`params.y` 1 + coat; 0 hidden).
+    pub coat: f32,
     /// The model marks the mesh `[shadow]`: one OMSI casts a shadow from (with the
     /// option `omsi_shadow_casters` only these do).
     pub omsi_caster: bool,
@@ -2943,6 +2958,10 @@ pub struct RenderOptions {
     /// reflections, where the device can trace rays (hardware ray queries); elsewhere the
     /// enhanced picture as it is.
     pub ray_tracing: bool,
+    /// The mirrors look as the windscreen does: drawn with the enhanced shading when the
+    /// window's picture is (`enhanced_shading`), else with the plain one - cheaper, but
+    /// without the enhanced picture's snow, ruts and light.
+    pub matched_mirrors: bool,
 }
 
 impl Default for RenderOptions {
@@ -2962,6 +2981,7 @@ impl Default for RenderOptions {
             reflections: true,
             no_enhanced: false,
             ray_tracing: false,
+            matched_mirrors: true,
         }
     }
 }
@@ -7322,6 +7342,7 @@ impl Renderer {
             ordered: false,
             casts_shadow: true,
             roof: None,
+            coat: 0.0,
         });
         if scene.bounds_known.get(mesh).copied().unwrap_or(false) {
             scene.bounds_users.push(scene.instances.len() - 1);
@@ -7376,6 +7397,7 @@ impl Renderer {
             ordered: false,
             casts_shadow: false,
             roof: None,
+            coat: 0.0,
         });
         if scene.bounds_known.get(mesh).copied().unwrap_or(false) {
             scene.bounds_users.push(scene.instances.len() - 1);
@@ -7519,6 +7541,16 @@ impl Renderer {
     pub fn set_mirror_only(&self, scene: &mut Scene, instance: usize, on: bool) {
         if let Some(i) = scene.instances.get_mut(instance) {
             i.mirror_only = on;
+        }
+    }
+
+    /// The snow on a vehicle's tyre (see [`Instance::coat`]).
+    pub fn set_coat(&self, scene: &mut Scene, instance: usize, coat: f32) {
+        let coat = coat.clamp(0.0, 1.0);
+        let i = &mut scene.instances[instance];
+        if (i.coat - coat).abs() > 1e-3 || (coat == 0.0 && i.coat != 0.0) {
+            i.coat = coat;
+            Self::mark_changed(scene, instance);
         }
     }
 
@@ -8472,7 +8504,8 @@ impl Renderer {
     ) {
         let m =
             (Mat4::from_translation((i.origin - ro).as_vec3()) * i.transform).to_cols_array_2d();
-        let vis = if i.visible { 1.0 } else { 0.0 };
+        // (visible 1 and over: 1 + the snow on a tyre, `Instance::coat`)
+        let vis = if i.visible { 1.0 + i.coat.clamp(0.0, 1.0) } else { 0.0 };
         for (k, a) in i.slot_alpha.iter().enumerate() {
             mats.push(m);
             let uv = i.slot_uv.get(k).copied().unwrap_or([0.0; 2]);
@@ -9205,7 +9238,7 @@ impl Renderer {
     /// Upload this frame's coronas.
     /// `cab`: the box of the vehicle the camera is in, whose own flares Omsi.exe draws
     /// after the vehicle (0x6f0a2c -> 0x6f07bc), the others before it (0x6f0400/0x6f0418).
-    fn prepare_coronas(&self, scene: &mut Scene, night: f32, cab: Option<&(DVec3, f64, [f32; 6])>) {
+    fn prepare_coronas(&self, scene: &mut Scene, night: f32, cab: Option<&(DVec3, f64, [f32; 6])>, cam_rel: Vec3, lamp_dim: f32) {
         let ro = scene.render_origin;
         // (its lamps sit on the skin of its box: half a metre round it is the vehicle's)
         let cab = cab.map(|&(o, h, mut bb)| {
@@ -9241,6 +9274,12 @@ impl Renderer {
                     // the original: ((1 - ambient)^2 + 0.8) 0.6 times the light's
                     // brightness (the shader takes the viewing angle and clamps it to 1)
                     c.brightness * (night * night + 0.8) * 0.6
+                };
+                // (a film camera's: the white lamps shining into it taken down, `LensFx::lamp_dim`)
+                let b = if lamp_dim > 0.0 && !c.beam && c.cone_cos > -1.5 && c.direction.length_squared() > 0.25 {
+                    b * lens_lamp_kept(lamp_dim, c.direction.normalize().dot((cam_rel - p).normalize_or_zero()), c.color)
+                } else {
+                    b
                 };
                 GpuCorona {
                     pos: p.to_array(),
@@ -9816,17 +9855,24 @@ impl Renderer {
         let scene_view: &wgpu::TextureView = scene_target.as_ref().map(|t| &t.0).unwrap_or(target);
         let aspect = self.texture_aspect.unwrap_or(width as f32 / height.max(1) as f32);
         let cam_rel = (camera.position - ro).as_vec3();
-        // The mirrors are drawn with the plain shading even in Enhanced: without the depth
-        // prepass (sized for the window) every layer of a mirror's picture ran the enhanced
-        // shader, 12.7 ms of GPU time for one 256-pixel mirror against 5.8 ms for the whole
-        // window; plainly shaded it is 0.6 ms, and a mirror's small picture shows no
-        // difference worth that. `OMSI_MIRROR_ENHANCED=1` draws them enhanced again.
+        // The mirrors are drawn with the enhanced shading as the window is, unless they are
+        // to be fast (`RenderOptions::matched_mirrors` off, Settings -> Graphics, "Mirrors as
+        // the windscreen"): plainly shaded they showed the roads' snow as a thin white over
+        // the asphalt without its ruts, and a lighter, harder street than the windscreen's.
+        // (Once they were plain for their cost - 12.7 ms of GPU time for one mirror against
+        // 0.6 ms plain; now, at the TH_Wald terminus in the snow with 512-pixel mirrors, 1.9
+        // ms against 0.8.) `OMSI_MIRROR_ENHANCED=1` draws them enhanced whatever the option.
         // The headset's eyes are the real picture as much as the window is (#784: VR showed
         // the plain graphics with Enhanced on); the first eye is the one that moves the
         // exposure, the sky cube and the frame clock on, as the window does without VR.
         let xr_view = projection.is_some();
         let lead_view = (with_overlays || xr_view) && !second_eye;
-        let enhanced_frame = lighting.enhanced && self.hdr_pass.is_some() && omsi_cfg::env::var_os("OMSI_NO_ENHANCED").is_none() && (with_overlays || xr_view || omsi_cfg::env::var_os("OMSI_MIRROR_ENHANCED").is_some());
+        let enhanced_frame = enhanced_shading(
+            lighting.enhanced && self.hdr_pass.is_some() && omsi_cfg::env::var_os("OMSI_NO_ENHANCED").is_none(),
+            with_overlays,
+            xr_view,
+            self.options.matched_mirrors || omsi_cfg::env::var_os("OMSI_MIRROR_ENHANCED").is_some(),
+        );
         // the mirrors are drawn by the same path as the window (their picture graded with
         // the window's exposure, see the post passes)
         let enhanced = enhanced_frame;
@@ -9846,7 +9892,8 @@ impl Renderer {
         if omsi_cfg::env::var_os("OMSI_DEBUG_LAMP_SHADOWS").is_some() {
             log::info!("lamp shadows: {:?}", lamp_shadows.iter().map(|l| (l.index, (l.position.x * 10.0).round() / 10.0, (l.position.y * 10.0).round() / 10.0, (l.position.z * 10.0).round() / 10.0, l.range.round(), (l.fade * 100.0).round() / 100.0)).collect::<Vec<_>>());
         }
-        self.prepare_coronas(scene, lighting.night, lighting.inside.as_ref().filter(|v| point_in_vehicle_box(camera.position, v)));
+        let lamp_dim = lens.as_ref().map_or(0.0, |l| l.lamp_dim);
+        self.prepare_coronas(scene, lighting.night, lighting.inside.as_ref().filter(|v| point_in_vehicle_box(camera.position, v)), cam_rel, lamp_dim);
         self.prepare_smoke(scene, camera.position);
         // ambient occlusion only for the real picture, not for the mirrors
         // Enhanced+: the window's picture traces its sun shadow and ambient occlusion (not the
@@ -10171,6 +10218,7 @@ impl Renderer {
             lamp_fade: std::array::from_fn(|k| lamp_shadows.get(k).map_or(0.0, |l| l.fade)),
             breeze: [lighting.wind.x, lighting.wind.y, lighting.gust.clamp(0.0, 1.0), if sway_off() { 0.0 } else { lighting.sway.clamp(0.0, 4.0) }],
             season: lighting.foliage.map(|v| v.clamp(0.0, 1.0)),
+            glass: [lighting.glass_snow.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cu));
@@ -10183,7 +10231,7 @@ impl Renderer {
         // unless it comes before the window's first frame)
         if enhanced && lead_view {
             self.view_lamps = Some(view_lamp_light(scene, cam_rel, camera.forward()));
-            self.lamp_glare = lamp_glare(scene, cam_rel, camera.forward());
+            self.lamp_glare = lamp_glare(scene, cam_rel, camera.forward(), lamp_dim);
             if omsi_cfg::env::var_os("OMSI_DEBUG_VIEW_LAMPS").is_some() {
                 log::info!("view lamps: {:.6}, headlamp glare at the eye {:.6}", self.view_lamps.unwrap_or(0.0), self.lamp_glare.1);
             }
@@ -13357,7 +13405,7 @@ const GLARE_FLOOR: f32 = 1e-6;
 /// their light, and the light of all of them. A full beam a hundred metres off blinds: the
 /// eye's own scattered light veils the road round it (fog_lamps.wgsl `lamp_glare`) and the
 /// eye closes down to it (`GLARE_ADAPT`).
-fn lamp_glare(scene: &Scene, cam_rel: Vec3, forward: Vec3) -> ([[f32; 4]; GLARE_LAMPS], f32) {
+fn lamp_glare(scene: &Scene, cam_rel: Vec3, forward: Vec3, lamp_dim: f32) -> ([[f32; 4]; GLARE_LAMPS], f32) {
     let ro = scene.render_origin;
     let mut found: Vec<[f32; 4]> = Vec::new();
     let mut total = 0.0;
@@ -13385,8 +13433,13 @@ fn lamp_glare(scene: &Scene, cam_rel: Vec3, forward: Vec3) -> ([[f32; 4]; GLARE_
             continue;
         }
         let e = e * atmosphere::smoothstep(0.0, 0.5, ahead);
-        total += e;
-        found.push([-to_eye.x, -to_eye.y, -to_eye.z, e]);
+        // (a film camera's: taken down with the lamp's glow, and so the exposure it forces -
+        // the operator exposes for the bus, not for its headlamps - and its veil twice over:
+        // a lens scatters far less of a lamp's light round it than an eye does, and taken
+        // down once the veil still lay as two blinding discs over a bus filmed from in front)
+        let kept = lens_lamp_kept(lamp_dim, l.direction.normalize_or_zero().dot(t), l.color);
+        total += e * kept;
+        found.push([-to_eye.x, -to_eye.y, -to_eye.z, e * kept * kept]);
     }
     found.sort_by(|a, b| b[3].total_cmp(&a[3]));
     let mut out = [[0.0; 4]; GLARE_LAMPS];
@@ -13398,6 +13451,77 @@ fn lamp_glare(scene: &Scene, cam_rel: Vec3, forward: Vec3) -> ([[f32; 4]; GLARE_
 
 /// How far a headlamp is still taken as shining into the eye (m).
 const GLARE_REACH: f32 = 600.0;
+
+/// How much of a lamp's glow a film camera keeps (`LensFx::lamp_dim`): a white lamp - a
+/// headlamp, a reversing lamp - that shines into its lens is taken down by `dim`, the more
+/// the more squarely it faces the camera (`facing`: the cosine between the way the lamp
+/// faces and the way to the camera); the coloured ones (tail, brake, indicator lamps) and
+/// the lamps seen from the side are left as they are. The cinematic camera stood in the
+/// beams of the bus it filmed at night, and its headlamps were two blinding discs that put
+/// the picture round them in the dark.
+fn lens_lamp_kept(dim: f32, facing: f32, color: [f32; 3]) -> f32 {
+    let dim = dim.clamp(0.0, 1.0);
+    let hi = color[0].max(color[1]).max(color[2]);
+    if dim <= 0.0 || hi <= 0.0 {
+        return 1.0;
+    }
+    let lo = color[0].min(color[1]).min(color[2]);
+    // (a halogen lamp's warm white is white; a yellow fog lamp, an indicator are not)
+    let white = atmosphere::smoothstep(0.35, 0.7, lo / hi);
+    let into = atmosphere::smoothstep(0.2, 0.9, facing);
+    1.0 - dim * white * into
+}
+
+/// Whether a view is drawn with the enhanced shading: with the enhanced graphics on
+/// (`graphics`), the window's picture and the headset's eyes always, the mirrors when they
+/// are to look as the windscreen does (`RenderOptions::matched_mirrors`). Drawn plainly, a
+/// mirror showed the roads' snow as a thin white over the asphalt, no ruts, and a street
+/// lighter and harder than the one through the windscreen beside it.
+fn enhanced_shading(graphics: bool, window: bool, headset: bool, matched_mirrors: bool) -> bool {
+    graphics && (window || headset || matched_mirrors)
+}
+
+#[cfg(test)]
+mod shading_tests {
+    use super::enhanced_shading;
+
+    #[test]
+    fn a_mirror_is_shaded_as_the_window_when_matched() {
+        assert!(enhanced_shading(true, false, false, true), "a matched mirror");
+        assert!(!enhanced_shading(true, false, false, false), "a fast mirror");
+        assert!(enhanced_shading(true, true, false, false) && enhanced_shading(true, false, true, false), "the window and the headset");
+        assert!(!enhanced_shading(false, true, false, true), "no enhanced graphics");
+    }
+}
+
+#[cfg(test)]
+mod lens_lamp_tests {
+    use super::lens_lamp_kept;
+
+    const WHITE: [f32; 3] = [1.0, 0.97, 0.9];
+    const RED: [f32; 3] = [1.0, 0.05, 0.02];
+
+    #[test]
+    fn a_white_lamp_shining_into_the_lens_is_taken_down() {
+        assert!((lens_lamp_kept(0.65, 1.0, WHITE) - 0.35).abs() < 1e-4);
+        assert!(lens_lamp_kept(0.65, 0.95, WHITE) < 0.5);
+    }
+
+    #[test]
+    fn nothing_is_taken_without_the_setting_nor_from_the_side_nor_from_red_lamps() {
+        assert_eq!(lens_lamp_kept(0.0, 1.0, WHITE), 1.0);
+        assert_eq!(lens_lamp_kept(0.65, 0.0, WHITE), 1.0);
+        assert_eq!(lens_lamp_kept(0.65, -1.0, WHITE), 1.0);
+        assert_eq!(lens_lamp_kept(0.65, 1.0, RED), 1.0);
+    }
+
+    #[test]
+    fn the_more_squarely_it_faces_the_lens_the_more_is_taken() {
+        let kept: Vec<f32> = [0.2, 0.4, 0.6, 0.8, 1.0].iter().map(|&f| lens_lamp_kept(0.65, f, WHITE)).collect();
+        assert!(kept.windows(2).all(|w| w[1] <= w[0]), "{kept:?}");
+        assert!(kept[0] > kept[4]);
+    }
+}
 
 /// Whether one of the vehicles in a beam's `mask` (`PointLight::blockers`) stands between
 /// its lamp at `from` and `to` (both render-origin relative).

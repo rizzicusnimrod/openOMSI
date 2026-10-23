@@ -1034,6 +1034,8 @@ pub struct VehicleInstance {
     /// How dirty the body is (0..1). OMSI reports it to the model as `Dirt_Norm`, where
     /// it scales the alpha of the dirt overlay; the bus wash clears it.
     pub dirt: f32,
+    /// The snow packed on its tyres (0..1, `crate::tyre_snow`): whitens their rubber.
+    pub tyre_snow: f32,
     /// Rigid-body dynamics (player vehicles); None = simple kinematic model.
     pub rigid: Option<crate::rigid::RigidBody>,
     /// The tyre meshes that are seated on their physical hub (see `seat_wheels`): mesh,
@@ -1328,6 +1330,7 @@ impl VehicleInstance {
             crashes: 0,
             last_impact: 0.0,
             dirt: 0.0,
+            tyre_snow: 0.0,
             rigid: None,
             wheel_seats: None,
             ai_odometer: 0.0,
@@ -2139,6 +2142,13 @@ impl VehicleInstance {
     /// of the dirt overlay), `DirtRate` how fast the windscreen is soiling right now
     /// (`dirt.osc` adds it up into `Dirt_Wiped`, which the wipers clear), and `PrecipRate`
     /// is signed, so rain wets the glass in `rain.osc` and dry weather dries it again.
+    /// The snow on the tyres after `dt` seconds on the roads as they are now
+    /// (`host::road_surface`).
+    fn roll_tyre_snow(&mut self, dt: f32) {
+        let (snow, wet) = crate::host::road_surface();
+        self.tyre_snow = crate::tyre_snow::step(self.tyre_snow, dt, self.physics.speed, snow, wet);
+    }
+
     fn update_dirt(&mut self, dt: f32) {
         let rain = self.host.precip_rate.clamp(0.0, 1.0);
         let speed = (self.physics.velocity_kmh().abs() / 50.0).min(2.0);
@@ -2340,6 +2350,7 @@ impl VehicleInstance {
             self.host.coll_energy = 0.0;
         }
         self.update_dirt(dt);
+        self.roll_tyre_snow(dt);
         // (signed, as Omsi.exe 0x7e5163 adds it: reversing takes it back)
         self.driven_km += (self.physics.velocity_kmh() as f64 / 3600.0) * dt as f64;
         self.update_engine_vars(dt);
@@ -2456,6 +2467,7 @@ impl VehicleInstance {
         self.host.clock.advance(dt);
         self.physics.speed = ai.speed;
         self.physics.steer_deg = ai.steer_deg;
+        self.roll_tyre_snow(dt);
         let v_kmh = ai.speed * 3.6;
         self.put(self.v_velocity, v_kmh);
         self.put(self.v_velocity_ground, v_kmh);

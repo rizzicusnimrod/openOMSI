@@ -9099,6 +9099,7 @@ impl Traffic {
                 renderer.set_slot_light(scene, *inst, &p.slot_light);
                 renderer.set_slot_night(scene, *inst, &p.slot_night);
                 renderer.set_interior(scene, *inst, p.interior);
+                renderer.set_coat(scene, *inst, crate::player::tyre_coat(c.vehicle.tyre_snow, def));
             }
             for (t, r) in c.vehicle.trailers.iter().zip(&c.trailer_renders) {
                 for (i, inst) in r.instances.iter().enumerate() {
@@ -9123,6 +9124,7 @@ impl Traffic {
                     renderer.set_slot_light(scene, *inst, &p.slot_light);
                     renderer.set_slot_night(scene, *inst, &p.slot_night);
                     renderer.set_interior(scene, *inst, p.interior);
+                    renderer.set_coat(scene, *inst, crate::player::tyre_coat(c.vehicle.tyre_snow, def));
                 }
             }
         }

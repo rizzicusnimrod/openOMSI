@@ -103,6 +103,7 @@ pub fn apply_weather(
     l.overcast = overcast;
     l.rain = rain;
     l.snowfall = if precip_kind == 2 { rain } else { 0.0 };
+    l.glass_snow = if precip_kind == 2 { 1.0 } else { 0.0 };
     let gloom = (overcast * 0.5 + rain * 0.5).clamp(0.0, 1.0);
     l.night = l.night.max(0.45 * gloom);
     // (night maps on with the street lamps, or where the weather makes it that dark: a
@@ -1145,6 +1146,23 @@ const AI_BEAM_SEEN: f64 = 450.0;
 /// is also brighter ahead, as one is.)
 fn spot_reach(range: f32, low: f32) -> f32 {
     range.clamp(10.0, low).max(range * low / 100.0).min(low * 5.0)
+}
+
+#[cfg(test)]
+mod glass_tests {
+    /// Falling snow settles on the glass as crystals, rain as drops, whatever the weather
+    /// was when the bus was loaded (the film is drawn by `Lighting::glass_snow` each frame).
+    #[test]
+    fn snowfall_turns_the_glass_to_snow_and_rain_to_drops() {
+        let glass = |kind: i32, rate: f32| {
+            let mut l = omsi_render::Lighting::default();
+            super::apply_weather(&mut l, 0.8, kind, rate, 0.0);
+            l.glass_snow
+        };
+        assert_eq!(glass(2, 0.6), 1.0, "snowfall");
+        assert_eq!(glass(1, 0.6), 0.0, "rain");
+        assert_eq!(glass(0, 0.0), 0.0, "dry");
+    }
 }
 
 #[cfg(test)]

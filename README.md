@@ -81,7 +81,9 @@ plain openOMSI's releases. *Settings → Install updates without asking* skips t
   away in daylight.
 * **Windscreen rain with real wipers:** the water on your windscreen builds up drop by drop and
   each blade clears the band it sweeps; it comes back faster standing still, and spray from the
-  car ahead on a wet road wets it too.
+  car ahead on a wet road wets it too. A soaked pane veils the street between its drops, so
+  the wipers matter. In a snowfall the panes gather snow instead - also when the weather
+  turns to snow during a drive - and the wipers sweep it off.
 * No light column over low beams in rain, softer lamp-lit fog, and the weather's own cloud
   picture on the sky.
 
@@ -89,7 +91,10 @@ plain openOMSI's releases. *Settings → Install updates without asking* skips t
 
 * **Trees in the wind:** trees, bushes, hedges and grass sway with the weather's wind, gusts
   sweep across the land and leaves flutter (*Wind in the trees* in the Graphics settings).
-  Which objects are plants is listed in `foliage.cfg`, like the reflective signs.
+  Which objects are plants is listed in `foliage.cfg`, like the reflective signs; a plant's
+  word counts only at the start or the end of a word of a texture's name (a road sign's
+  *Verkehrszeichen* holds no oak), the map's own places are no plants (Thüringer Wald's
+  *Lichtentanne*) and neither are parked vehicles.
 * **Trees through the year:** autumn colours from mid-September, bare crowns in winter and
   fresh green in spring, on maps that have no seasonal trees of their own (conifers stay
   green).
@@ -108,7 +113,8 @@ plain openOMSI's releases. *Settings → Install updates without asking* skips t
   the tyres' lines running along them. Thin snow lies in patches, fresh snow glints here and
   there in the sun, and the falling flakes streak past as you drive (Enhanced
   graphics; *openOMSI snowy roads* in the Graphics settings switches back to the maps' own
-  snowy road pictures).
+  snowy road pictures). Driving on a snowy road packs snow into the tyres' treads - more
+  the slower you go, worn off again on cleared roads - on every vehicle.
 
 ### Light and surfaces (Enhanced graphics)
 
@@ -116,6 +122,9 @@ plain openOMSI's releases. *Settings → Install updates without asking* skips t
   morning's ground mist (*Sun shafts*: Off, Low, Medium, High).
 * **Street reflections on vehicles:** bus paint, chrome and windows mirror the street and the
   cars round about, not only the sky.
+* **Mirrors as the windscreen:** the mirrors show the same snow, light and colours as the view
+  ahead (switch *Mirrors as the windscreen* off in the Graphics settings for the plainer, a
+  little faster mirrors).
 * **Sunlit cab:** the cab is lit through its windows, brighter on the sunny side, and the
   sun's patches move over the dash and the floor.
 * **Relief on old textures:** cobbles, brick, stone and bark get a soft relief made from their
@@ -161,7 +170,8 @@ plain openOMSI's releases. *Settings → Install updates without asking* skips t
   over-the-shoulder and bird's-eye shots, each placed where nothing blocks the view. Film looks
   (teal and orange, warm film, black and white...), letterbox, focus on the bus with depth of
   field, motion blur, anamorphic streaks and sun flares. **Ctrl+F3** again cuts to the next shot,
-  **Ctrl+F2** holds the shot. You keep driving while it films.
+  **Ctrl+F2** holds the shot. You keep driving while it films. At night the headlamps shining
+  into it are taken down so they don't blind the shot (*Headlamps into the camera*).
 * **Dashcam view** (**Ctrl+F1**): a camera at the top of the windscreen with a fisheye lens,
   colour fringes, sensor noise (lots of it at night), video compression smear, rolling-shutter
   lean and wobble, mount shake over bumps, stars round lamps, and the date, time and speed in the

@@ -217,8 +217,10 @@ pub(crate) fn tread(n: f32, fade: f32) -> f32 {
 }
 
 /// The snow's crystal cells to the metre (1.5 cm each).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const GLINT_PER_M: f32 = 66.0;
 /// The share of the cells whose crystal is turned to glint at all.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const GLINT_SHARE: f32 = 0.015;
 /// How bright a glint is, square on, against the sunlight on the snow.
 pub(crate) const GLINT_PEAK: f32 = 5.0;
