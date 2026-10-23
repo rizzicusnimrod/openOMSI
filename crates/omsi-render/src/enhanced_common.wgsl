@@ -58,10 +58,14 @@ struct Enhanced {
     // phase two's looks (lib.rs `Looks::row`): x the vehicles' screen-space reflections,
     // y relief from the textures' brightness, z the sunlit cab, w tyre tracks (1 on each)
     looks: vec4<f32>,
-    // the lanes near the camera (lib.rs `tracks::rows`): xy one end of a segment of a lane's
-    // centre line, zw the other; `track_info.x` of them, y how far the road is drying
-    tracks: array<vec4<f32>, 48>,
+    // y how far the road is drying (tracks.rs `drying`)
     track_info: vec4<f32>,
+    // the snow lying (snow_cover.rs `snow_row`): x on the ground, y on the roads, z the
+    // slush, w how hard it snows
+    snow: vec4<f32>,
+    // the traffic's wear map (road_wear.rs): xy its south-west corner (render-origin
+    // relative), z 1 / its side, w 1 when there is one
+    wear: vec4<f32>,
 };
 @group(0) @binding(11) var<uniform> enh: Enhanced;
 @group(0) @binding(13) var s_lin: sampler;

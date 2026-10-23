@@ -294,6 +294,7 @@ pub const OPTIONS: &[PageDef] = &[
                 it("sunlit_cab", "Sunlit cab", "Sun patches move over the dash and the floor"),
                 it("relief", "Relief on old textures", "Cobbles, brick and bark get a soft relief"),
                 it("road_tracks", "Tyre tracks", "Wheel tracks on drying roads and in the snow"),
+                it("own_snowy_roads", "openOMSI snowy roads", "Ruts, banked snow and slush instead of the map's snowy road pictures"),
                 it("taa", "Temporal anti-aliasing", "Steadies shimmering branches; lets a lower MSAA look as smooth"),
             ]),
             sec("Detail", &[

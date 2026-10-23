@@ -54,6 +54,8 @@ struct SnowParams {
     // x how hard it snows (0..1), y the flakes' mean diameter (m), zw how many flakes the
     // first two layers hold (the rest are the third's)
     fall: vec4<f32>,
+    // xyz the camera's velocity (m/s), w how long the picture takes a flake in (s)
+    motion: vec4<f32>,
 };
 @group(1) @binding(0) var<uniform> sp: SnowParams;
 
@@ -63,7 +65,15 @@ struct SnowOut {
     // the flake's cover (alpha), and its place (for its light)
     @location(1) cover: f32,
     @location(2) pos: vec3<f32>,
+    // how much of the quad's length is the streak's straight part (0: a round flake)
+    @location(3) stretch: f32,
 };
+
+// How much of a flake `dist` m from the eye is drawn (snowfall.rs `near_fade`): a flake at
+// the eye is out of all focus, a faint blur at most.
+fn near_fade(dist: f32) -> f32 {
+    return smoothstep(0.3, 1.0, dist);
+}
 
 // The layers round the camera: half width, bottom and top (m).
 const LAYER_H = array<vec3<f32>, 3>(vec3<f32>(4.0, -2.5, 5.5), vec3<f32>(10.0, -3.0, 9.0), vec3<f32>(24.0, -3.0, 16.0));
@@ -151,21 +161,34 @@ fn vs_snow(@builtin(vertex_index) vid: u32, @builtin(instance_index) k: u32) -> 
     // brightness goes with the square root of its light (Stevens' power law)
     let rad = d * 0.5;
     let rs = max(sqrt(rad * rad + 0.0025 * 0.0025), dist * 0.0016);
-    out.cover = fade * sqrt(rad / rs);
+    // the streak it sweeps while the picture takes it in - falling, drifting, and above all
+    // the camera moving past it - across the line of sight, its light spread along it
+    // (snowfall.rs `flake_streak`; seen, as its size above, by the square root)
+    let flake_v = sp.wind.xyz * 0.6 + vec3<f32>(-sin(ph), cos(ph), 0.0) * (sway * pace) - vec3<f32>(0.0, 0.0, fall);
+    let moving = flake_v - sp.motion.xyz;
+    let across = moving - vdir * dot(moving, vdir);
+    let half = min(length(across) * sp.motion.w * 0.5, 0.75);
+    out.cover = fade * sqrt(rad / rs) * sqrt(rs / (rs + half)) * near_fade(dist);
     if (out.cover < 0.004) {
         return out;
     }
     var ax = cross(vec3<f32>(0.0, 0.0, 1.0), vdir);
     ax = select(vec3<f32>(1.0, 0.0, 0.0), normalize(ax), length(ax) > 1e-4);
+    if (half > rs * 0.05) {
+        ax = normalize(across);
+    }
     let ay = cross(vdir, ax);
-    out.clip = camera.view_proj * vec4<f32>(p + (ax * c.x + ay * c.y) * rs, 1.0);
+    out.clip = camera.view_proj * vec4<f32>(p + ax * (c.x * (rs + half)) + ay * (c.y * rs), 1.0);
     out.uv = c;
     out.pos = p;
+    out.stretch = half / (rs + half);
     return out;
 }
 
 fn flake_alpha(in: SnowOut) -> f32 {
-    let r = length(in.uv);
+    // (a streak: the round flake drawn out along the quad's length)
+    let x = max(abs(in.uv.x) - in.stretch, 0.0) / max(1.0 - in.stretch, 1e-3);
+    let r = length(vec2<f32>(x, in.uv.y));
     return clamp(in.cover * (1.0 - smoothstep(0.55, 1.0, r)), 0.0, 1.0);
 }
 

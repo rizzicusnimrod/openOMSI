@@ -757,6 +757,8 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
     // not either, and OMSI's foliage points every leaf's normal up so the whole crown is lit
     // evenly - turned round, the crown went dark above the horizon line)
     var n = safe_normal(in.normal);
+    // how much ground a pixel spans here (m): the snow's glints fade where it holds many
+    let footprint = length(fwidth(in.world));
     // the map's water (`MaterialExtra::water`): small waves running over it ripple its
     // normal - fading with the distance, where they would only flicker - so that what it
     // mirrors breaks up as on a lake instead of standing in it as in a pane of glass (#841)
@@ -910,14 +912,44 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
     // rain: roads with [moisture] turn dark and smooth, everything outside a little glossier
     // (not under snow: a snowy road took the rain's gloss and the snow on it shone like
     // plastic in every headlight)
-    let dry_snow = 1.0 - clamp(enh.weather.y, 0.0, 1.0);
-    // tyre tracks (tracks.wgsl, `enh.looks.w`): the wheel lines along the lanes - dry first
-    // on a drying road, pressed to grey slush in the snow - on the roads near the eye
-    var track = 0.0;
-    if (enh.looks.w > 0.5 && material.params2.z > 0.0 && !terrain && dist < TRACK_REACH && outside > 0.5) {
-        track = track_at(in.world.xy) * (1.0 - smoothstep(TRACK_REACH * 0.7, TRACK_REACH, dist));
+    // (a road - a `[moisture]` surface, not the terrain - takes the roads' snow: a snowy
+    // day's cleared roads stay wet and dark, snow_cover.wgsl)
+    let is_road = material.params2.z > 0.0 && !terrain;
+    // (a texture that is the season's snow picture shows the map's own snow as OMSI 2 does:
+    // see the vanilla shader, #879)
+    let snow_picture = in.params2.w > 1.5 || material.ambient.w > 0.5;
+    // the traffic's wear on a road (road_wear.rs, snow_cover.wgsl): its lanes' ruts, the
+    // line between two lanes, the kerb - for the snow on it and the tyres' drier lines on a
+    // drying road (`enh.looks.w`: the tyre tracks setting)
+    var wear = Wear(WEAR_RANGE, 0.0, 1.6, WEAR_RANGE);
+    // (the ruts' strength along the road, where they are worn through and the tyres' fine
+    // lines in them, `rut_noise`)
+    var ruts_come = vec3<f32>(0.5, 0.0, 0.5);
+    if (is_road && outside > 0.5 && (enh.looks.w > 0.5 || enh.snow.x > 0.0)) {
+        wear = road_wear(in.world.xy);
+        let pattern = world_pattern_xy(in.world);
+        if (enh.snow.x > 0.0 && wear.d < WEAR_RANGE) {
+            ruts_come = rut_noise(in.world.xy, pattern, wear.d, 1.0 - smoothstep(60.0, 120.0, dist));
+        }
+        // (no driver keeps to a line: the ruts wander a hand's breadth along the road, their
+        // edges ragged)
+        wear.d = max(wear.d + (vnoise_f(pattern, 0.11, vec2<f32>(3.0, 7.0)) - 0.5) * 0.24 + (vnoise_f(pattern, 1.3, vec2<f32>(8.0, 1.0)) - 0.5) * 0.1, 0.0);
     }
-    let wet_road = camera.shadow.w * material.params2.z * outside * dry_snow * (1.0 - 0.7 * track * enh.track_info.y);
+    // (far off, where a pixel spans the ruts, they are one grey over the lane: `rut_seen`)
+    let rut_far = smoothstep(70.0, 180.0, dist);
+    let track = select(0.0, rut_seen(wear.d, wear.half_width, rut_far), enh.looks.w > 0.5);
+    // a road's snow (snow_cover.wgsl `road_layers`): x white, y pressed grey in the ruts, z
+    // slush; the rest of it bare asphalt
+    var road_snow = vec3<f32>(0.0);
+    if (is_road && !snow_picture && enh.snow.x > 0.0) {
+        road_snow = streaked(road_layers(enh.snow.y, enh.snow.x, enh.snow.z, wear, rut_far), ruts_come.x, ruts_come.y, wear.traffic);
+    }
+    let lying = select(enh.snow.x, road_snow.x + road_snow.y, is_road && !snow_picture);
+    let dry_snow = 1.0 - lying;
+    // (a cleared road in a thaw is wet with the melt water, whatever the rain left; slush is
+    // wet through)
+    let road_water = max(max(camera.shadow.w, melt_wet(enh.snow.x, enh.snow.y, enh.snow.z)), road_snow.z);
+    let wet_road = road_water * material.params2.z * outside * dry_snow * (1.0 - 0.7 * track * enh.track_info.y);
     let wet_any = camera.shadow.w * outside * select(0.35, 0.0, glass) * dry_snow;
     var puddle = 0.0;
     if (wet_road > 0.0) {
@@ -931,7 +963,7 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
         // look tied together) picks out patches that grow with the wetness and vanish again
         // as the road dries; a puddle goes glass-flat and mirrors what is above it. While it
         // is actually raining rather than merely wet, and never while it is snow settling
-        // instead (`enh.weather.z` is fed by any precipitation, `.y` singles snow back out),
+        // instead (`enh.weather.z` is fed by any precipitation, `enh.snow.w` the snowfall's),
         // concentric rings cross a puddle where drops land, fading as they widen - the other
         // half of the wheel splashes in `puddles.rs`.
         let pattern_xy = world_pattern_xy(in.world);
@@ -944,7 +976,7 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
             // across, every drop looked like a puddle of its own. Cells run at their own pace
             // and only some of them carry a drop at a time, so the surface reads as many small
             // impacts rather than one pulsing pattern.
-            let raining = enh.weather.z * (1.0 - enh.weather.y);
+            let raining = max(enh.weather.z - enh.snow.w, 0.0);
             let ripple = puddle_ripple(pattern_xy, camera.post.y, raining, puddle);
             // Standing water hides most of the fine asphalt grain. Keep dry and damp
             // asphalt's detail, but let the reflected image read across a filled pool.
@@ -971,26 +1003,62 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
     }
     // snow lies on what faces up
     // (not on a shadow blob: whitened, it lit the snow under the bus instead of shading it)
-    // (nor on a texture that is the season's snow picture, which shows the map's own snow
-    // as OMSI 2 does: see the vanilla shader, #879)
-    let snow = enh.weather.y * outside * select(1.0, 0.0, in.params2.w > 1.5 || material.ambient.w > 0.5);
-    if (snow > 0.0) {
-        let up = clamp(n.z, 0.0, 1.0);
-        let ground = select(0.0, 1.0, terrain || material.params2.z > 0.0);
-        // (the tyres' lines in it are pressed down: less of the white, `track`)
-        let cover = snow * clamp(max(ground, smoothstep(0.78, 0.95, up) * 0.8), 0.0, 1.0) * (0.55 + 0.35 * tex.a) * (1.0 - 0.75 * track);
-        albedo = mix(albedo, vec3<f32>(0.82, 0.84, 0.88), cover);
-        ambient_albedo = mix(ambient_albedo, vec3<f32>(0.82, 0.84, 0.88), cover);
-        // fresh snow is all but matte: it scatters the light and shows no highlight
-        rough = mix(rough, 0.95, cover);
-        f0 = mix(f0, vec3<f32>(0.02), cover);
-        metal = metal * (1.0 - cover);
-        // the slush in the tracks: grey-brown, wet and a little glossy
-        let slush = track * snow;
-        if (slush > 0.0) {
-            albedo = mix(albedo, vec3<f32>(0.3, 0.29, 0.27), slush * 0.6);
-            ambient_albedo = mix(ambient_albedo, vec3<f32>(0.3, 0.29, 0.27), slush * 0.6);
-            rough = mix(rough, 0.3, slush);
+    // (nor on a texture that is the season's snow picture, `snow_picture`)
+    // The snow's own surface (snow_cover.wgsl): its white from patch to patch, its relief -
+    // drifts and lumps - and near the eye its crystals glinting in the sun (`glitter`, taken
+    // into the sun's light below).
+    var glitter = 0.0;
+    let snow_near = 1.0 - smoothstep(40.0, 90.0, dist);
+    let snow_pattern = world_pattern_xy(in.world);
+    if (is_road && !snow_picture) {
+        // a road: its layers (`road_snow`) over the asphalt, the slush first, then the snow
+        // the tyres pressed hard and grey, polished a little, then the loose white snow
+        let k = outside;
+        let slush = road_snow.z * k;
+        albedo = mix(albedo, vec3<f32>(0.30, 0.29, 0.27), slush * 0.85);
+        ambient_albedo = mix(ambient_albedo, vec3<f32>(0.30, 0.29, 0.27), slush * 0.85);
+        rough = mix(rough, 0.18, slush);
+        let packed = road_snow.y * k;
+        // (pressed snow is greyer where the tyres' many lines run in it, and polished
+        // smoother there)
+        let pressed_grey = mix(vec3<f32>(0.45, 0.45, 0.46), vec3<f32>(0.68, 0.69, 0.71), ruts_come.z);
+        albedo = mix(albedo, pressed_grey, packed);
+        ambient_albedo = mix(ambient_albedo, pressed_grey, packed);
+        rough = mix(rough, mix(0.32, 0.6, ruts_come.z), packed);
+        f0 = mix(f0, vec3<f32>(0.02), packed);
+        let cover = road_snow.x * k;
+        if (cover > 0.0) {
+            // (a busy road's snow is greyer than the fields', the traffic's dirt in it)
+            let lanes = 1.0 - smoothstep(WEAR_RANGE - 1.0, WEAR_RANGE, wear.d);
+            // (and a road's snow is trodden and fine-grained, a little duller than the fields')
+            let white = mix(snow_white(vnoise_f(snow_pattern, 0.05, vec2<f32>(5.0, 1.0))) * 0.93, vec3<f32>(0.60, 0.59, 0.57), 0.22 * wear.traffic * lanes);
+            albedo = mix(albedo, white, cover);
+            ambient_albedo = mix(ambient_albedo, white, cover);
+            // fresh snow is all but matte: it scatters the light and shows no highlight
+            rough = mix(rough, 0.95, cover);
+            f0 = mix(f0, vec3<f32>(0.02), cover);
+            n = normalize(mix(n, snow_relief(snow_pattern, n, 0.12 * snow_near), cover));
+            glitter = cover * snow_near;
+        }
+        metal = metal * (1.0 - cover - packed);
+    } else {
+        let snow = lying * outside * select(1.0, 0.0, snow_picture);
+        if (snow > 0.0) {
+            let up = clamp(n.z, 0.0, 1.0);
+            let ground = terrain || material.params2.z > 0.0;
+            // thin snow in patches, the sheltered spots first (`patchy`); on a ledge it
+            // stops with a ragged edge
+            let lump = 0.7 * vnoise_f(snow_pattern, 0.25, vec2<f32>(4.0, 8.0)) + 0.3 * vnoise_f(snow_pattern, 1.1, vec2<f32>(6.0, 2.0));
+            let facing = select(smoothstep(0.78, 0.95, up + (lump - 0.5) * 0.12) * 0.8 * (0.55 + 0.35 * tex.a), 0.97, ground);
+            let cover = patchy(snow, lump) * facing;
+            let white = snow_white(vnoise_f(snow_pattern, 0.05, vec2<f32>(5.0, 1.0)));
+            albedo = mix(albedo, white, cover);
+            ambient_albedo = mix(ambient_albedo, white, cover);
+            rough = mix(rough, 0.95, cover);
+            f0 = mix(f0, vec3<f32>(0.02), cover);
+            metal = metal * (1.0 - cover);
+            n = normalize(mix(n, snow_relief(snow_pattern, n, select(0.06, 0.2, ground) * snow_near), cover));
+            glitter = cover * snow_near;
         }
     }
     // specular antialiasing: where the normal turns quickly across a pixel (a low-poly
@@ -1056,6 +1124,10 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
             let h = normalize(s + v);
             let spec = d_ggx(max(dot(n, h), 0.0), a) * v_smith(nv, nl, a) * f_schlick(f0, dot(v, h));
             direct = e_sun * nl * (sf.albedo / PI * (vec3<f32>(1.0) - f_schlick(f0, nl)) + spec);
+            // the snow's crystals, each a tiny mirror, glinting (snow_cover.wgsl `glint_dot`)
+            if (glitter > 0.0) {
+                direct = direct + e_sun * nl * glitter * sparkle(glint_dot(snow_pattern, n, s, v), footprint);
+            }
         }
     }
     // --- the moon: by night a directional light as the sun is, with its shadow when the

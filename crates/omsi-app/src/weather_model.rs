@@ -120,6 +120,12 @@ pub fn stop() {
     *CURRENT.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
+/// The snow the running model has lying now: its cover (0..1) and depth (cm); None when no
+/// model runs (the weather's own `[snow]` says it then).
+pub fn snow_now() -> Option<(f32, f32)> {
+    SESSION.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|s| (s.model.snow_cover, s.model.snow_depth))
+}
+
 /// Carry the model on to `clock` (started again where the map's place differs from the
 /// one it was started for, or the clock jumped back or more than a day on) and give its
 /// weather; None when no model runs.

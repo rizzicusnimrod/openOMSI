@@ -388,6 +388,8 @@ pub(crate) fn run_offscreen(
     // the tyres' spray (see `puddles`): the roads as wet as the picture draws them, the air
     // moving with the weather's wind ([wind] direction (deg) speed (m/s))
     let mut spray = puddles::Spray::new();
+    // the traffic's wear on the roads (the snow's ruts and banks), drawn as the camera goes
+    let mut road_wear = crate::tracks::RoadWear::default();
     let spray_wet = puddles::road_wetness(initial_wetness(&weather), weather.snow);
     let spray_wind = Vec3::new(weather.wind.0.to_radians().sin(), weather.wind.0.to_radians().cos(), 0.0) * weather.wind.1 * puddles::GROUND_WIND;
     let mut demo = args.demo.as_deref().and_then(crate::demo::Demo::new);
@@ -1400,7 +1402,9 @@ pub(crate) fn run_offscreen(
                 );
                 lightning.apply(&mut lighting);
                 lighting.foliage = crate::foliage::season(snap_clock.day_of_year.max(1) as u32, settings.seasonal_foliage);
-                lighting.tracks = crate::tracks::for_frame(traffic.as_ref().map(|t| &t.net), cam.position);
+                if crate::tracks::wear_wanted(lighting.wetness, lighting.rain, lighting.snow) {
+                    road_wear.frame(traffic.as_ref().map(|t| &t.net), cam.position, &renderer, true);
+                }
                 let density = if crate::grass::off() || !lighting.enhanced { 0 } else { settings.grass.min(3) };
                 let grass_far = settings.grass_distance as f32;
                 grass_field.reach = grass_far as f64 + 3.0;
@@ -2681,6 +2685,10 @@ pub(crate) fn run_offscreen(
     let mut lighting = weather_lighting(&daylight, &weather, cloud_drift_at(&weather, clock.time), wetness, settings.shadows);
     lightning.apply(&mut lighting);
     lighting.foliage = crate::foliage::season(clock.day_of_year.max(1) as u32, settings.seasonal_foliage);
+    // (the traffic's wear round where the picture is taken: the snow's ruts and banks)
+    if crate::tracks::wear_wanted(lighting.wetness, lighting.rain, lighting.snow) {
+        road_wear.frame(traffic.as_ref().map(|t| &t.net), camera.position, &renderer, true);
+    }
     if crate::grass::debug_roads() {
         if let Some(t) = traffic.as_ref() {
             crate::grass::log_uncovered_roads(&world, &t.net);

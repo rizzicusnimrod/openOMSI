@@ -452,6 +452,22 @@ pub(crate) fn nature_settings(s: &crate::settings::Settings) {
     TAA.store(s.taa, Relaxed);
     SUNLIT_CAB.store(s.sunlit_cab, Relaxed);
     ROAD_TRACKS.store(s.road_tracks, Relaxed);
+    OWN_SNOWY_ROADS.store(s.own_snowy_roads, Relaxed);
+}
+/// openOMSI's own snowy roads (`Settings::own_snowy_roads`), for the map's loading
+/// (`world_load::open_world`); `OMSI_SNOWY_ROADS=map|openomsi` over it.
+pub(crate) static OWN_SNOWY_ROADS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Whether the roads' snow is openOMSI's when the textures are looked up: the setting, in
+/// the enhanced picture only (Vanilla and Vanilla+ show the maps' own snowy roads, as
+/// OMSI 2 does).
+pub(crate) fn own_snowy_roads() -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    match omsi_cfg::env::var("OMSI_SNOWY_ROADS").as_deref() {
+        Ok("map") => false,
+        Ok("openomsi") => ENHANCED.load(Relaxed),
+        _ => ENHANCED.load(Relaxed) && OWN_SNOWY_ROADS.load(Relaxed),
+    }
 }
 /// The sun's shafts' quality, 0 off .. 3 high (`Settings::sun_shafts`).
 pub(crate) static SUN_SHAFTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(2);

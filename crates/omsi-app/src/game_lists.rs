@@ -1716,6 +1716,7 @@ fn toggle_now(app: &App, id: &str) -> Option<bool> {
         "taa" => s.taa,
         "sunlit_cab" => s.sunlit_cab,
         "road_tracks" => s.road_tracks,
+        "own_snowy_roads" => s.own_snowy_roads,
         "fullscreen" => s.fullscreen,
         "vsync" => s.vsync,
         "texture_compression" => s.texture_compression,
@@ -1987,12 +1988,14 @@ fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static str, String
             crate::startup::nature_settings(&app.settings);
             Some(("lightning", bit))
         }
-        "ssr" | "relief" | "taa" | "sunlit_cab" | "road_tracks" => {
+        "ssr" | "relief" | "taa" | "sunlit_cab" | "road_tracks" | "own_snowy_roads" => {
             let (key, field) = match id {
                 "ssr" => ("ssr", &mut app.settings.ssr),
                 "relief" => ("relief", &mut app.settings.relief),
                 "taa" => ("taa", &mut app.settings.taa),
                 "sunlit_cab" => ("sunlit_cab", &mut app.settings.sunlit_cab),
+                // (taken when the map's textures are next looked up: the next map load)
+                "own_snowy_roads" => ("own_snowy_roads", &mut app.settings.own_snowy_roads),
                 _ => ("road_tracks", &mut app.settings.road_tracks),
             };
             *field = on;
@@ -2781,6 +2784,7 @@ fn options_pages(app: &App) -> Vec<Page> {
         switch_row(app, "taa", "Temporal anti-aliasing", "Steadies shimmering branches and wires; lets a lower MSAA look as smooth"),
         switch_row(app, "sunlit_cab", "Sunlit cab", "Sun patches move over the dash and the floor, the cab is lit from its windows"),
         switch_row(app, "road_tracks", "Tyre tracks", "Wheel tracks dry first on a drying road and show in the snow"),
+        switch_row(app, "own_snowy_roads", "openOMSI snowy roads", "Ruts, banked snow and slush on the roads instead of the map's snowy road pictures (next map load)"),
     ]
         .into_iter()
         .flatten()

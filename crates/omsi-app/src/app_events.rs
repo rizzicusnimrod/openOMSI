@@ -2612,10 +2612,12 @@ impl ApplicationHandler for App {
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(self.wetness);
-                // the lanes whose tyre tracks show on drying and snowy roads (on a dry road or
-                // in the rain they show nowhere: no lanes looked for)
-                if let Some(cam) = self.camera.as_ref().filter(|_| omsi_render::tracks::shown(lighting.wetness, lighting.rain, lighting.snow)) {
-                    lighting.tracks = crate::tracks::for_frame(self.traffic.as_ref().map(|t| &t.net), cam.position);
+                // the traffic's wear on the roads round the camera: the snow's ruts and banks,
+                // a drying road's tyre lines (on a dry road or in the rain no map is drawn)
+                if let (Some(cam), Some(r)) = (self.camera.as_ref(), self.renderer.as_ref()) {
+                    if crate::tracks::wear_wanted(lighting.wetness, lighting.rain, lighting.snow) {
+                        self.road_wear.frame(self.traffic.as_ref().map(|t| &t.net), cam.position, r, false);
+                    }
                 }
                 lighting.inside = match self.inside_remote.and_then(|id| self.remotes.remotes.get(&id)) {
                     // (in another player's bus: its box is the one the camera is in)

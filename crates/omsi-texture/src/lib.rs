@@ -268,6 +268,10 @@ pub fn find_texture(name: &str, dirs: &[&Path]) -> Option<PathBuf> {
         k.push('|');
         if let Some(f) = season_folder() {
             k.push_str(&f);
+            // (the roads' own snow or the map's snowy pictures)
+            if own_snowy_roads() {
+                k.push('*');
+            }
         }
         for d in dirs {
             k.push('|');
@@ -356,7 +360,40 @@ fn texture_index(top: &str) -> HashMap<String, Vec<PathBuf>> {
     out
 }
 
+/// openOMSI's own snowy roads (the renderer's, `set_own_snowy_roads`): under snow on the road
+/// a road's texture keeps its bare picture instead of the map's `WinterSnowfall` one.
+static OWN_SNOWY_ROADS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the roads' snow is openOMSI's (true) or the maps' `WinterSnowfall` pictures.
+pub fn set_own_snowy_roads(on: bool) {
+    OWN_SNOWY_ROADS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn own_snowy_roads() -> bool {
+    OWN_SNOWY_ROADS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn find_texture_in_season(name: &str, dirs: &[&Path], season: Option<&str>) -> Option<PathBuf> {
+    find_texture_seasoned(name, dirs, season, own_snowy_roads())
+}
+
+/// Whether a texture is a road's: its own bare picture's `.cfg` says `[moisture]` or
+/// `[puddles]` (the surfaces that turn wet, the traffic's).
+fn is_road_texture(name: &str, dirs: &[&Path]) -> bool {
+    find_texture_seasoned(name, dirs, None, false).and_then(|p| cfg_path(name, &p)).is_some_and(|c| {
+        let cfg = TextureCfg::load(&c);
+        cfg.moisture || cfg.puddles
+    })
+}
+
+/// [`find_texture_in_season`] with openOMSI's own snowy roads (`own_roads`) or OMSI 2's: with
+/// its own, a road's texture under snow on the road (`WinterSnowfall`) is found as if the
+/// roads were cleared (`WinterSnow`: its bare picture, unless it has a snowy one there - a
+/// field track's), and the renderer lays its snow on it.
+fn find_texture_seasoned(name: &str, dirs: &[&Path], season: Option<&str>, own_roads: bool) -> Option<PathBuf> {
+    if own_roads && season.is_some_and(|s| s.eq_ignore_ascii_case("WinterSnowfall")) && is_road_texture(name, dirs) {
+        return find_texture_seasoned(name, dirs, Some("WinterSnow"), false);
+    }
     // a file named in full (a paint scheme's picture, resolved in its scheme's folder)
     let full = Path::new(name.trim());
     if full.is_absolute() {
@@ -412,7 +449,7 @@ fn find_texture_in_season(name: &str, dirs: &[&Path], season: Option<&str>) -> O
             }
         }
         if let Some(file) = parts.last() {
-            if let Some(p) = find_texture_in_season(file, &dirs, season) {
+            if let Some(p) = find_texture_seasoned(file, &dirs, season, own_roads) {
                 return Some(p);
             }
         }
@@ -711,6 +748,37 @@ mod tests {
         assert_eq!(find("hedge.bmp", "Winter"), tex.join("Winter/hedge.bmp"));
         assert_eq!(find("tree.bmp", "Winter"), tex.join("Fall/tree.bmp"));
         assert_eq!(find("walk.bmp", "Winter"), tex.join("walk.bmp"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// With openOMSI's own snowy roads a road's texture - one whose `.cfg` says
+    /// `[moisture]` or `[puddles]` - keeps its bare picture under snow on the road (the
+    /// renderer lays the snow on it), and takes a `WinterSnow` one where it has it; every
+    /// other texture takes the variants Omsi.exe takes.
+    #[test]
+    fn own_snowy_roads_keep_a_roads_bare_picture_in_the_snowfall() {
+        let dir = std::env::temp_dir().join(format!("omsi-texture-own-roads-{}", std::process::id()));
+        let tex = dir.join("texture");
+        for f in ["WinterSnowfall", "WinterSnow"] {
+            std::fs::create_dir_all(tex.join(f)).unwrap();
+        }
+        for path in ["road.bmp", "WinterSnowfall/road.bmp", "lane.bmp", "WinterSnowfall/lane.bmp", "WinterSnow/lane.bmp", "walk.bmp", "WinterSnowfall/walk.bmp"] {
+            std::fs::write(tex.join(path), b"lookup-only fixture").unwrap();
+        }
+        std::fs::write(tex.join("road.bmp.cfg"), b"[moisture]\r\n[puddles]\r\n").unwrap();
+        std::fs::write(tex.join("lane.bmp.cfg"), b"[puddles]\r\n").unwrap();
+        // (the snowy copy's own sidecar does not make it a road)
+        std::fs::write(tex.join("WinterSnowfall/walk.bmp.cfg"), b"[moisture]\r\n").unwrap();
+        let dirs = [tex.as_path()];
+        let find = |name: &str, own: bool| find_texture_seasoned(name, &dirs, Some("WinterSnowfall"), own).unwrap();
+        assert_eq!(find("road.bmp", true), tex.join("road.bmp"));
+        assert_eq!(find("lane.bmp", true), tex.join("WinterSnow/lane.bmp"));
+        assert_eq!(find("walk.bmp", true), tex.join("WinterSnowfall/walk.bmp"));
+        // OMSI 2's snowy roads
+        assert_eq!(find("road.bmp", false), tex.join("WinterSnowfall/road.bmp"));
+        assert_eq!(find("lane.bmp", false), tex.join("WinterSnowfall/lane.bmp"));
+        // cleared roads are as they were
+        assert_eq!(find_texture_seasoned("road.bmp", &dirs, Some("WinterSnow"), true).unwrap(), tex.join("road.bmp"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

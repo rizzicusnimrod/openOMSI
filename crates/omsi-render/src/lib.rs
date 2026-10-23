@@ -7,6 +7,9 @@ mod grass;
 mod looks;
 mod puddles;
 mod relief;
+pub mod road_wear;
+mod snow_cover;
+mod snowfall;
 pub mod tracks;
 mod rt;
 pub mod shafts;
@@ -382,11 +385,14 @@ struct EnhancedUniform {
     /// Phase two's looks (`Looks::row`): x the vehicles' screen-space reflections, y relief,
     /// z the sunlit cab, w tyre tracks.
     looks: [f32; 4],
-    /// The lanes' segments near the camera (`tracks::rows`): xy one end, zw the other,
-    /// render-origin relative.
-    tracks: [[f32; 4]; tracks::TRACK_SEGMENTS],
-    /// x how many of `tracks` there are, y how far the road is drying (`tracks::drying`).
+    /// y how far the road is drying (`tracks::drying`).
     track_info: [f32; 4],
+    /// The snow lying (`snow_cover::snow_row`): x on the ground, y on the roads, z the
+    /// slush, w how hard it snows.
+    snow: [f32; 4],
+    /// The traffic's wear map (`road_wear`): xy its south-west corner relative to the render
+    /// origin, z 1 / its side, w 1 when there is one.
+    wear: [f32; 4],
 }
 
 /// A lightning flash as the picture shows it this frame (`Lighting::flash`, enhanced only):
@@ -1159,8 +1165,14 @@ pub struct Lighting {
     pub shadows: bool,
     /// How wet the roads are (0..1): rain darkens them and makes them mirror the sky.
     pub wetness: f32,
-    /// Snow cover on the ground and the roads (0..1).
+    /// Snow cover on the ground (0..1).
     pub snow: f32,
+    /// Snow on the roads (0..1; never more than `snow`): 0 a snowy day's cleared roads, 1
+    /// roads under snow (`snow_cover.rs`).
+    pub road_snow: f32,
+    /// How near the thaw the snow is (0 hard frost .. 1 thawing): the slush in the tyres'
+    /// lines and at the kerb.
+    pub slush: f32,
     /// Enhanced graphics: the physically based high-range renderer (enhanced.wgsl) with its
     /// computed sky, automatic exposure, glow and tone mapping (post.wgsl).
     pub enhanced: bool,
@@ -1225,9 +1237,6 @@ pub struct Lighting {
     /// Phase two's looks of the enhanced picture (`looks.rs`): the vehicles' screen-space
     /// reflections, relief, the sunlit cab, tyre tracks, temporal anti-aliasing.
     pub looks: Looks,
-    /// The lanes of the road traffic near the camera (world, metres; each a segment of a
-    /// lane's centre line): the tyres' lines either side of them (`tracks.rs`).
-    pub tracks: Vec<[glam::DVec2; 2]>,
     pub fog_base: Option<f64>,
     pub envir_tint: [Vec3; 3],
     /// How bright an LED panel's dots burn (`MaterialExtra::led`; the settings' 16 levels
@@ -1325,10 +1334,11 @@ impl Default for Lighting {
             shafts: 2,
             ground_mist: 0.0,
             looks: Looks::default(),
-            tracks: Vec::new(),
             lamp_shadows: false,
             wetness: 0.0,
             snow: 0.0,
+            road_snow: 0.0,
+            slush: 0.0,
             enhanced: false,
             classic: false,
             inside: None,
@@ -2060,6 +2070,17 @@ fn array_path() -> ArrayPath {
     }
 }
 
+/// The device reads the traffic's wear map (`road_wear`, the camera group's binding 20; set
+/// in `Renderer::new_on`): the enhanced picture's scene shader then samples seventeen
+/// textures, one more than WebGPU's default for a fragment shader, which every Direct3D 12,
+/// Vulkan and Metal device allows when asked. Without it (an OpenGL chip, sixteen units, or
+/// `OMSI_NO_WEAR_MAP`) the snow and the drying roads have no lanes to wear (`//NOWEAR`).
+static WEAR_MAP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn wear_map() -> bool {
+    WEAR_MAP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Texels per row of an array kept as a texture (within every device's 2048).
 const ARRAY_TEX_WIDTH: u32 = 2048;
 
@@ -2355,6 +2376,19 @@ fn camera_layout_entries(path: ArrayPath, sixteen: bool) -> Vec<wgpu::BindGroupL
         camera_entries.push(array_layout_entry_on(path, 3, wgpu::ShaderStages::FRAGMENT, true));
         camera_entries.push(array_layout_entry_on(path, 4, wgpu::ShaderStages::FRAGMENT, false));
     }
+    // the traffic's wear map (`road_wear`), where the device has the unit for it
+    if wear_map() && !sixteen {
+        camera_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 20,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        });
+    }
     if sixteen {
         camera_entries.retain(|e| !ENHANCED_CAMERA_TEXTURES.contains(&e.binding));
     }
@@ -2594,6 +2628,10 @@ pub struct Renderer {
     /// The snowfall's parameters (snow.wgsl `SnowParams`) and their bind group.
     snow_buf: wgpu::Buffer,
     snow_bind_group: wgpu::BindGroup,
+    /// Where the window's camera was when the flakes were last drawn (world, s), and its
+    /// velocity then: the flakes' streaks (`snowfall::camera_velocity`).
+    snow_eye: std::cell::Cell<Option<(DVec3, f64)>>,
+    snow_motion: std::cell::Cell<Vec3>,
     /// The smoke texture (`Texture/rauch.tga`, see [`Renderer::set_smoke_texture`]).
     smoke_bind_group: wgpu::BindGroup,
     /// The coronas' pictures besides the standard glow (index = `Corona::texture`; entry 0
@@ -2745,6 +2783,10 @@ pub struct Renderer {
     lm_atlas_view: wgpu::TextureView,
     lm_uniform: wgpu::Buffer,
     lm_place: std::cell::Cell<(f64, f64, f64)>,
+    /// The traffic's wear map (`road_wear`; None where the device has no texture unit for
+    /// it, `wear_map`) and the world place of its south-west corner once drawn.
+    wear: Option<(wgpu::Texture, wgpu::TextureView)>,
+    wear_place: std::cell::Cell<Option<glam::DVec2>>,
     /// Mipmap generation on the GPU (a blit per level).
     mip_pipeline: wgpu::RenderPipeline,
     mip_layout: wgpu::BindGroupLayout,
@@ -3259,6 +3301,19 @@ impl Renderer {
             ArrayPath::VertexTextures => log::warn!("{}: no storage buffers in vertex shaders; the scene's arrays are read from textures", info.name),
             ArrayPath::NoStorage => log::warn!("{}: no storage buffers; the scene's arrays are read from textures and the lamps light no pixels of their own", info.name),
         }
+        // the traffic's wear map: one texture more for the scene's fragment shader than
+        // WebGPU's default sixteen, which a Direct3D 12, Vulkan or Metal device gives when
+        // asked (`wear_map`)
+        let wear = !sixteen_texture_units()
+            && path != ArrayPath::NoStorage
+            && adapter.limits().max_sampled_textures_per_shader_stage >= 17
+            && omsi_cfg::env::var_os("OMSI_NO_WEAR_MAP").is_none();
+        if wear {
+            limits.max_sampled_textures_per_shader_stage = limits.max_sampled_textures_per_shader_stage.max(17);
+        } else {
+            log::info!("{}: no texture unit for the traffic's wear map; the snowy and drying roads show no lanes", info.name);
+        }
+        WEAR_MAP.store(wear, std::sync::atomic::Ordering::Relaxed);
         log::info!("opening graphics device: {} ({:?}, vendor {:#06x}, device {:#06x}), features {:?}, max buffer {} MB, max storage binding {} MB", info.name, info.backend, info.vendor, info.device, required_features, limits.max_buffer_size / 1_000_000, limits.max_storage_buffer_binding_size as u64 / 1_000_000);
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -3494,6 +3549,21 @@ impl Renderer {
             size: 16,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
+        });
+        // (no lane anywhere until the app has drawn the map: `Enhanced::wear` stays off)
+        let wear = wear_map().then(|| {
+            let t = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("road wear"),
+                size: wgpu::Extent3d { width: road_wear::WEAR_SIZE, height: road_wear::WEAR_SIZE, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let v = t.create_view(&wgpu::TextureViewDescriptor::default());
+            (t, v)
         });
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("material"),
@@ -5303,6 +5373,8 @@ impl Renderer {
             lm_atlas,
             lm_uniform,
             lm_place: std::cell::Cell::new((0.0, 0.0, 0.0)),
+            wear,
+            wear_place: std::cell::Cell::new(None),
             hdr_targets: HashMap::new(),
             puddles,
             taa,
@@ -5362,6 +5434,8 @@ impl Renderer {
             reflection_pass,
             corona_bind_group,
             snow_buf,
+            snow_eye: std::cell::Cell::new(None),
+            snow_motion: std::cell::Cell::new(Vec3::ZERO),
             snow_bind_group,
             smoke_bind_group,
             corona_textures: Vec::new(),
@@ -8254,14 +8328,9 @@ impl Renderer {
             }
             None => Vec3::ZERO,
         };
-        // the lanes the tyres run along (tracks.rs), the nearest to the camera - on a drying
-        // road or in the snow (else the shader's tracks are left out altogether)
+        // the tyres' lines (tracks.rs) on a drying road or in the snow (else the shader reads
+        // none)
         let tracks_shown = lighting.looks.effective().road_tracks && tracks::shown(lighting.wetness, lighting.rain, lighting.snow);
-        let (track_rows, track_count) = if tracks_shown {
-            tracks::rows(&lighting.tracks, (ro + cam_rel.as_dvec3()).truncate(), ro)
-        } else {
-            ([[0.0; 4]; tracks::TRACK_SEGMENTS], 0)
-        };
         let u = EnhancedUniform {
             // (self-lit surfaces at their own brightness after the metering, see ExposureLog)
             exposure: [pre, 2f32.powf(-self.exposure_log.as_ref().map(|l| l.ev).unwrap_or(0.0)).clamp(0.7, 1.6), pre * WINDOW_RADIANCE, 1.6],
@@ -8353,8 +8422,14 @@ impl Renderer {
                 }
                 row
             },
-            tracks: track_rows,
-            track_info: [track_count as f32, tracks::drying(lighting.wetness, lighting.rain), 0.0, 0.0],
+            track_info: [0.0, tracks::drying(lighting.wetness, lighting.rain), 0.0, 0.0],
+            snow: snow_cover::snow_row(lighting),
+            wear: match self.wear_place.get() {
+                Some(o) if self.wear.is_some() => {
+                    [(o.x - ro.x) as f32, (o.y - ro.y) as f32, (1.0 / (road_wear::WEAR_SIZE as f64 * road_wear::WEAR_TEXEL)) as f32, 1.0]
+                }
+                _ => [0.0; 4],
+            },
         };
         self.queue
             .write_buffer(&self.enh_buf, 0, bytemuck::bytes_of(&u));
@@ -8695,6 +8770,9 @@ impl Renderer {
         if array_path() != ArrayPath::NoStorage {
             entries.push(wgpu::BindGroupEntry { binding: 3, resource: light_buf.binding() });
             entries.push(wgpu::BindGroupEntry { binding: 4, resource: grid_buf.binding() });
+        }
+        if let Some((_, view)) = self.wear.as_ref().filter(|_| !sixteen_texture_units()) {
+            entries.push(wgpu::BindGroupEntry { binding: 20, resource: wgpu::BindingResource::TextureView(view) });
         }
         if sixteen_texture_units() {
             entries.retain(|e| !ENHANCED_CAMERA_TEXTURES.contains(&e.binding));
@@ -9067,6 +9145,27 @@ impl Renderer {
     /// Where the light map atlas lies: its south-west corner (world x, y) and its side (m).
     pub fn set_light_map_place(&self, x: f64, y: f64, side: f64) {
         self.lm_place.set((x, y, side));
+    }
+
+    /// Put the traffic's wear map (`road_wear::raster`) on the GPU; nothing where the device
+    /// reads none (`wear_map`).
+    pub fn set_road_wear(&self, field: &road_wear::WearField) {
+        let Some((texture, _)) = self.wear.as_ref() else {
+            return;
+        };
+        let n = road_wear::WEAR_SIZE;
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            bytemuck::cast_slice(&field.texels),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(n * 4), rows_per_image: None },
+            wgpu::Extent3d { width: n, height: n, depth_or_array_layers: 1 },
+        );
+        self.wear_place.set(Some(field.origin));
+    }
+
+    /// The world place of the wear map's south-west corner, once one was put on the GPU.
+    pub fn road_wear_origin(&self) -> Option<glam::DVec2> {
+        self.wear_place.get()
     }
 
     /// Register picture `id` for coronas (`Corona::texture`): a light's own bitmap, whose
@@ -9735,7 +9834,8 @@ impl Renderer {
         let puddles_wanted = with_overlays
             && self.puddles.is_some()
             && self.options.reflections
-            && lighting.wetness * (1.0 - lighting.snow.clamp(0.0, 1.0)) > 0.05
+            // (the roads' snow: a snowy day's cleared roads are wet and mirror it all)
+            && lighting.wetness * (1.0 - snow_cover::snow_row(lighting)[1]) > 0.05
             && scene.materials.iter().any(|m| m.uniform.params2[2] > 0.0)
             && debug_view() == 0.0
             && omsi_cfg::env::var_os("OMSI_NO_PUDDLE_REFLECTIONS").is_none();
@@ -9975,7 +10075,8 @@ impl Renderer {
                 self.options.shadow_size.min(SHADOW_CLOSE_MAX) as f32 / self.options.shadow_size.max(1) as f32,
             ],
             view_proj: vp_mat.to_cols_array_2d(),
-            cam_pos: cam_rel.extend(1.0).to_array(),
+            // (w: the snow on the roads, which the plain shading lays on them, `surface_snow`)
+            cam_pos: cam_rel.extend(snow_cover::snow_row(lighting)[1]).to_array(),
             // (modulo the shaders' PATTERN_PERIOD, 1000 m: the patterns repeat with it, and
             // the whole map coordinate has no precision left for them in 32 bits)
             // (zw: the origin modulo CLOUD_ORIGIN_PERIOD for the sky's clouds, which are
@@ -11672,9 +11773,22 @@ impl Renderer {
             // under the cab of the vehicle the camera is in
             if let Some(snow) = pp.snow_pipeline.as_ref().filter(|_| lighting.snowfall > 0.01 && omsi_cfg::env::var_os("OMSI_NO_SNOWFALL").is_none()) {
                 let (counts, mean) = snowfall_flakes(lighting.snowfall);
+                // (the window's view leads: the mirrors move with it)
+                // (OMSI_SNOW_MOTION=x,y,z: the camera's velocity as given, for the offscreen
+                // pictures, whose camera stands)
+                if lead_view {
+                    let now = (camera.position, self.started.elapsed().as_secs_f64());
+                    let given = omsi_cfg::env::var("OMSI_SNOW_MOTION").ok().and_then(|v| {
+                        let p: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                        (p.len() == 3).then(|| Vec3::new(p[0], p[1], p[2]))
+                    });
+                    self.snow_motion.set(given.unwrap_or_else(|| snowfall::camera_velocity(self.snow_eye.get(), now)));
+                    self.snow_eye.set(Some(now));
+                }
                 let u = SnowUniform {
                     wind: lighting.wind.extend(self.started.elapsed().as_secs_f32() % 20000.0).to_array(),
                     fall: [lighting.snowfall, mean, counts[0] as f32, counts[1] as f32],
+                    motion: self.snow_motion.get().extend(snowfall::SHUTTER).to_array(),
                 };
                 self.queue.write_buffer(&self.snow_buf, 0, bytemuck::bytes_of(&u));
                 pass.set_pipeline(snow);
@@ -13611,6 +13725,11 @@ fn indexing_as_calls(src: &str, name: &str, call: &str) -> String {
 }
 
 fn scene_shader_text(gl: bool) -> String {
+    scene_shader_text_with(gl, wear_map() && !gl)
+}
+
+/// [`scene_shader_text`] reading the traffic's wear map or not (`wear`, see `wear_map`).
+fn scene_shader_text_with(gl: bool, wear: bool) -> String {
     let src = [
         include_str!("colour.wgsl"),
         include_str!("shader.wgsl"),
@@ -13620,13 +13739,15 @@ fn scene_shader_text(gl: bool) -> String {
         include_str!("blockers.wgsl"),
         include_str!("relief.wgsl"),
         include_str!("cab.wgsl"),
-        include_str!("tracks.wgsl"),
+        include_str!("snow_cover.wgsl"),
         include_str!("enhanced.wgsl"),
         include_str!("grass.wgsl"),
     ]
     .join("\n");
     // Enhanced+: the enhanced pass writes the reflections' surfaces as well (`GBUF_FORMAT`)
     let src = if rt_gbuf() { src.replace("//RT ", "") } else { src };
+    // the wear map's texture, or no lane anywhere (snow_cover.wgsl `wear_texel`)
+    let src = if wear { src.replace("//WEAR ", "") } else { src.replace("//NOWEAR ", "") };
     if !gl {
         return src;
     }
@@ -13730,6 +13851,9 @@ fn snow_shader_source() -> String {
 struct SnowUniform {
     wind: [f32; 4],
     fall: [f32; 4],
+    /// xyz the camera's velocity (m/s, world), w how long the picture takes a flake in (s):
+    /// the streaks the flakes sweep (`snowfall::flake_streak`).
+    motion: [f32; 4],
 }
 
 /// The snowfall's flakes for a snowfall of strength `s` (0..1): how many each layer of
@@ -16769,6 +16893,8 @@ mod tests {
             ("scene", scene_shader_source(false)),
             ("scene opaque", scene_shader_source(false)),
             ("scene terrain paint", scene_shader_source(false)),
+            ("scene (wear map)", arrays_as_textures(&scene_shader_text_with(false, true), ArrayPath::Storage)),
+            ("scene (no wear map)", arrays_as_textures(&scene_shader_text_with(false, false), ArrayPath::Storage)),
             ("sky", sky_shader_source()),
             ("corona", corona_shader_source()),
             ("fog lamps", fog_lamps_shader_source()),

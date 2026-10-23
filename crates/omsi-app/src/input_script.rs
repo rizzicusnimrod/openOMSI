@@ -3985,6 +3985,7 @@ impl App {
         let (Some(st), Some(r), Some(scene)) = (self.streamer.as_mut(), self.renderer.as_ref(), self.scene.as_mut()) else { return };
         if was_season != season {
             log::info!("season: the textures of {:?} now (were {:?})", season, was_season);
+            omsi_texture::set_own_snowy_roads(crate::startup::own_snowy_roads());
             omsi_texture::set_season_folder(season);
             omsi_cfg::content_changed();
             st.reload(r, scene, None, self.audio.as_ref());

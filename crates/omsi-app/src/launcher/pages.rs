@@ -658,6 +658,7 @@ fn graphics_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, cols: [Rect; 2]) ->
     toggle_setting(ui, s, dirty, c.row(), "Sunlit cab", "sunlit_cab");
     toggle_setting(ui, s, dirty, c.row(), "Relief on old textures", "relief");
     toggle_setting(ui, s, dirty, c.row(), "Tyre tracks", "road_tracks");
+    toggle_setting(ui, s, dirty, c.row(), "openOMSI snowy roads", "own_snowy_roads");
     toggle_setting(ui, s, dirty, c.row(), "Temporal anti-aliasing", "taa");
     // (the models' `[isshadow]` blob is what OMSI draws under a vehicle in every graphics
     // mode, the vanilla one included, so its switch is not part of the extras above)
@@ -2738,7 +2739,7 @@ mod settings_tests {
     fn by_tab() -> Vec<Vec<&'static str>> {
         let mut graphics = vec![
             "s-gp-sel", "s-gp-load", "s-gp-del", "s-gp-name", "s-gp-save",
-            "s-preset", "s-graphics", "s-msaa", "s-scale", "s-af", "s-shadow", "set-ssao", "set-shadows", "s-casters", "set-detail_textures", "s-led", "s-led-mip", "s-night", "s-sway", "set-seasonal_foliage", "set-lightning", "s-shafts", "s-grass", "s-grass-dist", "set-ssr", "set-sunlit_cab", "set-relief", "set-road_tracks", "set-taa", "set-shadow_blobs", "set-reflections", "set-clouds",
+            "s-preset", "s-graphics", "s-msaa", "s-scale", "s-af", "s-shadow", "set-ssao", "set-shadows", "s-casters", "set-detail_textures", "s-led", "s-led-mip", "s-night", "s-sway", "set-seasonal_foliage", "set-lightning", "s-shafts", "s-grass", "s-grass-dist", "set-ssr", "set-sunlit_cab", "set-relief", "set-road_tracks", "set-own_snowy_roads", "set-taa", "set-shadow_blobs", "set-reflections", "set-clouds",
             "set-fullscreen", "s-res", "set-vsync", "s-fps", "s-view", "s-maxobj", "s-minobj", "s-mirror", "s-mirror-refresh", "s-texmem", "set-texture_compression",
         ];
         if !cfg!(target_os = "macos") {

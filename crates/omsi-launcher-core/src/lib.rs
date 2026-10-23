@@ -1850,7 +1850,7 @@ pub fn settings_from_text(text: Option<&str>) -> Value {
         v[k] = d;
     }
     // openOMSI's own: what passengers say, OMSI's route arrows, getting up from the seat
-    for (k, d) in [("pax_voices", json!("all")), ("nav_arrows", json!(false)), ("nav_ai", json!(true)), ("get_up", json!(false)), ("time_speed", json!("1")), ("time_sync", json!(false)), ("metar_sync", json!(false)), ("metar_station", json!("")), ("machine_translation", json!(false)), ("shadow_casters", json!("all")), ("shadow_blobs", json!(true)), ("reflections", json!(true)), ("mouse_sens", json!(1.0)), ("graphics_api", json!("auto")), ("ctrl_off", json!("")), ("steering_linear", json!(false)), ("old_steering", json!(false)), ("red_steer_spd", json!(false)), ("ff_invert", json!(false)), ("ff_enabled", json!(true)), ("brake_hold", json!(true)), ("auto_clutch", json!(true)), ("momentary_gears", json!(false)), ("wheel_range", json!(900.0)), ("wheel_lock", json!(0.0)), ("fov", json!(0.0)), ("camera_collision", json!(true)), ("right_stick_look", json!(true)), ("steer_look", json!(false)), ("pedal_throttle", json!(1.0)), ("pedal_brake", json!(1.0)), ("seat_x", json!(0.0)), ("seat_y", json!(0.0)), ("seat_z", json!(0.0)), ("seat_pitch_deg", json!(0.0)), ("head_tracking", json!(false)), ("led_glow", json!(6)), ("led_mips", json!(1.3)), ("night_brightness", json!(100)), ("wind_sway", json!(100)), ("seasonal_foliage", json!(true)), ("lightning", json!(true)), ("sun_shafts", json!(2)), ("ssr", json!(true)), ("grass", json!(2)), ("grass_distance", json!(45)), ("relief", json!(true)), ("taa", json!(false)), ("sunlit_cab", json!(true)), ("road_tracks", json!(true)), ("air_seat", json!("normal")), ("ui_scale", json!(1.0)), ("ui_scale_window", json!(true)), ("chat_size", json!(1.0)), ("notes", json!(true)), ("mouse_steering", json!(false)), ("mouse_right_off", json!(false)), ("mouse_smooth", json!(true)), ("blinker_cancel", json!(true)), ("ff_road_vib", json!(1.0)), ("ff_engine_vib", json!(1.0)), ("ff_fade", json!(0.28)), ("ff_realistic", json!(true)), ("traffic_events", json!("normal")), ("traffic_events.breakdown", json!(true)), ("traffic_events.delivery", json!(true)), ("traffic_events.stop", json!(true)), ("traffic_events.emergency", json!(true)), ("traffic_events.slow", json!(true)), ("traffic_events.learner", json!(true))] {
+    for (k, d) in [("pax_voices", json!("all")), ("nav_arrows", json!(false)), ("nav_ai", json!(true)), ("get_up", json!(false)), ("time_speed", json!("1")), ("time_sync", json!(false)), ("metar_sync", json!(false)), ("metar_station", json!("")), ("machine_translation", json!(false)), ("shadow_casters", json!("all")), ("shadow_blobs", json!(true)), ("reflections", json!(true)), ("mouse_sens", json!(1.0)), ("graphics_api", json!("auto")), ("ctrl_off", json!("")), ("steering_linear", json!(false)), ("old_steering", json!(false)), ("red_steer_spd", json!(false)), ("ff_invert", json!(false)), ("ff_enabled", json!(true)), ("brake_hold", json!(true)), ("auto_clutch", json!(true)), ("momentary_gears", json!(false)), ("wheel_range", json!(900.0)), ("wheel_lock", json!(0.0)), ("fov", json!(0.0)), ("camera_collision", json!(true)), ("right_stick_look", json!(true)), ("steer_look", json!(false)), ("pedal_throttle", json!(1.0)), ("pedal_brake", json!(1.0)), ("seat_x", json!(0.0)), ("seat_y", json!(0.0)), ("seat_z", json!(0.0)), ("seat_pitch_deg", json!(0.0)), ("head_tracking", json!(false)), ("led_glow", json!(6)), ("led_mips", json!(1.3)), ("night_brightness", json!(100)), ("wind_sway", json!(100)), ("seasonal_foliage", json!(true)), ("lightning", json!(true)), ("sun_shafts", json!(2)), ("ssr", json!(true)), ("grass", json!(2)), ("grass_distance", json!(45)), ("relief", json!(true)), ("taa", json!(false)), ("sunlit_cab", json!(true)), ("road_tracks", json!(true)), ("own_snowy_roads", json!(true)), ("air_seat", json!("normal")), ("ui_scale", json!(1.0)), ("ui_scale_window", json!(true)), ("chat_size", json!(1.0)), ("notes", json!(true)), ("mouse_steering", json!(false)), ("mouse_right_off", json!(false)), ("mouse_smooth", json!(true)), ("blinker_cancel", json!(true)), ("ff_road_vib", json!(1.0)), ("ff_engine_vib", json!(1.0)), ("ff_fade", json!(0.28)), ("ff_realistic", json!(true)), ("traffic_events", json!("normal")), ("traffic_events.breakdown", json!(true)), ("traffic_events.delivery", json!(true)), ("traffic_events.stop", json!(true)), ("traffic_events.emergency", json!(true)), ("traffic_events.slow", json!(true)), ("traffic_events.learner", json!(true))] {
         v[k] = d;
     }
     v["steer_look_angle"] = json!(30.0);
@@ -1927,7 +1927,7 @@ pub fn settings_from_text(text: Option<&str>) -> Value {
             "sun_shafts" => v[&k] = json!(val.trim().parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.round().clamp(0.0, 3.0) as i64).unwrap_or(2)),
             "grass_distance" => v[&k] = json!(val.trim().parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.round().clamp(45.0, 180.0) as i64).unwrap_or(45)),
             "grass" => v[&k] = json!(val.trim().parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.round().clamp(0.0, 3.0) as i64).unwrap_or(2)),
-            "ssr" | "relief" | "taa" | "sunlit_cab" | "road_tracks" => v[&k] = json!(b(val)),
+            "ssr" | "relief" | "taa" | "sunlit_cab" | "road_tracks" | "own_snowy_roads" => v[&k] = json!(b(val)),
             "air_seat" => {
                 let a = val.trim().to_ascii_lowercase();
                 v[&k] = json!(if matches!(a.as_str(), "off" | "firm" | "normal" | "soft") { a } else { "normal".to_string() });
@@ -2306,7 +2306,7 @@ pub fn settings_to_text(v: &Value, old: Option<&str>) -> String {
     text.push_str(&format!("info_bar={}\n", b("info_bar", false)));
     text.push_str(&format!("wind_sway={}\nseasonal_foliage={}\nlightning={}\n", n("wind_sway", 100).clamp(0, 200), b("seasonal_foliage", true), b("lightning", true)));
     text.push_str(&format!(
-        "sun_shafts={}\nssr={}\ngrass={}\ngrass_distance={}\nrelief={}\ntaa={}\nsunlit_cab={}\nroad_tracks={}\n",
+        "sun_shafts={}\nssr={}\ngrass={}\ngrass_distance={}\nrelief={}\ntaa={}\nsunlit_cab={}\nroad_tracks={}\nown_snowy_roads={}\n",
         n("sun_shafts", 2).clamp(0, 3),
         b("ssr", true),
         n("grass", 2).clamp(0, 3),
@@ -2314,7 +2314,8 @@ pub fn settings_to_text(v: &Value, old: Option<&str>) -> String {
         b("relief", true),
         b("taa", false),
         b("sunlit_cab", true),
-        b("road_tracks", true)
+        b("road_tracks", true),
+        b("own_snowy_roads", true)
     ));
     text.push_str(&format!("air_seat={}\n", v.get("air_seat").and_then(|x| x.as_str()).filter(|a| matches!(*a, "off" | "firm" | "normal" | "soft")).unwrap_or("normal")));
     let events = match v.get("traffic_events").and_then(|x| x.as_str()).unwrap_or("normal") {
@@ -2896,6 +2897,11 @@ mod tests {
         let back = settings_from_text(Some(&settings_to_text(&v, Some(old))));
         assert_eq!((back["sun_shafts"].as_i64(), back["ssr"].as_bool(), back["grass"].as_i64(), back["relief"].as_bool(), back["taa"].as_bool(), back["sunlit_cab"].as_bool(), back["road_tracks"].as_bool()), (Some(3), Some(false), Some(1), Some(false), Some(true), Some(false), Some(false)));
         assert_eq!(settings_from_text(Some("sun_shafts=7\ngrass=x\n"))["sun_shafts"].as_i64(), Some(3));
+        // openOMSI's own snowy roads: on unless switched off, and kept so
+        assert_eq!(settings_from_text(None)["own_snowy_roads"].as_bool(), Some(true));
+        let off = settings_from_text(Some("own_snowy_roads=0\n"));
+        assert_eq!(off["own_snowy_roads"].as_bool(), Some(false));
+        assert!(settings_to_text(&off, None).lines().any(|l| l == "own_snowy_roads=0"));
     }
 
     #[test]

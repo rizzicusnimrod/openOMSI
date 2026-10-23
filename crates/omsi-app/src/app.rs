@@ -54,6 +54,8 @@ pub(crate) struct App {
     pub(crate) rain: rain::Rain,
     /// What the tyres throw up from the water on the roads (see `puddles`).
     pub(crate) spray: puddles::Spray,
+    /// The traffic's wear map round the camera, for the snow's ruts and banks (`tracks`).
+    pub(crate) road_wear: crate::tracks::RoadWear,
     pub(crate) lamps_on: Option<bool>,
     pub(crate) menu: Option<menu::Menu>,
     /// `--demo`'s scene (see `demo.rs`).

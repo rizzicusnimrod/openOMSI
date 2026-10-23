@@ -2059,7 +2059,12 @@ fn shade_vanilla(in: FsIn, puddle_weight: ptr<function, f32>, eye: vec3<f32>) ->
     // to mirror the sky, strongest where you look along it (the Fresnel sheen that makes a
     // wet street read as wet)
     let outside = weather_outside_n(in.world, n, material.extra.x > 0.5, in.params2.w);
-    let wet = camera.shadow.w * material.params2.z * outside * (1.0 - clamp(camera.ambient.w, 0.0, 1.0));
+    // (a road - a `[moisture]` surface, not the terrain - takes the roads' snow, `cam_pos.w`:
+    // a snowy day's cleared roads stay wet and dark; Vanilla keeps OMSI 2's one snow)
+    let is_road = material.params2.z > 0.0 && material.extra.x <= 0.5;
+    let road_snow = select(camera.cam_pos.w, camera.ambient.w, camera.sky_color.w > 0.5);
+    let lying = surface_snow(clamp(camera.ambient.w, 0.0, 1.0), road_snow, is_road);
+    let wet = camera.shadow.w * material.params2.z * outside * (1.0 - lying);
     if (wet > 0.0) {
         let vdir = normalize(in.world - eye);
         let facing = clamp(-dot(vdir, n), 0.0, 1.0);
@@ -2083,7 +2088,7 @@ fn shade_vanilla(in: FsIn, puddle_weight: ptr<function, f32>, eye: vec3<f32>) ->
     // (nor on a texture that is the season's snow picture: the map's own WinterSnow
     // textures show the snow as OMSI 2 does, and whitened over, the snowy grass and the
     // grey road went one flat white, the lane markings left standing in it, #879)
-    let snow = camera.ambient.w * outside * select(1.0, 0.0, in.params2.w > 1.5 || camera.sky_color.w > 0.5 || material.ambient.w > 0.5);
+    let snow = lying * outside * select(1.0, 0.0, in.params2.w > 1.5 || camera.sky_color.w > 0.5 || material.ambient.w > 0.5);
     if (snow > 0.0) {
         let up = clamp(n.z, 0.0, 1.0);
         let ground = select(0.0, 1.0, material.extra.x > 0.5 || material.params2.z > 0.0);

@@ -504,13 +504,11 @@ pub(crate) fn weather_lighting(
         w.sky.map(|s| crate::weather_model::ModelSky { cumulus: s.cumulus, deck: s.deck, veil: s.veil, haze: s.haze, angstrom: s.angstrom, aerosol_height: s.aerosol_height })
     });
     let (kind, rate) = precip_of(w);
-    lights::apply_weather(
-        &mut lighting,
-        density,
-        kind,
-        rate,
-        if w.snow { 1.0 } else { 0.0 },
-    );
+    // the snow lying: on the ground, on the roads (cleared without `[snowOnRoad]`), its slush
+    let lying = snow_lying(w, crate::weather_model::snow_now());
+    lights::apply_weather(&mut lighting, density, kind, rate, lying.ground);
+    lighting.road_snow = lying.road;
+    lighting.slush = lying.slush;
     if let Some(custom)=CustomWeather::parse(&w.path.to_string_lossy()){
         let k=custom.brightness;
         lighting.sun_intensity*=k;
@@ -620,6 +618,43 @@ pub(crate) fn street_condition(w: &omsi_content::weather::Weather, wetness: f32)
     }
 }
 
+/// The snow as the picture lays it (0..1 each): on the ground, on the roads, and how near
+/// the thaw it is - the slush in the tyres' lines and at the kerb.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct SnowLying {
+    pub ground: f32,
+    pub road: f32,
+    pub slush: f32,
+}
+
+/// The snow lying in weather `w`, or as the weather model has it (`model`: its cover 0..1
+/// and depth in cm). A weather's `[snow]` lays it on the ground, its `[snowOnRoad]` on the
+/// roads as well - without it the roads are cleared (ploughed, salted, driven dry), as
+/// OMSI 2 shows them with its `WinterSnow` pictures. The model lays thin snow thinly and
+/// the roads' last (their traffic and the salt keep them clear of a dusting), and a thaw
+/// takes it off them first. The slush comes from about -3 °C, all of it by +1 °C.
+pub(crate) fn snow_lying(w: &omsi_content::weather::Weather, model: Option<(f32, f32)>) -> SnowLying {
+    let temp = w.temp.0;
+    let (ground, road) = match model {
+        Some((cover, depth)) => {
+            let ground = cover.clamp(0.0, 1.0);
+            let road = smoothstep(1.5, 4.0, depth) * (1.0 - smoothstep(-0.5, 2.0, temp));
+            (ground, road.min(ground))
+        }
+        None if w.snow => (1.0, if w.snow_on_road { 1.0 } else { 0.0 }),
+        None => (0.0, 0.0),
+    };
+    if ground <= 0.0 {
+        return SnowLying::default();
+    }
+    SnowLying { ground, road, slush: smoothstep(-3.0, 1.0, temp) }
+}
+
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// How wet the roads are when a session starts: what this weather has already left on them
 /// (`[groundwet]`, 0 … 255), and at least what the rain falling now would soak them to.
 pub(crate) fn initial_wetness(w: &omsi_content::weather::Weather) -> f32 {
@@ -725,5 +760,65 @@ mod tests {
         assert_eq!(parse_cloud_type(cfg, "addon - cumulus 8"), Some(CloudType { file: "CloudNew_Cumulus8.tga".into(), size_m: 7000.0, overcast: false }));
         assert_eq!(parse_cloud_type(cfg, "Overcast 1"), Some(CloudType { file: "OVC_1.bmp".into(), size_m: 5500.0, overcast: true }));
         assert_eq!(parse_cloud_type(cfg, "Cirrus 9"), None);
+    }
+
+    fn snowy(snow: bool, on_road: bool, temp: f32) -> omsi_content::weather::Weather {
+        omsi_content::weather::Weather { snow, snow_on_road: on_road, temp: (temp, 3.0), ..Default::default() }
+    }
+
+    #[test]
+    fn a_snow_weather_without_snow_on_the_road_leaves_the_roads_clear() {
+        let s = snow_lying(&snowy(true, false, -2.0), None);
+        assert_eq!(s.ground, 1.0);
+        assert_eq!(s.road, 0.0);
+    }
+
+    #[test]
+    fn snow_on_the_road_lies_on_the_road_too() {
+        let s = snow_lying(&snowy(true, true, -3.0), None);
+        assert_eq!((s.ground, s.road), (1.0, 1.0));
+    }
+
+    #[test]
+    fn a_weather_without_snow_lays_none() {
+        assert_eq!(snow_lying(&snowy(false, false, -3.0), None), SnowLying::default());
+        // (`[snowOnRoad]` alone is no snow: OMSI 2 takes its snowy roads only with `[snow]`)
+        assert_eq!(snow_lying(&snowy(false, true, -3.0), None), SnowLying::default());
+    }
+
+    #[test]
+    fn the_slush_comes_with_the_thaw() {
+        let cold = snow_lying(&snowy(true, true, -6.0), None).slush;
+        let near = snow_lying(&snowy(true, true, -0.5), None).slush;
+        let thaw = snow_lying(&snowy(true, true, 1.5), None).slush;
+        assert_eq!(cold, 0.0);
+        assert!(near > 0.3 && near < 0.9, "{near}");
+        assert!(thaw > 0.95, "{thaw}");
+    }
+
+    #[test]
+    fn the_model_lays_thin_snow_thinly_and_the_road_last() {
+        let w = snowy(true, false, -2.0);
+        let thin = snow_lying(&w, Some((0.4, 1.0)));
+        assert!((thin.ground - 0.4).abs() < 1e-6, "{thin:?}");
+        assert!(thin.road < 0.1, "{thin:?}");
+        let deep = snow_lying(&w, Some((1.0, 12.0)));
+        assert!(deep.road > 0.9, "{deep:?}");
+        // a thaw takes it off the roads first
+        let thawing = snow_lying(&snowy(true, false, 3.0), Some((1.0, 12.0)));
+        assert!(thawing.road < 0.2 && thawing.ground == 1.0, "{thawing:?}");
+    }
+
+    #[test]
+    fn the_road_never_holds_more_snow_than_the_ground() {
+        for t in [-8.0, -2.0, 0.0, 2.0] {
+            for m in [None, Some((0.2, 0.5)), Some((1.0, 30.0))] {
+                for on_road in [false, true] {
+                    let s = snow_lying(&snowy(true, on_road, t), m);
+                    assert!(s.road <= s.ground + 1e-6, "{t} {m:?} {on_road}: {s:?}");
+                    assert!((0.0..=1.0).contains(&s.slush), "{s:?}");
+                }
+            }
+        }
     }
 }

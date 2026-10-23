@@ -101,6 +101,13 @@ plain openOMSI's releases. *Settings → Install updates without asking* skips t
 * **Grass** grows on the verges and meadows and sways with the trees, fading out with the
   distance (*Grass* in the Graphics settings: Off, Sparse, Normal, Dense). Which ground
   textures grow it is listed in `grass.cfg`.
+* **Snow:** a snow weather without snow on the road (`[snowOnRoad]`) leaves the roads cleared
+  - dark and wet in a thaw, dry in a hard frost - with the plough's snow banked at the kerb;
+  with it the roads lie under snow worn into ruts by the traffic (busier lanes wear more),
+  pressed grey in a frost and churned to slush near 0 °C. Thin snow lies in patches, fresh
+  snow glitters in the sun, and the falling flakes streak past as you drive (Enhanced
+  graphics; *openOMSI snowy roads* in the Graphics settings switches back to the maps' own
+  snowy road pictures).
 
 ### Light and surfaces (Enhanced graphics)
 
@@ -112,8 +119,8 @@ plain openOMSI's releases. *Settings → Install updates without asking* skips t
   sun's patches move over the dash and the floor.
 * **Relief on old textures:** cobbles, brick, stone and bark get a soft relief made from their
   own pictures up close (`relief.cfg` lists which).
-* **Tyre tracks:** on a drying road the wheel lines dry first; in snow they are pressed to
-  grey slush.
+* **Tyre tracks:** on a drying road the wheel lines dry first; in snow they are the ruts the
+  traffic wears (see *Snow* above).
 * **Temporal anti-aliasing** (off by default) steadies shimmering branches and wires, so a
   lower MSAA setting can look as smooth.
 

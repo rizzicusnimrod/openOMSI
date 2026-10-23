@@ -49,6 +49,8 @@ pub(crate) fn open_world(args: &Args) -> Result<(World, Camera, DVec3)> {
             start_clock(args).day_of_year,
             folder
         );
+        // (the roads' snow openOMSI's, or the map's own snowy road pictures)
+        omsi_texture::set_own_snowy_roads(crate::startup::own_snowy_roads());
         omsi_texture::set_season_folder(folder);
     }
     let camera = match &args.cam {
