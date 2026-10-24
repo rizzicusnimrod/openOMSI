@@ -13,12 +13,13 @@ fn main() {
     let date = git(&["log", "-1", "--format=%cd", "--date=format:%Y-%m-%d %H:%M"]).unwrap_or_default();
     let dirty = git(&["status", "--porcelain"]).map(|s| !s.trim().is_empty()).unwrap_or(false);
     println!("cargo:rustc-env=OMSI_BUILD={hash}{} {date}", if dirty { "+" } else { "" });
-    println!("cargo:rustc-env=OPENOMSI_VERSION={}", version(&git));
+    let version = version(&git);
+    println!("cargo:rustc-env=OPENOMSI_VERSION={version}");
     println!("cargo:rerun-if-env-changed=OPENOMSI_VERSION");
     println!("cargo:rerun-if-changed=../../VERSION");
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/index");
-    windows_icon();
+    windows_icon(&version);
     steam();
     // (the executable exports the two switchable-graphics hints of main.rs, see there)
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
@@ -66,23 +67,43 @@ fn version(git: &dyn Fn(&[&str]) -> Option<String>) -> String {
         }
     }
     let base = std::fs::read_to_string("../../VERSION").map(|s| s.trim().to_string()).unwrap_or_else(|_| "0.0".into());
-    let n = git(&["log", "-1", "--format=%H", "--", "VERSION"])
+    // (`:/` names the file from the top of the repository: git runs in this crate's folder,
+    // where a plain `VERSION` is no file, and every local build was `.0`)
+    let n = git(&["log", "-1", "--format=%H", "--", ":/VERSION"])
         .filter(|h| !h.is_empty())
         .and_then(|h| git(&["rev-list", "--count", "--invert-grep", "--fixed-strings", "--grep=[skip ci]", "--grep=[skip actions]", &format!("{h}..HEAD")]))
         .unwrap_or_else(|| "0".into());
     format!("{base}.{n}-custom")
 }
 
-fn windows_icon() {
+/// The version as Windows keeps it in an executable: four numbers (`0.2.81-custom` is
+/// 0.2.81.0). Without it Windows' crash and hang reports named every build 0.1.0.0.
+fn file_version(version: &str) -> (String, u64) {
+    let mut parts = [0u64; 4];
+    for (slot, p) in parts.iter_mut().zip(version.split(['.', '-'])) {
+        match p.parse::<u16>() {
+            Ok(v) => *slot = v as u64,
+            Err(_) => break,
+        }
+    }
+    let text = parts.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(".");
+    (text, parts[0] << 48 | parts[1] << 32 | parts[2] << 16 | parts[3])
+}
+
+fn windows_icon(version: &str) {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
     println!("cargo:rerun-if-changed=../../assets/icons/app/openomsi.ico");
+    let (numbers, packed) = file_version(version);
     let mut res = winresource::WindowsResource::new();
     res.set_icon("../../assets/icons/app/openomsi.ico")
         .set("ProductName", "openOMSI")
         .set("FileDescription", "openOMSI")
-        .set("ProductVersion", &std::env::var("OPENOMSI_VERSION").unwrap_or_default());
+        .set("ProductVersion", version)
+        .set("FileVersion", &numbers)
+        .set_version_info(winresource::VersionInfo::FILEVERSION, packed)
+        .set_version_info(winresource::VersionInfo::PRODUCTVERSION, packed);
     if let Err(e) = res.compile() {
         println!("cargo:warning=no icon in the executable: {e}");
     }

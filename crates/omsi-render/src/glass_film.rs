@@ -2,6 +2,8 @@
 //! mist's share of the picture (shader.wgsl `rain_light`), the haze of a soaked pane between
 //! its drops, and the snow's cover (`glass_snow_cover`). The shaders keep their own copies of
 //! the constants; the tests here stand for them.
+// (so outside the tests nothing here is used)
+#![cfg_attr(not(test), allow(dead_code))]
 
 /// The haze of a soaked pane (0..1 of the view at the wettest): the water lying between the
 /// drops, a film that scatters the light - a pane in the rain is no clear window with a few

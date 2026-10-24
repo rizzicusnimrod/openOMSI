@@ -505,6 +505,13 @@ impl App {
         if omsi_cfg::env::var_os("OMSI_BACKGROUND").is_some() {
             attrs = attrs.with_active(false);
         }
+        // Shown once it can draw (below): the renderer compiles its shaders first, seconds
+        // in which the window answers nothing - Windows greyed it out as "Not responding",
+        // and closing it then was filed as the game hanging.
+        let shown_later = cfg!(windows) && given.is_none();
+        if shown_later {
+            attrs = attrs.with_visible(false);
+        }
         let window = match given {
             Some(w) => w,
             // (no display to open it on, a compositor that refuses it: said so, not a panic
@@ -571,17 +578,26 @@ impl App {
             surface.config.present_mode
         );
         let scene = renderer.new_scene();
+        let show = |w: &Option<Arc<Window>>| {
+            if let Some(w) = w.as_ref().filter(|_| shown_later) {
+                w.set_visible(true);
+            }
+        };
         self.window = Some(window);
         self.surface = Some(surface);
         self.renderer = Some(renderer);
         self.scene = Some(scene);
         // fully specified runs skip the menu
         if self.args.bus.is_some() || self.args.cam.is_some() || self.args.no_menu {
+            // (the loading screen draws from here on)
+            show(&self.window);
             self.load_world_now(event_loop);
         } else {
             let mut fonts = omsi_sim::texttex::FontLibrary::new(&self.args.root);
             self.hud = Some(hud::Hud::new(&mut fonts));
+            // (the menu finds every vehicle first: 12 s for 672 of them, still no frame)
             self.menu = Some(menu::Menu::new(&self.args.root, &self.args.map));
+            show(&self.window);
         }
     }
 

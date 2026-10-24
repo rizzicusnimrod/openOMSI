@@ -583,6 +583,8 @@ impl DirectInput {
             let mut seen = HID_CHANGES.load(Ordering::Relaxed);
             let mut last = Instant::now();
             let mut empty = initially_empty;
+            // (what the log was told last: the list at the start)
+            let mut said: Option<Vec<String>> = None;
             // (a device plugged in raises several notifications: look once they settle)
             let mut pending: Option<Instant> = None;
             loop {
@@ -625,7 +627,10 @@ impl DirectInput {
                     last = Instant::now();
                     let v = list(&di);
                     empty = v.is_empty();
-                    log::info!("game controllers found: {}", v.iter().map(|d| d.1.as_str()).collect::<Vec<_>>().join(", "));
+                    let names: Vec<String> = v.iter().map(|d| d.1.clone()).collect();
+                    if controllers_news(&mut said, &names) {
+                        log::info!("game controllers found: {}", if names.is_empty() { "none".to_string() } else { names.join(", ") });
+                    }
                     let mut found = f2.lock().unwrap();
                     // A second enumeration must not overwrite a removal before poll consumes it.
                     let mut removed_paths = found.take().map(|r| r.removed_paths).unwrap_or_default();
@@ -1309,9 +1314,30 @@ impl Drop for DirectInput {
     }
 }
 
+/// Whether a scan's list of controllers is news for the log: the first scan, or a change.
+/// (With nothing plugged in the list is looked at every 5 s: each look was a log line.)
+fn controllers_news(said: &mut Option<Vec<String>>, now: &[String]) -> bool {
+    if said.as_deref() == Some(now) {
+        return false;
+    }
+    *said = Some(now.to_vec());
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_controllers_are_logged_only_when_they_change() {
+        let mut said = None;
+        assert!(controllers_news(&mut said, &[]));
+        assert!(!controllers_news(&mut said, &[]));
+        let wheel = vec!["Logitech G29".to_string()];
+        assert!(controllers_news(&mut said, &wheel));
+        assert!(!controllers_news(&mut said, &wheel));
+        assert!(controllers_news(&mut said, &[]));
+    }
 
     #[test]
     fn failed_opens_back_off_to_half_a_minute() {

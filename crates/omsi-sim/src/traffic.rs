@@ -1450,12 +1450,15 @@ impl Network {
     /// The grid cells a lane's points touch (see [`Network::build_grid`]).
     pub fn lane_cells(l: &Lane) -> Vec<(i32, i32)> {
         let mut cells: Vec<(i32, i32)> = Vec::new();
+        // (a set beside the list: GPM's TCSP8.sco has a path 968 km long, 19 613 cells
+        // each looked for in the list so far - a quarter of a second as its tile loaded)
+        let mut seen: hashbrown::HashSet<(i32, i32)> = hashbrown::HashSet::new();
         for w in l.points.windows(2) {
             let n = ((w[1] - w[0]).truncate().length() / (GRID_CELL * 0.5)).ceil().max(1.0) as usize;
             for k in 0..=n {
                 let q = w[0].lerp(w[1], k as f64 / n as f64);
                 let c = ((q.x / GRID_CELL).floor() as i32, (q.y / GRID_CELL).floor() as i32);
-                if !cells.contains(&c) {
+                if seen.insert(c) {
                     cells.push(c);
                 }
             }
@@ -1476,6 +1479,21 @@ mod extend_tests {
         l.key = Some(LaneKey { tile, id, path: 0 });
         l.source = 1;
         l
+    }
+
+    #[test]
+    fn lane_cells_once_each_in_the_order_reached() {
+        // (there and back: the cells of the way back are already listed)
+        let back = LaneBuilder::polyline(vec![DVec3::new(0.0, 0.0, 0.0), DVec3::new(0.0, 120.0, 0.0), DVec3::new(0.0, 10.0, 0.0)], LaneKind::Street, 3.0);
+        assert_eq!(Network::lane_cells(&back), vec![(0, 0), (0, 1), (0, 2)]);
+        // a path drawn 1000 km long (GPM's TCSP8.sco has one): every cell once, and quickly
+        // (each looked for in the list so far, it froze the game for a quarter of a second)
+        let started = std::time::Instant::now();
+        let cells = Network::lane_cells(&straight(10.0, 0.0, -1_000_000.0, 1, (0, 0)));
+        let took = started.elapsed();
+        assert_eq!(cells.len(), 20_001);
+        assert_eq!((cells[0], cells[20_000]), ((0, 0), (0, -20_000)));
+        assert!(took < std::time::Duration::from_millis(50), "{took:?}");
     }
 
     #[test]

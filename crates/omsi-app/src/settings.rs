@@ -531,7 +531,10 @@ impl Settings {
         if let Some(n) = omsi_cfg::env::var("OMSI_SAFE_GPU").ok().and_then(|v| v.parse::<u32>().ok()).filter(|n| *n > 0) {
             s.apply_safe_gpu(n);
         }
-        log::info!("settings from {}: msaa {} af {} ssao {} shadows {} ({}) navigator {} graphics {} post aa {} vsync {} render scale {} boarding {} min object size {} max object distance {} max fps {}", p.display(), s.msaa, s.anisotropy, s.ssao, s.shadows, s.shadow_size, s.navigator, s.graphics, s.post_aa, s.vsync, s.render_scale_text(), s.boarding, s.min_obj_size, s.object_distance(), s.max_fps);
+        let line = format!("settings from {}: msaa {} af {} ssao {} shadows {} ({}) navigator {} graphics {} post aa {} vsync {} render scale {} boarding {} min object size {} max object distance {} max fps {}", p.display(), s.msaa, s.anisotropy, s.ssao, s.shadows, s.shadow_size, s.navigator, s.graphics, s.post_aa, s.vsync, s.render_scale_text(), s.boarding, s.min_obj_size, s.object_distance(), s.max_fps);
+        if new_line(&LAST_LOGGED, &line) {
+            log::info!("{line}");
+        }
         s
     }
 
@@ -954,8 +957,30 @@ pub fn view_distance() -> Option<f64> {
     text.lines().filter_map(|l| l.trim().split_once('=')).find(|(k, _)| k.trim().eq_ignore_ascii_case("view_distance")).and_then(|(_, v)| v.trim().parse::<f64>().ok()).filter(|v| *v > 0.0)
 }
 
+/// The settings line logged last (`Settings::load` is asked a few dozen times a start).
+static LAST_LOGGED: parking_lot::Mutex<String> = parking_lot::Mutex::new(String::new());
+
+/// Whether `line` differs from the one logged last (and is now that one).
+fn new_line(last: &parking_lot::Mutex<String>, line: &str) -> bool {
+    let mut last = last.lock();
+    if *last == line {
+        return false;
+    }
+    *last = line.to_string();
+    true
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_settings_are_logged_again_only_when_they_change() {
+        let last = parking_lot::Mutex::new(String::new());
+        assert!(super::new_line(&last, "settings: msaa 8"));
+        assert!(!super::new_line(&last, "settings: msaa 8"));
+        assert!(super::new_line(&last, "settings: msaa 4"));
+        assert!(super::new_line(&last, "settings: msaa 8"));
+    }
+
     /// A computer without settings starts with the custom fork's recommended graphics; an
     /// older file that says only `enhanced=0` keeps its Vanilla+ picture.
     #[test]

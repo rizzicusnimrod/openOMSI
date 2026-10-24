@@ -48,6 +48,16 @@ pub fn origin_matrix(origins: &[AnimOrigin], pivot: Mat4) -> Mat4 {
     m
 }
 
+/// The variables a missing-variable warning was given for.
+type Warned = parking_lot::Mutex<Option<hashbrown::HashSet<String>>>;
+static WARNED: Warned = parking_lot::Mutex::new(None);
+
+/// Whether `name` gets its warning now: once each, not once for every vehicle that loads
+/// the model (every AI lorry of a type said it again).
+fn first_warning(seen: &Warned, name: &str) -> bool {
+    seen.lock().get_or_insert_with(Default::default).insert(name.to_string())
+}
+
 impl MeshAnimator {
     pub fn new(def: &MeshDef, pivot: Mat4, resolve: impl Fn(&str) -> Option<VarId>) -> Self {
         let anims = def
@@ -55,7 +65,7 @@ impl MeshAnimator {
             .iter()
             .map(|a| {
                 let var = resolve(&a.variable);
-                if var.is_none() && !a.variable.is_empty() {
+                if var.is_none() && !a.variable.is_empty() && first_warning(&WARNED, &a.variable) {
                     log::warn!("animation variable {} not found", a.variable);
                 }
                 (a.clone(), origin_matrix(&a.origins, pivot), AnimState { var, value: 0.0, initialized: false })
@@ -182,6 +192,15 @@ mod tests {
 
     fn animator(parent: Option<usize>) -> MeshAnimator {
         MeshAnimator { anims: Vec::new(), parent }
+    }
+
+    #[test]
+    fn a_missing_variable_is_warned_about_once() {
+        let seen: Warned = parking_lot::Mutex::new(None);
+        assert!(first_warning(&seen, "antrieb_shifter_posx"));
+        assert!(!first_warning(&seen, "antrieb_shifter_posx"));
+        assert!(first_warning(&seen, "antrieb_shifter_posy"));
+        assert!(!first_warning(&seen, "antrieb_shifter_posy"));
     }
 
     #[test]
