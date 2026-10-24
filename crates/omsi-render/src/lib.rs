@@ -13594,6 +13594,21 @@ mod lens_lamp_tests {
         assert_eq!(lens_lamp_kept(0.65, 1.0, RED), 1.0);
     }
 
+    /// The picture behind the glass is made whenever a pane can hold water or snow: in the
+    /// rain, on wet roads and while it snows. In a snowfall on dry roads it was not, and the
+    /// snow on the windscreen took the night sky for the street behind it - dark specks over
+    /// the lit road at night, and the melt water between them a dark veil.
+    #[test]
+    fn the_glass_has_its_picture_behind_it_while_it_snows() {
+        use super::Lighting;
+        let dry = Lighting::default();
+        assert!(!super::glass_weather(&dry));
+        assert!(super::glass_weather(&Lighting { rain: 0.5, ..Default::default() }));
+        assert!(super::glass_weather(&Lighting { wetness: 0.3, ..Default::default() }));
+        assert!(super::glass_weather(&Lighting { snowfall: 0.4, ..Default::default() }));
+        assert!(super::glass_weather(&Lighting { glass_snow: 1.0, ..Default::default() }));
+    }
+
     /// lamp_air.wgsl's copy of `lens_lamp_kept` takes the same steps.
     #[test]
     fn the_shaders_lens_steps_are_these() {
