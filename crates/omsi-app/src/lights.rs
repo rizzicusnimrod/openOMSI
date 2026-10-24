@@ -1179,6 +1179,31 @@ mod spot_tests {
         assert_eq!(lamps[1], (Vec3::new(1.1, -5.9, 1.0), 0.8));
     }
 
+    /// The red the brake lamps throw on the road behind stays under the lamps: its cone's top
+    /// edge a few degrees below their height, the road some metres back still in it.
+    /// Reaching 54 degrees up, it lit the cabin of the car behind - a third brake light in
+    /// its rear window.
+    #[test]
+    fn the_rear_glow_never_shines_above_its_lamps() {
+        let (axis, cone) = super::rear_glow_aim();
+        let top = axis.normalize().z.asin().to_degrees() + cone[1].acos().to_degrees();
+        assert!((-8.0..=-2.0).contains(&top), "the cone's top edge {top} deg");
+        // (the road 8 m behind a lamp 0.8 m up)
+        let to_road = glam::Vec3::new(0.0, -8.0, -0.8).normalize();
+        assert!(to_road.dot(axis.normalize()) >= cone[1]);
+    }
+
+    /// Every light a vehicle throws in the enhanced picture stops at the other vehicles - its
+    /// beams and its small lights alike; the classic picture's stand-ins know none.
+    #[test]
+    fn a_vehicles_lights_stop_at_other_vehicles() {
+        use omsi_render::{LightMode, PointLight};
+        let glow = PointLight { direction: glam::Vec3::NEG_Y, mode: LightMode::Enhanced, ..Default::default() };
+        assert!(super::stops_at_vehicles(&glow));
+        assert!(super::stops_at_vehicles(&PointLight { beam: 1.0, ..glow }));
+        assert!(!super::stops_at_vehicles(&PointLight { mode: LightMode::Vanilla, ..glow }));
+    }
+
     #[test]
     fn a_full_beam_reaches_further_than_the_low_beam() {
         // the stock buses: low beam 100, full beam 500 (#941)

@@ -17446,6 +17446,47 @@ mod tests {
         assert_eq!(rows[3], [0.0; 4]);
     }
 
+    /// What of a lamp's light gets past the vehicles round it (blockers.wgsl
+    /// `vehicles_block`, `light_past_vehicles` its copy): a headlamp's beam lights a car's
+    /// body wherever the point is in its box - that car's own skin; the small lights a
+    /// vehicle throws round itself (its brake lamps' red on the road, a reversing lamp) only
+    /// the skin of a car's box, never what lies deep inside it. The car behind a braking one
+    /// glowed red in its cabin: a third brake light in its rear window, out of nowhere.
+    #[test]
+    fn a_brake_glow_leaves_the_cabin_behind_it_dark() {
+        // the car behind: 4.4 m long, 1.8 wide, 1.5 high from 0.15 m up, its middle 4 m
+        // behind the braking car's glow
+        let b = LightBlocker { center: DVec3::new(0.0, -4.0, 0.9), rotation: glam::Mat3::IDENTITY, half: Vec3::new(0.9, 2.2, 0.75) };
+        let rows = blocker_rows(&[b], DVec3::ZERO);
+        let glow = Vec3::new(0.0, 0.0, 0.8);
+        let past = |p: Vec3, cabins: bool| light_past_vehicles(&rows, 1, p, glow, cabins);
+        // its cabin: dark to the glow, lit (as its body) by a beam
+        assert_eq!(past(Vec3::new(0.0, -3.5, 1.0), true), 0.0);
+        assert_eq!(past(Vec3::new(0.0, -3.5, 1.0), false), 1.0);
+        // its front face: lit by both
+        assert_eq!(past(Vec3::new(0.0, -1.81, 0.6), true), 1.0);
+        // the road between the two cars lit, the road past the car behind in its shadow
+        assert_eq!(past(Vec3::new(0.0, -1.0, 0.0), true), 1.0);
+        assert_eq!(past(Vec3::new(0.0, -8.0, 0.0), true), 0.0);
+        // a vehicle left out of the mask stops nothing
+        assert_eq!(light_past_vehicles(&rows, 0, Vec3::new(0.0, -3.5, 1.0), glow, true), 1.0);
+    }
+
+    /// A vehicle's own small lights stop at the vehicles round it as its beams do: their
+    /// vehicles ride in `pos.w`, below zero - where the classic shader passes a light by
+    /// (`dist >= pos.w`) - and their inner cone stays where it was.
+    #[test]
+    fn a_vehicle_lamps_light_takes_its_vehicles_along() {
+        let glow = PointLight { radius: 10.0, color: [1.0, 0.04, 0.02], intensity: 2.0, direction: Vec3::new(0.0, -0.8, -0.6), cone: [0.97, 0.87], mode: LightMode::Enhanced, blockers: 0b101, ..Default::default() };
+        let g = gpu_light(&glow, Vec3::ZERO);
+        assert_eq!(g.pos[3], -5.0);
+        assert_eq!(g.extra[0], 0.97);
+        assert_eq!(gpu_light(&PointLight { blockers: 0, ..glow }, Vec3::ZERO).pos[3], 0.0);
+        // (a beam keeps its vehicles where it had them, a classic light its radius)
+        assert_eq!(gpu_light(&PointLight { beam: 1.0, ..glow }, Vec3::ZERO).pos[3], 0.0);
+        assert_eq!(gpu_light(&PointLight { mode: LightMode::Vanilla, ..glow }, Vec3::ZERO).pos[3], 10.0);
+    }
+
     #[test]
     fn each_path_gets_its_own_headlights() {
         let lamp = PointLight {
