@@ -4010,27 +4010,29 @@ impl World {
                 (t3 - t2).as_secs_f64()
             );
         }
-        self.cut_terrain(&mut prepared, &staged, &layout);
+        let texture_secs = self.cut_terrain(&mut prepared, &staged, &layout);
         let cut_secs = t3.elapsed().as_secs_f64();
         if initial_diag {
             let total = t0.elapsed().as_secs_f64();
             if total >= 2.0 {
                 log::warn!(
-                    "tile loading: first-area batch prepared in {:.2} s: index/layout {:.2}, stage {:.2}, place {:.2}, cut/textures {:.2}",
+                    "tile loading: first-area batch prepared in {:.2} s: index/layout {:.2}, stage {:.2}, place {:.2}, cut/textures {:.2} (textures {:.2})",
                     total,
                     (t1 - t0).as_secs_f64(),
                     (t2 - t1).as_secs_f64(),
                     (t3 - t2).as_secs_f64(),
-                    cut_secs
+                    cut_secs,
+                    texture_secs
                 );
             } else {
                 log::info!(
-                    "tile loading: first-area batch prepared in {:.2} s: index/layout {:.2}, stage {:.2}, place {:.2}, cut/textures {:.2}",
+                    "tile loading: first-area batch prepared in {:.2} s: index/layout {:.2}, stage {:.2}, place {:.2}, cut/textures {:.2} (textures {:.2})",
                     total,
                     (t1 - t0).as_secs_f64(),
                     (t2 - t1).as_secs_f64(),
                     (t3 - t2).as_secs_f64(),
-                    cut_secs
+                    cut_secs,
+                    texture_secs
                 );
             }
         } else if profile {
@@ -5621,7 +5623,7 @@ impl World {
         prepared: &mut [Prepared],
         staged: &HashMap<(i32, i32), Arc<StagedTile>>,
         layout: &TileLayout,
-    ) {
+    ) -> f64 {
         let debug_raster = omsi_cfg::env::var("OMSI_DEBUG_RASTER").ok().and_then(|q| {
             q.split_once(',')
                 .and_then(|(a, b)| Some((a.parse::<f64>().ok()?, b.parse::<f64>().ok()?)))
@@ -5630,6 +5632,11 @@ impl World {
         let debug = omsi_cfg::env::var_os("OMSI_DEBUG_SPLINES").is_some();
         type Check = (usize, usize, Vec<(f64, f64, f32)>);
         let debug_physics = omsi_cfg::env::var_os("OMSI_DEBUG_PHYSICS").is_some();
+        // (OMSI_PROFILE: where this step's time goes, summed over the tiles' threads)
+        let spent: [std::sync::atomic::AtomicU64; 9] = Default::default();
+        let lap = |i: usize, from: std::time::Instant| {
+            spent[i].fetch_add(from.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        };
         let results: Vec<(Arc<TileSurface>, Option<Image>, Check, usize)> = prepared
             .par_iter_mut()
             .map(|p| {
@@ -5673,6 +5680,7 @@ impl World {
                 // every road that reaches the tile; a railway embankment or a bridge deck is
                 // a surface (the ground is cut under it) but not something the wheels stand
                 // on: only splines that carry a road or footway path count as drivable
+                let t = std::time::Instant::now();
                 for q in &order {
                     for sp in &q.splines {
                         // (a blended layer - Westcountry's lane darkeners over the painted
@@ -5717,7 +5725,9 @@ impl World {
                         }
                     }
                 }
+                lap(0, t);
                 // the surfaces and [terrainhole] cutters of this tile and the ones around it
+                let t = std::time::Instant::now();
                 for q in &order {
                     if (q.tx - tx).abs() > 1 || (q.ty - ty).abs() > 1 {
                         continue;
@@ -5819,12 +5829,15 @@ impl World {
                         }
                     }
                 }
+                lap(1, t);
+                let t = std::time::Instant::now();
                 ts.finish();
                 let tile_terrain = self.terrains.read().get(&key).cloned();
                 p.hole_walls = tile_terrain
                     .as_ref()
                     .map(|terrain| omsi_geometry::terrain_hole_walls(&hole_rims, terrain))
                     .unwrap_or_default();
+                lap(2, t);
                 // How much of the ground the old cut rule ("anything below the terrain takes
                 // it away") would have removed with nothing to put in its place: a hole in
                 // the world you can see the sky through.
@@ -5867,6 +5880,7 @@ impl World {
                     tile_terrain.as_ref().map(|t| t.sample(x, y)).unwrap_or(0.0)
                 };
                 // the hole the roads cut into the ground, as an alpha image in tile space
+                let t = std::time::Instant::now();
                 let cut = if ts.cuts_anything(&terrain_at, surface_flush()) {
                     if debug {
                         log::info!("tile ({tx}, {ty}): terrain cut under flush surfaces");
@@ -5887,8 +5901,10 @@ impl World {
                 } else {
                     None
                 };
+                lap(3, t);
                 // the painted ground layers: where the roads cut the ground away the paint
                 // goes too, and a layer with nothing left on the tile is not drawn
+                let t = std::time::Instant::now();
                 let masks = std::mem::take(&mut p.paint_masks);
                 p.wall_paint.clear();
                 p.paint = masks
@@ -5958,6 +5974,7 @@ impl World {
                         })
                     })
                     .collect();
+                lap(4, t);
                 (Arc::new(ts), cut, check, wheel_meshes)
             })
             .collect();
@@ -5965,7 +5982,9 @@ impl World {
         let mut where_: Vec<(f64, f64, f32)> = Vec::new();
         let (mut tris, mut wheel_meshes) = (0usize, 0usize);
         for (p, (ts, cut, check, wheels)) in prepared.iter_mut().zip(results) {
+            let t = std::time::Instant::now();
             p.cut = cut.map(|c| if omsi_cfg::env::var_os("OMSI_CUT_PLAIN").is_some() { omsi_texture::gpu::TextureData { gpu_mips: false, ..omsi_texture::gpu::TextureData::from_image(c) } } else { tile_texture(c, true) });
+            lap(5, t);
             tris += ts.drive.tris.len();
             wheel_meshes += wheels;
             // the wheel surfaces come and go with the tile (World::unload_tile)
@@ -6007,6 +6026,7 @@ impl World {
         // The textures of object types, splines and trees that are not on the GPU yet are
         // decoded here instead of on the thread that draws. A big batch (a whole map at
         // once) decodes them as it uploads instead: all at once they would not fit.
+        let textures_from = std::time::Instant::now();
         if prepared.len() <= 16 {
             for p in prepared.iter_mut() {
                 for o in p.objects.iter_mut() {
@@ -6019,18 +6039,26 @@ impl World {
                     }
                 }
             }
+            let t = std::time::Instant::now();
+            // (`par_iter_mut`: a prepared tile is not shared between threads, only sent)
             let mut wanted: Vec<(String, Vec<PathBuf>)> = prepared
-                .iter()
-                .flat_map(|p| self.wanted_textures(p))
+                .par_iter_mut()
+                .flat_map_iter(|p| self.wanted_textures(p))
                 .collect();
             wanted.sort();
             wanted.dedup();
+            lap(8, t);
             let decoded: Vec<(PathBuf, Arc<TextureData>)> = wanted
                 .par_iter()
                 .filter_map(|(name, dirs)| {
                     let dirs_ref: Vec<&Path> = dirs.iter().map(|d| d.as_path()).collect();
-                    let path = omsi_texture::find_texture(name, &dirs_ref)?;
+                    let t = std::time::Instant::now();
+                    let found = omsi_texture::find_texture(name, &dirs_ref);
+                    lap(6, t);
+                    let path = found?;
+                    let t = std::time::Instant::now();
                     let (img, _) = omsi_texture::gpu::load_gpu(&path).ok()?;
+                    lap(7, t);
                     Some((path, Arc::new(img)))
                 })
                 .collect();
@@ -6040,6 +6068,26 @@ impl World {
                 p.images = decoded.clone();
             }
         }
+        let texture_secs = textures_from.elapsed().as_secs_f64();
+        if omsi_cfg::env::var_os("OMSI_PROFILE").is_some() {
+            let s = |i: usize| spent[i].load(std::sync::atomic::Ordering::Relaxed) as f64 * 1e-9;
+            log::info!(
+                "cut step of {} tiles (thread seconds): roads {:.2}, objects {:.2}, finish {:.2}, cut mask {:.2}, paint {:.2}, cut picture {:.2} (one thread); textures {:.2} s (list {:.2} s, then finding {:.2}, loading {:.2} thread s; disk cache {:?} found/not)",
+                prepared.len(),
+                s(0),
+                s(1),
+                s(2),
+                s(3),
+                s(4),
+                s(5),
+                texture_secs,
+                s(8),
+                s(6),
+                s(7),
+                omsi_texture::disk_cache::counts()
+            );
+        }
+        texture_secs
     }
 
     /// Texture names (with their search folders) a prepared tile will ask for that are not
@@ -6164,8 +6212,10 @@ impl World {
         names.sort();
         names.dedup();
         // find the files without the lock, then keep what the GPU does not have yet
+        // (side by side: a name not in a folder is looked for under every spelling, season
+        // and extension there, and one after another they took 6 s of the first tiles)
         let found: Vec<(PathBuf, (String, Vec<PathBuf>))> = names
-            .into_iter()
+            .into_par_iter()
             .filter_map(|(name, dirs)| {
                 let dirs_ref: Vec<&Path> = dirs.iter().map(|d| d.as_path()).collect();
                 omsi_texture::find_texture(&name, &dirs_ref).map(|path| (path, (name, dirs)))

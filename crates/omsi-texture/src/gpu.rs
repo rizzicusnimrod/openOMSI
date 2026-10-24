@@ -3,6 +3,7 @@
 //! where the device takes block formats and the result is close enough, RGBA otherwise.
 
 use crate::bc::{self, Bc};
+use crate::disk_cache::{DiskCache, Hit};
 use crate::{Image, TextureError};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -141,6 +142,10 @@ pub struct Prepared {
     pub encoded: bool,
     /// Compression was tried and given up for quality.
     pub rejected: bool,
+    /// A DXT file's missing mip chain was made here.
+    pub chain_made: bool,
+    /// It came from the disk cache (see [`crate::disk_cache`]).
+    pub cached: bool,
 }
 
 /// Mip levels 1.. of `rgba` as blocks of `format`.
@@ -179,6 +184,18 @@ pub fn block_size(w: u32, h: u32) -> Option<(u32, u32)> {
 /// texel is a larger share of them).
 const MIN_RESIZE_SIDE: u32 = 128;
 
+/// The picture at its [`block_size`] (as it is when it has none). The picture as read goes
+/// as soon as its resized copy is there.
+fn to_block_size(img: Image) -> Image {
+    match block_size(img.width, img.height) {
+        Some((nw, nh)) if (nw, nh) != (img.width, img.height) => {
+            let rgba = bc::resize(&img.rgba, img.width, img.height, nw, nh);
+            Image { rgba, width: nw, height: nh, has_alpha: img.has_alpha }
+        }
+        _ => img,
+    }
+}
+
 pub fn prepare_image_with(img: Image, o: GpuOptions) -> (TextureData, Prepared) {
     let mut info = Prepared::default();
     let texels = img.width as u64 * img.height as u64;
@@ -186,14 +203,8 @@ pub fn prepare_image_with(img: Image, o: GpuOptions) -> (TextureData, Prepared) 
     if !(o.bc && o.compress) || target.is_none() || texels < MIN_COMPRESS_TEXELS {
         return (TextureData::from_image(img), info);
     }
-    let (nw, nh) = target.unwrap();
-    // (the picture as read goes as soon as its resized copy is there)
-    let img = if (nw, nh) != (img.width, img.height) {
-        let rgba = bc::resize(&img.rgba, img.width, img.height, nw, nh);
-        Image { rgba, width: nw, height: nh, has_alpha: img.has_alpha }
-    } else {
-        img
-    };
+    let img = to_block_size(img);
+    let (nw, nh) = (img.width, img.height);
     let texels = nw as u64 * nh as u64;
     let opaque = !img.has_alpha || img.rgba.chunks_exact(4).all(|p| p[3] == 255);
     let format = if opaque { PixelFormat::Bc1 } else { PixelFormat::Bc3 };
@@ -313,8 +324,41 @@ fn dds_blocks(bytes: &[u8]) -> Option<(PixelFormat, u32, u32, u32, usize)> {
 
 /// Load a texture file for the GPU under the current options.
 pub fn load_gpu(path: &Path) -> Result<(TextureData, Prepared), TextureError> {
-    let bytes = omsi_cfg::vfs::read(path).map_err(|e| TextureError::Decode(path.to_path_buf(), e.to_string()))?;
-    load_gpu_bytes(&bytes, path, gpu_options())
+    load_gpu_cached(path, gpu_options(), crate::disk_cache::global().as_deref())
+}
+
+/// [`load_gpu`] under the options `o`, through the disk cache `cache`: what the CPU
+/// compressed (or gave up compressing) once is read back from there.
+pub fn load_gpu_cached(path: &Path, o: GpuOptions, cache: Option<&DiskCache>) -> Result<(TextureData, Prepared), TextureError> {
+    if let Some(found) = cache.and_then(|c| from_cache(c, path, o)) {
+        return found;
+    }
+    let bytes = read_file(path)?;
+    let (t, info) = load_gpu_bytes(&bytes, path, o)?;
+    if let Some(c) = cache {
+        if info.encoded || info.chain_made {
+            c.put_data(path, o, &t);
+        } else if info.rejected {
+            c.put(path, o, &Hit::Plain);
+        }
+    }
+    Ok((t, info))
+}
+
+fn read_file(path: &Path) -> Result<Vec<u8>, TextureError> {
+    omsi_cfg::vfs::read(path).map_err(|e| TextureError::Decode(path.to_path_buf(), e.to_string()))
+}
+
+/// What the disk cache keeps of `path`, if anything: the texture, or (for one compressing
+/// was given up for) the RGBA it decodes to, at the size the compressor tried.
+fn from_cache(cache: &DiskCache, path: &Path, o: GpuOptions) -> Option<Result<(TextureData, Prepared), TextureError>> {
+    let cached = Prepared { cached: true, ..Prepared::default() };
+    Some(match cache.get(path, o)? {
+        Hit::Data(t) => Ok((t, cached)),
+        Hit::Plain => read_file(path)
+            .and_then(|b| crate::decode_bytes(&b, path))
+            .map(|img| (TextureData::from_image(to_block_size(img)), Prepared { rejected: true, ..cached })),
+    })
 }
 
 /// A texture for the GPU as quickly as it can be had, for a picture wanted while the game
@@ -322,8 +366,12 @@ pub fn load_gpu(path: &Path) -> Result<(TextureData, Prepared), TextureError> {
 /// GPU makes (what the renderer did before). The flag says [`load_gpu`] would give a
 /// compressed texture, worth doing on a worker and swapping in.
 pub fn load_gpu_fast(path: &Path) -> Result<(TextureData, bool), TextureError> {
-    let bytes = omsi_cfg::vfs::read(path).map_err(|e| TextureError::Decode(path.to_path_buf(), e.to_string()))?;
     let o = gpu_options();
+    // (compressed on an earlier run: no worker needed)
+    if let Some(found) = crate::disk_cache::global().and_then(|c| from_cache(&c, path, o)) {
+        return found.map(|(t, _)| (t, false));
+    }
+    let bytes = read_file(path)?;
     if o.bc {
         if let Some((_, w, h, count, _)) = dds_blocks(&bytes) {
             // a chain the file has is taken as it is; a missing one is made in RGBA first
@@ -368,11 +416,12 @@ pub fn load_gpu_bytes(bytes: &[u8], path: &Path, o: GpuOptions) -> Result<(Textu
                     let has_alpha = format != PixelFormat::Bc1 || levels[0].chunks_exact(8).any(bc::bc1_block_has_alpha);
                     // a single level gets its chain like D3DX makes it: filtered in RGBA and
                     // compressed again (the top level stays the file's own)
-                    if levels.len() == 1 && mip_count(w, h) > 1 {
+                    let chain_made = levels.len() == 1 && mip_count(w, h) > 1;
+                    if chain_made {
                         let rgba = bc::decode(&levels[0], w, h, format.bc(has_alpha));
                         encode_levels(rgba, w, h, format, has_alpha, &mut levels);
                     }
-                    return Ok((TextureData { width: w, height: h, format, levels, has_alpha, gpu_mips: false }, Prepared::default()));
+                    return Ok((TextureData { width: w, height: h, format, levels, has_alpha, gpu_mips: false }, Prepared { chain_made, ..Prepared::default() }));
                 }
             }
         }
@@ -529,6 +578,86 @@ mod tests {
     }
 
     pub(crate) static OPTIONS_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    fn cache_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("openomsi-gpu-cache-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn files_in(dir: &Path) -> usize {
+        let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+        rd.flatten().map(|e| if e.path().is_dir() { files_in(&e.path()) } else { 1 }).sum()
+    }
+
+    #[test]
+    fn a_second_load_of_a_bmp_comes_from_the_disk_cache() {
+        let dir = cache_dir("bmp");
+        let p = dir.join("gradient.bmp");
+        // a smooth picture: BC1 keeps it well
+        image::RgbImage::from_fn(64, 64, |x, y| image::Rgb([(x * 4) as u8, (y * 4) as u8, 128])).save_with_format(&p, image::ImageFormat::Bmp).unwrap();
+        let cache = crate::disk_cache::DiskCache::new(dir.join("cache"));
+        let on = GpuOptions { bc: true, compress: true };
+        let (a, first) = load_gpu_cached(&p, on, Some(&cache)).unwrap();
+        assert!(first.encoded && !first.cached);
+        assert_eq!((a.format, a.levels.len()), (PixelFormat::Bc1, 7));
+        let (b, second) = load_gpu_cached(&p, on, Some(&cache)).unwrap();
+        assert!(second.cached && !second.encoded, "{second:?}");
+        assert_eq!((b.format, b.width, b.height, b.has_alpha, b.gpu_mips), (a.format, a.width, a.height, a.has_alpha, a.gpu_mips));
+        assert_eq!(b.levels, a.levels);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_picture_too_noisy_to_compress_is_not_tried_again() {
+        let dir = cache_dir("noise");
+        let p = dir.join("noise.bmp");
+        let mut s = 7u32;
+        image::RgbImage::from_fn(64, 64, |_, _| {
+            let mut c = [0u8; 3];
+            for v in &mut c {
+                s = s.wrapping_mul(1103515245).wrapping_add(12345);
+                *v = (s >> 16) as u8;
+            }
+            image::Rgb(c)
+        })
+        .save_with_format(&p, image::ImageFormat::Bmp)
+        .unwrap();
+        let cache = crate::disk_cache::DiskCache::new(dir.join("cache"));
+        let on = GpuOptions { bc: true, compress: true };
+        let (a, first) = load_gpu_cached(&p, on, Some(&cache)).unwrap();
+        assert!(first.rejected && !first.cached);
+        let (b, second) = load_gpu_cached(&p, on, Some(&cache)).unwrap();
+        assert!(second.cached && second.rejected && !second.encoded, "{second:?}");
+        assert_eq!((b.format, b.gpu_mips, b.width, b.height), (PixelFormat::Rgba8, true, a.width, a.height));
+        assert_eq!(b.levels, a.levels);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dds_that_carries_its_chain_is_not_kept_twice() {
+        let dir = cache_dir("dds");
+        let p = dir.join("chain.dds");
+        let blocks: Vec<u8> = (0..7 * 16).map(|i| i as u8).collect();
+        std::fs::write(&p, dds(b"DXT5", 8, 8, 4, &blocks)).unwrap();
+        let cache = crate::disk_cache::DiskCache::new(dir.join("cache"));
+        let on = GpuOptions { bc: true, compress: true };
+        let (_, first) = load_gpu_cached(&p, on, Some(&cache)).unwrap();
+        let (_, second) = load_gpu_cached(&p, on, Some(&cache)).unwrap();
+        assert!(!first.cached && !second.cached);
+        assert_eq!(files_in(&dir.join("cache")), 0);
+        // one without its chain has it made once, then read back
+        let opaque: Vec<u8> = (0..16).flat_map(|i| [0xFF, 0xF0 - i as u8, 0x10, 0x00, 0x1B, 0x6C, 0xC6, 0x00]).collect();
+        let q = dir.join("single.dds");
+        std::fs::write(&q, dds(b"DXT1", 16, 16, 1, &opaque)).unwrap();
+        let (a, first) = load_gpu_cached(&q, on, Some(&cache)).unwrap();
+        assert!(first.chain_made && !first.cached);
+        let (b, second) = load_gpu_cached(&q, on, Some(&cache)).unwrap();
+        assert!(second.cached);
+        assert_eq!(b.levels, a.levels);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn sizes() {

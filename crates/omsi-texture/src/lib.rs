@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 pub mod bc;
 pub mod dds;
+pub mod disk_cache;
 pub mod gpu;
 pub mod tga;
 
@@ -304,19 +305,7 @@ fn find_texture_elsewhere(name: &str, dirs: &[&Path]) -> Option<PathBuf> {
     let top = first.ancestors().find_map(|a| {
         a.file_name().and_then(|f| f.to_str()).filter(|f| f.eq_ignore_ascii_case("Splines") || f.eq_ignore_ascii_case("Sceneryobjects")).map(|f| f.to_ascii_lowercase())
     })?;
-    static INDEX: std::sync::OnceLock<Mutex<HashMap<String, (u64, Arc<HashMap<String, Vec<PathBuf>>>)>>> = std::sync::OnceLock::new();
-    let generation = omsi_cfg::content_generation();
-    let index = {
-        let mut all = INDEX.get_or_init(|| Mutex::new(HashMap::new())).lock();
-        match all.get(&top) {
-            Some((g, i)) if *g == generation => i.clone(),
-            _ => {
-                let i = Arc::new(texture_index(&top));
-                all.insert(top.clone(), (generation, i.clone()));
-                i
-            }
-        }
-    };
+    let index = indexed(&top);
     let key = |p: &Path| p.file_stem().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
     let want = Path::new(name);
     if !want.extension().and_then(|x| x.to_str()).is_some_and(|x| ["dds", "bmp", "jpg", "jpeg", "png", "tga"].iter().any(|t| x.eq_ignore_ascii_case(t))) {
@@ -334,28 +323,105 @@ fn find_texture_elsewhere(name: &str, dirs: &[&Path]) -> Option<PathBuf> {
     Some(found)
 }
 
+/// Pictures by stem (see [`texture_index`]).
+type TextureIndex = HashMap<String, Vec<PathBuf>>;
+
+/// The index of `top` for the content as it is now: made once (a second caller waits for
+/// the one making it), again when the content changes.
+fn indexed(top: &str) -> Arc<TextureIndex> {
+    static INDEX: std::sync::OnceLock<Mutex<HashMap<String, (u64, Arc<TextureIndex>)>>> = std::sync::OnceLock::new();
+    let generation = omsi_cfg::content_generation();
+    let mut all = INDEX.get_or_init(|| Mutex::new(HashMap::new())).lock();
+    match all.get(top) {
+        Some((g, i)) if *g == generation => i.clone(),
+        _ => {
+            let i = Arc::new(texture_index(top));
+            all.insert(top.to_string(), (generation, i.clone()));
+            i
+        }
+    }
+}
+
+/// Build the indexes of the pictures under `Splines` and `Sceneryobjects` on a thread of
+/// their own (see [`warm_texture_indexes_now`]); the game starts it once its content roots
+/// are there, and it is done while the renderer compiles its shaders.
+pub fn warm_texture_indexes() {
+    let _ = std::thread::Builder::new().name("texture index".into()).spawn(warm_texture_indexes_now);
+}
+
+/// Build the indexes [`find_texture`] falls back on now, before a texture missing from its
+/// folders asks for them: the first such texture walked the whole `Sceneryobjects` tree on
+/// the thread that prepares the tiles, 7 s of the Thüringer Wald's first tiles.
+pub fn warm_texture_indexes_now() {
+    for top in ["splines", "sceneryobjects"] {
+        indexed(top);
+    }
+}
+
 /// Image files under `top` (`splines`/`sceneryobjects`) of every content root and mounted archive, by stem.
-fn texture_index(top: &str) -> HashMap<String, Vec<PathBuf>> {
-    let mut out: HashMap<String, Vec<PathBuf>> = HashMap::new();
-    let mut stack: Vec<PathBuf> = omsi_cfg::content_roots()
-        .into_iter()
+fn texture_index(top: &str) -> TextureIndex {
+    let started = std::time::Instant::now();
+    let index = texture_index_in(&omsi_cfg::content_roots(), top);
+    log::info!("texture index of {top}: {} pictures in {:.2} s", index.values().map(|v| v.len()).sum::<usize>(), started.elapsed().as_secs_f64());
+    index
+}
+
+fn is_picture(p: &Path) -> bool {
+    p.extension().and_then(|x| x.to_str()).is_some_and(|x| ["dds", "bmp", "jpg", "png", "tga"].iter().any(|t| x.eq_ignore_ascii_case(t)))
+}
+
+/// [`texture_index`] of the content roots `roots`: each folder right under `top` walked on a
+/// thread of its own, every stem's files in path order.
+fn texture_index_in(roots: &[PathBuf], top: &str) -> TextureIndex {
+    use rayon::prelude::*;
+    let tops: Vec<PathBuf> = roots
+        .iter()
         .filter_map(|r| {
-            let (name, _) = omsi_cfg::vfs::list_dir(&r)?.into_iter().find(|(n, d)| *d && n.to_str().is_some_and(|n| n.eq_ignore_ascii_case(top)))?;
+            let (name, _) = omsi_cfg::vfs::list_dir(r)?.into_iter().find(|(n, d)| *d && n.to_str().is_some_and(|n| n.eq_ignore_ascii_case(top)))?;
             Some(r.join(name))
         })
         .collect();
-    while let Some(dir) = stack.pop() {
-        let Some(entries) = omsi_cfg::vfs::list_dir(&dir) else { continue };
-        for (name, is_dir) in entries {
-            let p = dir.join(name);
+    let mut out = TextureIndex::new();
+    let add = |out: &mut TextureIndex, p: PathBuf| {
+        if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+            out.entry(stem.to_ascii_lowercase()).or_default().push(p);
+        }
+    };
+    let mut firsts: Vec<PathBuf> = Vec::new();
+    for t in &tops {
+        for (name, is_dir) in omsi_cfg::vfs::list_dir(t).unwrap_or_default() {
+            let p = t.join(name);
             if is_dir {
-                stack.push(p);
-            } else if p.extension().and_then(|x| x.to_str()).is_some_and(|x| ["dds", "bmp", "jpg", "png", "tga"].iter().any(|t| x.eq_ignore_ascii_case(t))) {
-                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                    out.entry(stem.to_ascii_lowercase()).or_default().push(p);
-                }
+                firsts.push(p);
+            } else if is_picture(&p) {
+                add(&mut out, p);
             }
         }
+    }
+    let parts: Vec<Vec<PathBuf>> = firsts
+        .par_iter()
+        .map(|first| {
+            let mut found = Vec::new();
+            let mut stack = vec![first.clone()];
+            while let Some(dir) = stack.pop() {
+                let Some(entries) = omsi_cfg::vfs::list_dir(&dir) else { continue };
+                for (name, is_dir) in entries {
+                    let p = dir.join(name);
+                    if is_dir {
+                        stack.push(p);
+                    } else if is_picture(&p) {
+                        found.push(p);
+                    }
+                }
+            }
+            found
+        })
+        .collect();
+    for p in parts.into_iter().flatten() {
+        add(&mut out, p);
+    }
+    for files in out.values_mut() {
+        files.sort();
     }
     out
 }
@@ -812,8 +878,52 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// The tests that add content roots or say the content changed (both are global).
+    static CONTENT_LOCK: Mutex<()> = parking_lot::const_mutex(());
+
+    #[test]
+    fn the_index_of_pictures_elsewhere_is_built_ahead() {
+        let _g = CONTENT_LOCK.lock();
+        let dir = std::env::temp_dir().join(format!("omsi-index-ahead-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (own, other) = (dir.join("Sceneryobjects/Pack/House/texture"), dir.join("Sceneryobjects/Pack/Shed/model/texture"));
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("brick_ahead.bmp"), b"x").unwrap();
+        omsi_cfg::add_content_root(dir.clone());
+        warm_texture_indexes_now();
+        // put there after the index was made: not seen until the content is said to change
+        std::fs::write(other.join("late_ahead.bmp"), b"x").unwrap();
+        assert_eq!(find_texture_uncached("brick_ahead.bmp", &[&own]), Some(other.join("brick_ahead.bmp")));
+        assert_eq!(find_texture_uncached("late_ahead.bmp", &[&own]), None);
+        omsi_cfg::content_changed();
+        assert_eq!(find_texture_uncached("late_ahead.bmp", &[&own]), Some(other.join("late_ahead.bmp")));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_texture_index_holds_every_picture_of_the_tree() {
+        let dir = std::env::temp_dir().join(format!("omsi-index-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let top = dir.join("Splines");
+        for (sub, file) in [("A/texture", "Road.BMP"), ("A/texture/Winter", "road.dds"), ("B/C/D/texture", "kerb.png"), ("B", "notes.txt"), ("", "loose.tga")] {
+            let d = top.join(sub);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(file), b"x").unwrap();
+        }
+        let index = texture_index_in(std::slice::from_ref(&dir), "splines");
+        let mut keys: Vec<&String> = index.keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["kerb", "loose", "road"]);
+        assert_eq!(index["road"], vec![top.join("A/texture/Road.BMP"), top.join("A/texture/Winter/road.dds")]);
+        assert_eq!(index["kerb"], vec![top.join("B/C/D/texture/kerb.png")]);
+        assert_eq!(index["loose"], vec![top.join("loose.tga")]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn a_spline_texture_missing_from_its_folders_comes_from_another_spline_folder() {
+        let _g = CONTENT_LOCK.lock();
         let dir = std::env::temp_dir().join(format!("omsi-elsewhere-{}", std::process::id()));
         let (own, other) = (dir.join("Splines/Pack/Roads/texture"), dir.join("Splines/Pack/Paths/texture"));
         std::fs::create_dir_all(&own).unwrap();

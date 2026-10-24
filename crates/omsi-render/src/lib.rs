@@ -3698,28 +3698,57 @@ impl Renderer {
             .unwrap_or(-24);
         // one pipeline per `pipe_code`: the kind decides blending and the depth write
         let scene_pipelines = |f: wgpu::TextureFormat, fs: &str, samples: u32| -> Vec<wgpu::RenderPipeline> {
-            let mut out = Vec::with_capacity(PIPE_KINDS as usize * 4);
-            for kind in 0..PIPE_KINDS {
+            let wanted: Vec<(u8, bool, bool)> = (0..PIPE_KINDS)
+                .flat_map(|kind| [false, true].into_iter().flat_map(move |cull| [false, true].map(|surface| (kind, cull, surface))))
+                .collect();
+            let one = |&(kind, cull, surface): &(u8, bool, bool)| {
                 let blend = matches!(kind, PIPE_BLEND | PIPE_BLEND_NO_WRITE | PIPE_TERRAIN_PAINT)
                     .then_some(wgpu::BlendState::ALPHA_BLENDING);
                 let depth_write = kind != PIPE_BLEND_NO_WRITE && kind != PIPE_TERRAIN_PAINT && kind != PIPE_ALPHA_PREPASSED;
-                for cull in [false, true] {
-                    for surface in [false, true] {
-                        out.push(make(
-                            f,
-                            if kind == PIPE_SURFACE_DEPTH { "fs_surface_depth" } else { fs },
-                            blend,
-                            depth_write,
-                            cull,
-                            if surface { bias } else { 0 },
-                            kind == PIPE_ALPHA_TEST || kind == PIPE_ALPHA_PREPASSED,
-                            kind == PIPE_TERRAIN_PAINT && fs == "fs_enhanced",
-                            samples,
-                        ));
-                    }
+                make(
+                    f,
+                    if kind == PIPE_SURFACE_DEPTH { "fs_surface_depth" } else { fs },
+                    blend,
+                    depth_write,
+                    cull,
+                    if surface { bias } else { 0 },
+                    kind == PIPE_ALPHA_TEST || kind == PIPE_ALPHA_PREPASSED,
+                    kind == PIPE_TERRAIN_PAINT && fs == "fs_enhanced",
+                    samples,
+                )
+            };
+            // (made side by side: wgpu writes the whole scene module out as HLSL again for
+            // every pipeline, and the 168 of them one after another were most of the 15 s a
+            // start spent compiling; OpenGL's context takes them one at a time anyway)
+            if GL_BACKEND.load(std::sync::atomic::Ordering::Relaxed) {
+                return wanted.iter().map(one).collect();
+            }
+            use rayon::prelude::*;
+            // First one pipeline of each shader (the entry point and the constants decide
+            // it), then the rest: those find their shaders compiled in wgpu's cache. All at
+            // once, 28 compiled the same shader side by side and the start took longer.
+            let shader_of = |&(kind, _, _): &(u8, bool, bool)| {
+                (kind == PIPE_SURFACE_DEPTH, kind == PIPE_ALPHA_TEST || kind == PIPE_ALPHA_PREPASSED, kind == PIPE_TERRAIN_PAINT && fs == "fs_enhanced")
+            };
+            let mut firsts: Vec<usize> = Vec::new();
+            for (i, w) in wanted.iter().enumerate() {
+                if !firsts.iter().any(|&j| shader_of(&wanted[j]) == shader_of(w)) {
+                    firsts.push(i);
                 }
             }
-            out
+            let mut out: Vec<Option<wgpu::RenderPipeline>> = (0..wanted.len()).map(|_| None).collect();
+            for round in [true, false] {
+                let made: Vec<(usize, wgpu::RenderPipeline)> = wanted
+                    .par_iter()
+                    .enumerate()
+                    .filter(|(i, _)| firsts.contains(i) == round)
+                    .map(|(i, w)| (i, one(w)))
+                    .collect();
+                for (i, p) in made {
+                    out[i] = Some(p);
+                }
+            }
+            out.into_iter().map(|p| p.expect("every scene pipeline made")).collect()
         };
         let hdr_format = wgpu::TextureFormat::Rgba16Float;
         // sun shadow map: depth only, from the light's orthographic camera
@@ -5354,11 +5383,17 @@ impl Renderer {
         });
         let gpu_timers = [GpuTimers::new(&device), GpuTimers::new(&device)];
         // GLES cannot reliably read the depth buffer (the same limitation as SSAO).
-        let puddles = (!gl && !leave_out_enhanced).then(|| {
-            puddles::Pipelines::new(&device, &shader, &camera_layout, &material_layout)
-        });
-        let taa = (!gl && !leave_out_enhanced).then(|| taa::Taa::new(&device));
-        let grass = (!gl && !leave_out_enhanced && !basic_pipelines()).then(|| grass::Grass::new(&device, &shader, &camera_layout, msaa));
+        // (made side by side: the puddles' and the grass's passes compile against the whole
+        // scene module, seconds each one after another)
+        let (puddles, (taa, grass)) = if !gl && !leave_out_enhanced {
+            let (p, (t, g)) = rayon::join(
+                || puddles::Pipelines::new(&device, &shader, &camera_layout, &material_layout),
+                || rayon::join(|| taa::Taa::new(&device), || (!basic_pipelines()).then(|| grass::Grass::new(&device, &shader, &camera_layout, msaa))),
+            );
+            (Some(p), (Some(t), g))
+        } else {
+            (None, (None, None))
+        };
         let rt = options.ray_tracing.then(|| rt::RayTracer::new(&device));
         Renderer {
             _device_poller: DevicePoller::start(&device),
@@ -9888,7 +9923,9 @@ impl Renderer {
             && omsi_cfg::env::var_os("OMSI_NO_PUDDLE_REFLECTIONS").is_none();
         let reflection_frame = !enhanced && puddles_wanted && self.reflection_pass.is_some();
         let masked_frame = enhanced || reflection_frame;
+        stage(self, "setup", "mirror.setup");
         let (grid, lamp_shadows) = self.prepare_lights(scene, cam_rel, enhanced_frame, lighting.lamp_shadows && with_overlays && projection.is_none() && self.shadow_pipelines.len() > 6 && omsi_cfg::env::var_os("OMSI_NO_LAMP_SHADOWS").is_none(), self.last_frame.map_or(0.0, |t| t.elapsed().as_secs_f32()));
+        stage(self, "lights", "mirror.lights");
         if omsi_cfg::env::var_os("OMSI_DEBUG_LAMP_SHADOWS").is_some() {
             log::info!("lamp shadows: {:?}", lamp_shadows.iter().map(|l| (l.index, (l.position.x * 10.0).round() / 10.0, (l.position.y * 10.0).round() / 10.0, (l.position.z * 10.0).round() / 10.0, l.range.round(), (l.fade * 100.0).round() / 100.0)).collect::<Vec<_>>());
         }

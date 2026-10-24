@@ -315,6 +315,12 @@ pub(crate) fn prepare(mut args: Args, bare: bool) -> Result<Option<(Args, Option
     if let Some(memo) = root_memo().filter(|_| is_omsi_root(&args.root)) {
         let _ = std::fs::write(memo, args.root.to_string_lossy().as_bytes());
     }
+    // what the CPU compressed of the textures on an earlier run (`omsi_texture::disk_cache`)
+    omsi_texture::disk_cache::set_dir(
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(|h| std::path::PathBuf::from(h).join(".openomsi").join("cache").join("textures")),
+    );
     // content roots: the game's own folder (mods) first, then the original installation
     if let Some(c) = content_dir() {
         match omsi_cfg::ensure_content_layout(&c) {
@@ -343,6 +349,9 @@ pub(crate) fn prepare(mut args: Args, bare: bool) -> Result<Option<(Args, Option
         omsi_cfg::vfs::mount_dir_zips(&c.join("Archives"));
     }
     omsi_cfg::add_content_root(args.root.clone());
+    // (the pictures under Splines and Sceneryobjects, for a texture missing from its own
+    // folders: walked while the renderer compiles its shaders, not when the first tiles load)
+    omsi_texture::warm_texture_indexes();
     Ok(Some((args, server_cfg)))
 }
 
