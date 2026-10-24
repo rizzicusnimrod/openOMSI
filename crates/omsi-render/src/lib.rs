@@ -16653,6 +16653,61 @@ mod tests {
         }
     }
 
+    /// A film camera's dim (`LensFx::lamp_dim`) takes a headlamp that faces it down in the
+    /// fog too, not only its glow and its glare: the light its beam leaves in the air round
+    /// it. At night in the snow the cinematic camera's front shot showed the bus's lamps as
+    /// two blinding blobs at the strongest dim - their beams in the air, which it never
+    /// touched. (The light in the air: the picture in fog less the same without it.)
+    #[test]
+    #[ignore = "requires a graphics adapter; run with --ignored on a GPU host"]
+    fn a_film_cameras_dim_takes_the_beams_in_the_fog_down() {
+        let camera = Camera { position: DVec3::ZERO, yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 60.0, near: 0.1, far: 200.0 };
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let mut renderer = pollster::block_on(Renderer::new_with(
+            &instance,
+            None,
+            Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+            RenderOptions { msaa: 1, ssao: true, shadow_size: 1024, fxaa: false, render_scale: 1.0, ..Default::default() },
+        ))
+        .expect("test renderer");
+        let mut scene = renderer.new_scene();
+        let wall = renderer.add_mesh(&mut scene, &MeshData {
+            positions: vec![Vec3::new(-150.0, 120.0, -150.0), Vec3::new(150.0, 120.0, -150.0), Vec3::new(150.0, 120.0, 150.0), Vec3::new(-150.0, 120.0, 150.0)],
+            normals: vec![-Vec3::Y; 4],
+            uvs: vec![glam::Vec2::ZERO; 4],
+            ranges: vec![(0, 6, 0)],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            one_sided: false,
+        });
+        let black = renderer.add_material(&mut scene, None, AlphaMode::Opaque, [0.0, 0.0, 0.0, 1.0], false);
+        renderer.add_instance(&mut scene, wall, DVec3::ZERO, Mat4::IDENTITY, vec![black]);
+        // a low beam 12 m ahead, a little to the right, shining at the camera
+        scene.lights = vec![PointLight {
+            position: DVec3::new(0.6, 12.0, -0.3),
+            radius: 60.0,
+            color: [1.0, 0.92, 0.8],
+            intensity: 2400.0,
+            direction: Vec3::NEG_Y,
+            beam: 1.0,
+            mode: LightMode::Enhanced,
+            ..Default::default()
+        }];
+        // (fog, snowfall, dim)
+        let mut mean = |fog: f32, snow: f32, dim: f32| {
+            renderer.lens = Some(LensFx { lamp_dim: dim, dof: 0.0, ..Default::default() });
+            let lighting = Lighting { enhanced: true, shadows: false, night: 1.0, fog_density: fog, snowfall: snow, ..Default::default() };
+            let rgba = renderer.render_to_image(&mut scene, 64, 64, &camera, &lighting).unwrap();
+            rgba.chunks_exact(4).map(|p| p[0] as f32 + p[1] as f32 + p[2] as f32).sum::<f32>() / (64.0 * 64.0 * 3.0)
+        };
+        for (what, fog, snow) in [("fog", 0.02, 0.0), ("snowfall", 0.0, 0.6)] {
+            let clear = [mean(0.0, 0.0, 0.0), mean(0.0, 0.0, 0.9)];
+            let (full, dimmed) = (mean(fog, snow, 0.0) - clear[0], mean(fog, snow, 0.9) - clear[1]);
+            eprintln!("the beam's light in the {what}: {full:.2} as it is, {dimmed:.2} at a dim of 0.9");
+            assert!(full > 2.0, "the beam lights the {what}: {full}");
+            assert!(dimmed < full * 0.4, "the dim takes it down in the {what}: {dimmed} of {full}");
+        }
+    }
+
     /// Rails laid a millimetre over a road as a spline of their own, seen from the cab: the
     /// road's 10 m stretch between two cross-sections and the rails' metre-long ones are
     /// pulled towards the eye alike, so the rails lie on the road right up to the bus. With a
