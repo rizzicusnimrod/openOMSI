@@ -700,6 +700,27 @@ fn ahead_limits(initial: bool) -> (usize, usize) {
     }
 }
 
+/// How many sleeping cars one population pass wakes (`wake_dormant`): the first, while the
+/// map loads, all it wants; later a few, the rest in a pass soon after (`wake_backlog`) -
+/// 20 woken at once behind the bus held one frame up for 32 ms.
+const WAKE_PER_PASS: usize = 3;
+/// The pass after one that left sleeping cars waiting comes after this long (s).
+pub(crate) const WAKE_AGAIN: f32 = 0.5;
+
+/// The paint scheme a new car takes of a type with `schemes` of them, for its `seed`
+/// (`create_car`, and the look whether its set is on the GPU before it is made).
+fn random_scheme(schemes: usize, seed: u64) -> Option<usize> {
+    (schemes > 0).then(|| (seed >> 8) as usize % schemes.min(AI_SCHEMES))
+}
+
+fn wake_limit(initial: bool) -> usize {
+    if initial {
+        usize::MAX
+    } else {
+        WAKE_PER_PASS
+    }
+}
+
 /// `OMSI_DEBUG_POPULATION`: where the cars came from, counted for a line in the log every
 /// minute.
 #[derive(Default)]
@@ -899,6 +920,14 @@ pub struct Traffic {
     /// reach), filled in steps (`populate_ahead_step`), and the time to the next step.
     ahead_plan: Option<(DVec3, usize, f64)>,
     ahead_t: f32,
+    /// The last pass left sleeping cars waiting to wake (`WAKE_PER_PASS`): the next comes
+    /// after `WAKE_AGAIN`.
+    pub wake_backlog: bool,
+    /// Vehicle sets read on a worker before their first car (`set_on_gpu`): being read,
+    /// read and waiting to go up, and those that have been up once (not waited for again).
+    sets_reading: std::collections::HashSet<crate::scene::VehicleKey>,
+    sets_read: Arc<parking_lot::Mutex<Vec<(crate::scene::VehicleKey, Arc<VehicleType>)>>>,
+    sets_tried: std::collections::HashSet<crate::scene::VehicleKey>,
     /// `OMSI_DEBUG_DRIVERS`: what the drivers do, in the log.
     debug_drivers: bool,
     /// `OMSI_DEBUG_RVL`: how fast the cars came into junctions by the rule of the right
@@ -1935,6 +1964,10 @@ impl Traffic {
             sight: HashMap::new(),
             ahead_plan: None,
             ahead_t: 0.0,
+            wake_backlog: false,
+            sets_reading: Default::default(),
+            sets_read: Default::default(),
+            sets_tried: Default::default(),
             debug_drivers: omsi_cfg::env::var_os("OMSI_DEBUG_DRIVERS").is_some(),
             rvl_entries: {
                 omsi_sim::traffic::RIGHT_BEFORE_LEFT_CAUTION.store(omsi_cfg::env::var_os("OMSI_NO_RVL_CAUTION").is_none(), std::sync::atomic::Ordering::Relaxed);
@@ -2516,6 +2549,7 @@ impl Traffic {
             return;
         }
         let pass_started = std::time::Instant::now();
+        self.take_read_sets(world, renderer, scene);
         let was_initial = self.initial;
         if self.viewer.is_none() {
             if let Some(f) = view {
@@ -2659,6 +2693,7 @@ impl Traffic {
                 i += 1;
             }
         }
+        let removed_at = std::time::Instant::now();
         if off_ground > 0 && omsi_cfg::env::var_os("OMSI_DEBUG_TRAFFIC").is_some() {
             log::info!("traffic: {off_ground} vehicles taken away with the tiles under them");
         }
@@ -2709,10 +2744,13 @@ impl Traffic {
             .collect();
         let street_target = (self.target as f32 * density * road_scale(&near_density)).round() as usize;
         // the cars that come into range again, where they have got to
+        let counted_at = std::time::Instant::now();
         self.wake_dormant(world, renderer, scene, center, street_target);
+        let woken_at = std::time::Instant::now();
         // the whole map's population: as dense as around the player, on every street the
         // map has shown so far (sleeping where the player is not)
         self.fill_map(center, street_target);
+        let filled_at = std::time::Instant::now();
         // the road ahead, out to where cars are too small to see: at once while the map is
         // first populated, then in steps between the passes (`populate_ahead_step`)
         if self.initial {
@@ -2731,10 +2769,29 @@ impl Traffic {
             }
             self.populate_kind(world, renderer, scene, center, kind, target);
         }
+        let spawned_at = std::time::Instant::now();
         self.populate_lan_centers(world, renderer, scene, center, street_target);
         if !self.initial {
             self.pull_out_parked(world, renderer, scene, center);
             self.park_in(world, center);
+        }
+        // `OMSI_DEBUG_POPULATION`: what a slow pass spent its time on
+        if self.debug_population && !self.initial && pass_started.elapsed().as_secs_f64() > 0.010 {
+            let ms = |a: std::time::Instant, b: std::time::Instant| (b - a).as_secs_f64() * 1000.0;
+            let end = std::time::Instant::now();
+            log::info!(
+                "population t={:.1}: a pass of {:.1} ms: cars kept or taken away {:.1}, counted {:.1}, woken {:.1}, map filled {:.1}, new near {:.1}, LAN and parking {:.1} ({} cars, {} asleep)",
+                self.time,
+                ms(pass_started, end),
+                ms(pass_started, removed_at),
+                ms(removed_at, counted_at),
+                ms(counted_at, woken_at),
+                ms(woken_at, filled_at),
+                ms(filled_at, spawned_at),
+                ms(spawned_at, end),
+                self.cars.len(),
+                self.dormant.len()
+            );
         }
         self.initial = false;
         if self.debug_population && !was_initial {
@@ -3023,6 +3080,10 @@ impl Traffic {
                 continue;
             }
             let seed = self.rand();
+            // (its vehicle set read on a worker first, `set_on_gpu`)
+            if !self.set_on_gpu(world, renderer, &ty, random_scheme(ty.paint_schemes.len(), seed)) {
+                continue;
+            }
             self.create_car(world, renderer, scene, center, kind, lane, s, ty, seed, None, None, None, None);
             if kind == LaneKind::Street {
                 self.appeared(world, p, false);
@@ -3141,6 +3202,57 @@ impl Traffic {
     /// `center` comes to. Only the road in sight: filled behind the houses as well, a town
     /// ahead drew twice the cars and cost a millisecond a frame for cars nobody saw (where
     /// nothing is seen, `populate_kind` puts them behind the houses as it always has).
+    /// Whether a car of `ty` in `scheme` can be put on the road without a hitch now: its
+    /// vehicle set is on the GPU. If not, the set is read on a worker (as the timetable's
+    /// buses are, `VehiclePrefetch`) and put up by a later pass (`take_read_sets`); the car
+    /// waits for it. Its first car uploading the set itself held a frame up for 30-60 ms
+    /// (an ambulance, a sleeping A4 woken with a paint not read at the start).
+    fn set_on_gpu(&mut self, world: &World, renderer: &Renderer, ty: &Arc<VehicleType>, scheme: Option<usize>) -> bool {
+        // (the start's cars, behind the loading screen; OpenGL reads nothing ahead)
+        if self.initial || omsi_render::gl_backend() {
+            return true;
+        }
+        // its trailers' sets too (a tractor's semi-trailer took 98 ms to go up)
+        let mut sets = vec![(ty.clone(), scheme)];
+        let chain_from = std::time::Instant::now();
+        let chain = self.trailer_chain(ty);
+        if self.debug_population && chain_from.elapsed().as_secs_f64() > 0.005 {
+            log::info!("population: the trailers of {} found in {:.1} ms", ty.def.path.display(), chain_from.elapsed().as_secs_f64() * 1000.0);
+        }
+        sets.extend(chain.into_iter().map(|(t, _)| {
+            let s = scheme.filter(|i| *i < t.paint_schemes.len());
+            (t, s)
+        }));
+        let mut all = true;
+        for (t, s) in sets {
+            let key = (t.def.path.clone(), s);
+            if self.sets_tried.contains(&key) || world.has_vehicle_set(&key) {
+                continue;
+            }
+            all = false;
+            if self.sets_reading.insert(key.clone()) {
+                let (prefetch, read) = (world.vehicle_prefetch(renderer), self.sets_read.clone());
+                crate::threads::background_pool().spawn(move || {
+                    prefetch.prefetch(&t, s);
+                    read.lock().push((key, t));
+                });
+            }
+        }
+        all
+    }
+
+    /// Put up the vehicle sets the workers have read (quick now: their textures and meshes
+    /// are made, only the materials are left).
+    fn take_read_sets(&mut self, world: &World, renderer: &Renderer, scene: &mut Scene) {
+        let read = std::mem::take(&mut *self.sets_read.lock());
+        for (key, ty) in read {
+            world.precache_vehicle(renderer, scene, &ty, key.1);
+            self.sets_reading.remove(&key);
+            // (once: a set that does not stay up is not waited for again)
+            self.sets_tried.insert(key);
+        }
+    }
+
     /// A step of filling the road ahead (see `AHEAD_STEP`), with what the last population
     /// pass asked for: called every frame, it does its share every `AHEAD_STEP` s.
     pub fn populate_ahead_step(&mut self, world: &World, renderer: &Renderer, scene: &mut Scene, dt: f32) {
@@ -3149,6 +3261,7 @@ impl Traffic {
             return;
         }
         self.ahead_t = AHEAD_STEP;
+        self.take_read_sets(world, renderer, scene);
         if let Some((center, street_target, reach)) = self.ahead_plan {
             self.populate_ahead(world, renderer, scene, center, street_target, reach, ahead_limits(false));
         }
@@ -3218,6 +3331,11 @@ impl Traffic {
                 && self.may_appear(world, p)
                 && !self.cars.iter().any(|c| (c.vehicle.position - p).length() < 14.0)
                 && self.spawn_clear(&ty, p, h);
+            // (its vehicle set read on a worker first, `set_on_gpu`)
+            let ok = ok && {
+                let scheme = self.dormant[i].scheme;
+                self.set_on_gpu(world, renderer, &ty, scheme)
+            };
             if ok {
                 let d = self.dormant.swap_remove(i);
                 self.create_car(world, renderer, scene, center, d.kind, d.lane, d.s, d.ty, d.seed, Some(d.scheme), Some(d.id), Some(d.speed), None);
@@ -3247,6 +3365,9 @@ impl Traffic {
                 continue;
             }
             let seed = self.rand();
+            if !self.set_on_gpu(world, renderer, &ty, random_scheme(ty.paint_schemes.len(), seed)) {
+                continue;
+            }
             self.create_car(world, renderer, scene, center, LaneKind::Street, lane, s, ty, seed, None, None, None, None);
             self.appeared(world, p, false);
             count += 1;
@@ -3327,6 +3448,7 @@ impl Traffic {
     /// The cars out of range that have come near again take their bodies back - where
     /// nobody sees it happen, up to a little over the number asked for around the player.
     fn wake_dormant(&mut self, world: &World, renderer: &Renderer, scene: &mut Scene, center: DVec3, target: usize) {
+        self.wake_backlog = false;
         if self.dormant.is_empty() {
             return;
         }
@@ -3336,8 +3458,14 @@ impl Traffic {
         let mut budget = (target as f32 * 1.25).ceil() as usize;
         budget = budget.saturating_sub(active);
         let centers: Vec<DVec3> = std::iter::once(center).chain(self.lan_centers.iter().copied()).collect();
+        let mut wakes = wake_limit(self.initial);
         let mut i = 0;
         while i < self.dormant.len() && budget > 0 {
+            if wakes == 0 {
+                // (the rest in a pass soon, `WAKE_AGAIN`)
+                self.wake_backlog = true;
+                break;
+            }
             let (p, h, ty) = {
                 let d = &self.dormant[i];
                 let l = &self.net.lanes[d.lane];
@@ -3353,11 +3481,22 @@ impl Traffic {
                 && self.may_appear(world, p)
                 && !self.cars.iter().any(|c| (c.vehicle.position - p).length() < 14.0)
                 && self.spawn_clear(&ty, p, h);
+            // (its vehicle set read on a worker first, `set_on_gpu`)
+            let ok = ok && {
+                let scheme = self.dormant[i].scheme;
+                self.set_on_gpu(world, renderer, &ty, scheme)
+            };
             if ok {
                 let d = self.dormant.swap_remove(i);
+                let started = std::time::Instant::now();
+                let (path, scheme) = (d.ty.def.path.clone(), d.scheme);
                 self.create_car(world, renderer, scene, center, d.kind, d.lane, d.s, d.ty, d.seed, Some(d.scheme), Some(d.id), Some(d.speed), None);
+                if self.debug_population && started.elapsed().as_secs_f64() > 0.005 {
+                    log::info!("population: waking a {} (paint {scheme:?}) took {:.1} ms", path.display(), started.elapsed().as_secs_f64() * 1000.0);
+                }
                 self.appeared(world, p, true);
                 budget -= 1;
+                wakes -= 1;
             } else {
                 i += 1;
             }
@@ -3442,6 +3581,7 @@ impl Traffic {
         speed: Option<f32>,
         bus: Option<BusSetup>,
     ) -> u64 {
+        let started = std::time::Instant::now();
         let mut host = omsi_sim::VehicleHost::new(omsi_sim::SimClock::default());
         host.font_lib = Some(world.fonts.clone());
         if let Some(b) = &bus {
@@ -3450,8 +3590,7 @@ impl Traffic {
         // random paint scheme / advert (its variables there for the scripts' {init})
         let scheme = match scheme {
             Some(s) => s,
-            None if ty.paint_schemes.is_empty() => None,
-            None => Some((seed >> 8) as usize % ty.paint_schemes.len().min(AI_SCHEMES)),
+            None => random_scheme(ty.paint_schemes.len(), seed),
         };
         host.paint_scheme = Some(scheme);
         let mut vehicle = VehicleInstance::new(ty.clone(), host);
@@ -3503,9 +3642,11 @@ impl Traffic {
             }) as std::sync::Arc<dyn omsi_sim::rigid::Ground>
         });
         vehicle.apply_paint_vars(scheme);
+        let made_at = std::time::Instant::now();
         let render = world.add_vehicle_shared(renderer, scene, &ty, scheme, None);
         let trailer_renders =
             self.attach_trailers(world, renderer, scene, &mut vehicle, scheme, &render);
+        let drawn_at = std::time::Instant::now();
         if !ty.model.text_textures.is_empty() || bus.is_some() {
             vehicle.init_text_textures(&mut world.fonts.lock(), &|p| {
                 omsi_texture::decode_file(p)
@@ -3522,6 +3663,11 @@ impl Traffic {
                     .ok()
                     .map(|i| (i.width, i.height, i.rgba))
             });
+        }
+        if self.debug_population && started.elapsed().as_secs_f64() > 0.005 {
+            let ms = |a: std::time::Instant, b: std::time::Instant| (b - a).as_secs_f64() * 1000.0;
+            let now = std::time::Instant::now();
+            log::info!("population: a {} made in {:.1} ms: instance {:.1}, drawn {:.1}, plates {:.1}", ty.def.path.display(), ms(started, now), ms(started, made_at), ms(made_at, drawn_at), ms(drawn_at, now));
         }
         let mut state = AiState::new(lane, s, seed);
         state.veh_type = if bus.is_some() { -1 } else { ty.def.ai_veh_type };
@@ -3783,6 +3929,10 @@ impl Traffic {
         if self.cars.iter().any(|c| (c.vehicle.position - centre).truncate().length() < 25.0) || !self.spawn_clear(&ty, centre, h as f64) {
             return None;
         }
+        // (its vehicle set read on a worker first: the event is tried again later)
+        if !self.set_on_gpu(world, renderer, &ty, random_scheme(ty.paint_schemes.len(), seed)) {
+            return None;
+        }
         let id = self.create_car(world, renderer, scene, centre, LaneKind::Street, lane, s, ty, seed, None, None, Some(0.0), None);
         let net = &self.net;
         let car = self.cars.iter_mut().find(|c| c.id == id)?;
@@ -3869,6 +4019,13 @@ impl Traffic {
             return None;
         }
         let seed = self.rand();
+        // (its vehicle set read on a worker first: the event is tried again later)
+        if !self.set_on_gpu(world, renderer, &ty, random_scheme(ty.paint_schemes.len(), seed)) {
+            if omsi_cfg::env::var_os("OMSI_DEBUG_EVENTS").is_some() {
+                log::info!("  {} not put on lane {lane} yet: its vehicle set is being read", ty.def.path.display());
+            }
+            return None;
+        }
         let id = self.create_car(world, renderer, scene, centre, LaneKind::Street, lane, s, ty, seed, None, None, Some(speed), None);
         let net = &self.net;
         let car = self.cars.iter_mut().find(|c| c.id == id)?;
@@ -9804,6 +9961,28 @@ mod day_curve_tests {
 #[cfg(test)]
 mod ahead_step_tests {
     use super::*;
+
+    #[test]
+    fn a_new_car_takes_one_of_the_first_paint_schemes_by_its_seed() {
+        assert_eq!(random_scheme(0, 12345), None);
+        assert_eq!(random_scheme(1, 12345), Some(0));
+        // (the first AI_SCHEMES only: those are read ahead at the start, `random_sets`)
+        for seed in [0u64, 1 << 8, 3 << 8, 77 << 8, u64::MAX] {
+            let s = random_scheme(9, seed).expect("a scheme");
+            assert!(s < AI_SCHEMES, "{seed}: {s}");
+            assert_eq!(random_scheme(9, seed), Some(s));
+        }
+        assert_eq!(random_scheme(9, 2 << 8), Some(2));
+    }
+
+    #[test]
+    fn a_pass_wakes_a_few_sleeping_cars_and_comes_back_soon_for_the_rest() {
+        assert_eq!(wake_limit(false), WAKE_PER_PASS);
+        assert_eq!(wake_limit(true), usize::MAX);
+        // (20 waiting cars: all awake within a few seconds)
+        let passes = 20usize.div_ceil(WAKE_PER_PASS) as f32;
+        assert!(passes * WAKE_AGAIN <= 4.0);
+    }
 
     #[test]
     fn a_step_of_the_road_ahead_looks_at_one_lane_and_puts_one_car() {

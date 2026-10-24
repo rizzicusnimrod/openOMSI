@@ -1188,6 +1188,11 @@ fn batch_ground_splines(meshes: Vec<Arc<MeshData>>) -> Vec<Arc<MeshData>> {
     }).collect()
 }
 
+/// How many text textures of one size are kept for the next vehicles (`GpuCache::text_pool`):
+/// each made new took a texture, its upload and its mip chain - 12 ms for a bus's 16, and
+/// now and then 30 ms for one, when the card's memory had to grow for it.
+const TEXT_POOL: usize = 16;
+
 /// The GPU side of the loaded tiles: shared resources with their users, and the freed ids
 /// that new resources take over.
 #[derive(Default)]
@@ -1203,6 +1208,9 @@ pub struct GpuCache {
     free_materials: FreeList,
     /// Removed instances by material slot count.
     free_instances: HashMap<usize, FreeList>,
+    /// Text textures (number plates, signs on vehicles) of vehicles that have gone, by size,
+    /// for the next vehicle's (`pool_text_texture`).
+    text_pool: HashMap<(u32, u32), Vec<TextureId>>,
     /// Textures decoded on the thread that draws (not decoded ahead on the loader): how
     /// many, and the seconds they took (`OMSI_PROFILE`).
     sync_decodes: usize,
@@ -1261,6 +1269,22 @@ impl GpuCache {
         self.take_texture_slot(renderer, scene, id)
     }
 
+    /// Keep the text texture `id` of a vehicle that has gone for the next one of its size
+    /// (`add_blank_mips`); false when it is not kept (the caller lets it go).
+    fn pool_text_texture(&mut self, renderer: &Renderer, scene: &Scene, id: TextureId) -> bool {
+        // (a text texture carries its mip chain, `add_blank_mips`)
+        let Some((w, h, levels)) = renderer.texture_levels(scene, id) else { return false };
+        if levels < 2 {
+            return false;
+        }
+        let pool = self.text_pool.entry((w, h)).or_default();
+        if pool.len() >= TEXT_POOL || pool.contains(&id) {
+            return false;
+        }
+        pool.push(id);
+        true
+    }
+
     fn add_blank(&mut self, renderer: &Renderer, scene: &mut Scene, width: u32, height: u32) -> TextureId {
         let id = renderer.add_blank_texture(scene, width, height);
         self.take_texture_slot(renderer, scene, id)
@@ -1271,6 +1295,14 @@ impl GpuCache {
     /// minifies level zero directly and thin glyph strokes break into unstable pixels.
     fn add_blank_mips(&mut self, renderer: &Renderer, scene: &mut Scene, width: u32, height: u32) -> TextureId {
         let (width, height) = (width.max(1), height.max(1));
+        // one a vehicle that has gone left, cleared (`text_pool`)
+        while let Some(id) = self.text_pool.get_mut(&(width, height)).and_then(|p| p.pop()) {
+            if renderer.clear_texture(scene, id) {
+                return id;
+            }
+            renderer.free_texture(scene, id);
+            self.free_textures.push(id);
+        }
         self.add_image(
             renderer,
             scene,
@@ -11910,7 +11942,9 @@ impl World {
             (vt.def.script_share || vt.model.script_textures.is_empty()).then(|| l.script_textures.as_slice())
         });
         let key = (vt.def.path.clone(), scheme);
+        let started = std::time::Instant::now();
         let cached = self.vehicle_gpu.lock().get(&key).cloned();
+        let uploaded = cached.is_none();
         let set = match cached {
             Some(c) => c,
             None => {
@@ -11923,12 +11957,22 @@ impl World {
             s.users += 1;
             s.idle_since = None;
         }
+        let set_at = std::time::Instant::now();
         let mut render = self.instantiate_vehicle(renderer, scene, vt, &set, Some(key), shared);
         // an articulated AI bus (timetable or random traffic, and its coupled rear section)
         // bends its own bellows too, from a mesh copy of its own (freed again in
         // `release_vehicle`) - the shared set's copy has to stay in the rest pose, since
         // every other instance of the type still draws it
         own_skinned_meshes(renderer, scene, vt, &mut render);
+        if started.elapsed().as_secs_f64() > 0.005 && omsi_cfg::env::var_os("OMSI_DEBUG_POPULATION").is_some() {
+            log::info!(
+                "vehicle {}: {} {:.1} ms, its own instances/textures/materials {:.1} ms",
+                vt.def.path.display(),
+                if uploaded { "set uploaded in" } else { "set found in" },
+                (set_at - started).as_secs_f64() * 1000.0,
+                set_at.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         render
     }
 
@@ -11952,12 +11996,21 @@ impl World {
             } else {
                 &render.script_textures
             };
+            // (its text textures are kept for the next vehicle of their size, `text_pool`)
+            let kept: Vec<TextureId> = render
+                .text_textures
+                .iter()
+                .flatten()
+                .copied()
+                .filter(|&t| gpu.pool_text_texture(renderer, scene, t))
+                .collect();
             let mut own_textures: Vec<TextureId> = render
                 .text_textures
                 .iter()
                 .chain(own_script)
                 .flatten()
                 .copied()
+                .filter(|t| !kept.contains(t))
                 .collect();
             let mut own_materials = render.own_materials;
             for v in &render.variants {
@@ -12329,6 +12382,7 @@ impl World {
         key: Option<VehicleKey>,
         shared_script: Option<&[Option<TextureId>]>,
     ) -> VehicleRender {
+        let started = std::time::Instant::now();
         let mut gpu = self.gpu.lock();
         let blank = |gpu: &mut GpuCache, scene: &mut Scene, w: i32, h: i32| {
             Some(gpu.add_blank(renderer, scene, w.max(1) as u32, h.max(1) as u32))
@@ -12355,6 +12409,7 @@ impl World {
                 .map(|(w, h)| blank(&mut gpu, scene, *w, *h))
                 .collect(),
         };
+        let blanks_at = std::time::Instant::now();
         let mut instances = Vec::new();
         let mut own_materials = Vec::new();
         let mut variants = set.variants.to_vec();
@@ -12494,6 +12549,19 @@ impl World {
             } else {
                 inst
             });
+        }
+        let meshes_at = std::time::Instant::now();
+        if started.elapsed().as_secs_f64() > 0.005 && omsi_cfg::env::var_os("OMSI_DEBUG_POPULATION").is_some() {
+            log::info!(
+                "vehicle {}: blank text/script textures {:.1} ms ({} + {}), meshes and materials {:.1} ms ({} meshes, {} own materials)",
+                vt.def.path.display(),
+                (blanks_at - started).as_secs_f64() * 1000.0,
+                text_textures.len(),
+                script_textures.len(),
+                (meshes_at - blanks_at).as_secs_f64() * 1000.0,
+                set.meshes.len(),
+                own_materials.len()
+            );
         }
         // Omsi.exe draws a model mesh after mesh and each material subset in its turn, with
         // the subset's own blend and depth-write states (0x7c32c4 -> 0x7fd6c4), so a slot
@@ -13700,6 +13768,34 @@ mod tests {
         let missing_key = spec.with_freetex(None, 21, true, true);
         assert_eq!(missing_key.item.as_ref().unwrap().night, Some(10));
         assert_eq!(missing_key.item.as_ref().unwrap().diffuse, Some(99));
+    }
+
+    #[test]
+    fn a_text_texture_of_a_vehicle_gone_is_taken_by_the_next() {
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::NOOP;
+        descriptor.backend_options.noop = wgpu::NoopBackendOptions { enable: true };
+        let instance = wgpu::Instance::new(descriptor);
+        let renderer = pollster::block_on(omsi_render::Renderer::new_with(
+            &instance,
+            None,
+            Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+            omsi_render::RenderOptions { msaa: 1, shadow_size: 1024, ..Default::default() },
+        ))
+        .expect("noop renderer");
+        let mut scene = renderer.new_scene();
+        let mut gpu = GpuCache::default();
+        let plate = gpu.add_blank_mips(&renderer, &mut scene, 500, 128);
+        // (its vehicle gone: kept, not let go)
+        assert!(gpu.pool_text_texture(&renderer, &scene, plate));
+        assert_eq!(gpu.add_blank_mips(&renderer, &mut scene, 500, 128), plate);
+        // another size has none waiting
+        let small = gpu.add_blank_mips(&renderer, &mut scene, 256, 64);
+        assert_ne!(small, plate);
+        // and a size kept TEXT_POOL times over lets the next one go
+        let many: Vec<TextureId> = (0..=TEXT_POOL).map(|_| gpu.add_blank_mips(&renderer, &mut scene, 128, 32)).collect();
+        let kept = many.iter().filter(|&&t| gpu.pool_text_texture(&renderer, &scene, t)).count();
+        assert_eq!(kept, TEXT_POOL);
     }
 
     #[test]

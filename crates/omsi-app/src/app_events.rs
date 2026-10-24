@@ -596,6 +596,10 @@ impl ApplicationHandler for App {
                         let __t5 = Instant::now();
                         let view = self.camera.as_ref().map(|c| c.forward().as_dvec3());
                         t.populate_seen(w, r, scene, center, view);
+                        // (sleeping cars left waiting to wake: the next pass soon)
+                        if t.wake_backlog {
+                            self.populate_t = self.populate_t.min(traffic::WAKE_AGAIN);
+                        }
                         *self.profile.entry("traffic.populate").or_default() +=
                             __t5.elapsed().as_secs_f64();
                         t.keep_clear = self

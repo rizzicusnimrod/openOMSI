@@ -1742,6 +1742,23 @@ impl RenderPhase {
     ];
 }
 
+/// Append `instance` to the scene; logs (`OMSI_PROFILE`) when making room for it took long:
+/// the list holds a map's whole history of instances, and each time it doubles all of it is
+/// copied to a new place.
+fn push_instance(scene: &mut Scene, instance: Instance) {
+    let grows = scene.instances.len() == scene.instances.capacity();
+    let started = std::time::Instant::now();
+    scene.instances.push(instance);
+    if grows && started.elapsed().as_secs_f64() > 0.002 && omsi_cfg::env::var_os("OMSI_PROFILE").is_some() {
+        log::info!(
+            "scene: room made for more than {} instances ({} MB) in {:.1} ms",
+            scene.instances.len() - 1,
+            (scene.instances.len() - 1) * std::mem::size_of::<Instance>() >> 20,
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
+
 pub struct Instance {
     pub mesh: MeshId,
     /// Transform relative to `origin` (rotation/scale plus a small translation).
@@ -7345,7 +7362,7 @@ impl Renderer {
             .max()
             .map(|m| m as usize + 1)
             .unwrap_or(1);
-        scene.instances.push(Instance {
+        push_instance(scene, Instance {
             mesh,
             transform,
             origin,
@@ -7400,7 +7417,7 @@ impl Renderer {
             .max()
             .map(|m| m as usize + 1)
             .unwrap_or(1);
-        scene.instances.push(Instance {
+        push_instance(scene, Instance {
             mesh,
             transform,
             origin,
@@ -14981,6 +14998,35 @@ impl Renderer {
     }
 
     /// Release a texture (a material still using it keeps it alive until it is freed too).
+    /// Clear every level of texture `id` to transparent on the GPU (a vehicle's text
+    /// texture taken over by the next vehicle). Only a texture made to be drawn into, as a
+    /// text texture with its mip chain is; false for any other.
+    pub fn clear_texture(&self, scene: &Scene, id: TextureId) -> bool {
+        let Some(t) = scene.textures.get(id) else { return false };
+        if !t.texture.usage().contains(wgpu::TextureUsages::RENDER_ATTACHMENT) {
+            return false;
+        }
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("clear texture") });
+        for level in 0..t.texture.mip_level_count() {
+            let view = t.texture.create_view(&wgpu::TextureViewDescriptor { base_mip_level: level, mip_level_count: Some(1), ..Default::default() });
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("clear texture"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        self.queue.submit([encoder.finish()]);
+        true
+    }
+
     pub fn free_texture(&self, scene: &mut Scene, id: TextureId) {
         scene.snow_textures.remove(&id);
         // (its PBR maps go with it: the slot is taken by another texture next)
