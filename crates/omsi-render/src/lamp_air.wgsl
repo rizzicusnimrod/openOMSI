@@ -279,6 +279,11 @@ fn lamp_airlight(c: vec3<f32>, d: vec3<f32>, start: f32, len: f32, jitter: f32) 
                             lit = direct * past * beam_phase(cp) + spread * ax2 * ax2 * ax2 * spread_phase(cp);
                         } else {
                             lit = smoothstep(l.dir.w, l.extra.x, dot(-ld, l.dir.xyz)) * fog_phase(cp);
+                            // (a vehicle's small light: not inside the vehicles round it, see
+                            // blockers.wgsl `lamp_blocked`)
+                            if (l.pos.w < -0.5 && lit > 0.0) {
+                                lit = lit * lamp_blocked(c + d * tq, l.pos.xyz, u32(-l.pos.w));
+                            }
                         }
                         acc = acc + lit * win * hh * dt / r2;
                     }

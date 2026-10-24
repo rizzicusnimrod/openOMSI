@@ -9,6 +9,21 @@
 // skin) is that car's own body, lit as it faces the lamp. The few centimetres where the
 // way only cuts a corner of a box fade, the shadow's edge.
 fn beam_blocked(p: vec3<f32>, lamp: vec3<f32>, mask: u32) -> f32 {
+    return vehicles_block(p, lamp, mask, false);
+}
+
+// The same for the small lights a vehicle throws round itself (its brake lamps' red on the
+// road, a reversing lamp, the saloon's light out of its windows; lib.rs `gpu_light` puts
+// their vehicles in `pos.w`): only the skin of a car's box takes their light, never what
+// lies deep inside it. The car behind a braking one glowed red in its cabin - a third brake
+// light in its rear window, out of nowhere.
+fn lamp_blocked(p: vec3<f32>, lamp: vec3<f32>, mask: u32) -> f32 {
+    return vehicles_block(p, lamp, mask, true);
+}
+
+// `cabins_dark`: a point deeper in a box than its skin gets none of the light (lib.rs
+// `light_past_vehicles` is this function's copy).
+fn vehicles_block(p: vec3<f32>, lamp: vec3<f32>, mask: u32, cabins_dark: bool) -> f32 {
     var lit = 1.0;
     var m = mask;
     let len = distance(p, lamp);
@@ -23,8 +38,11 @@ fn beam_blocked(p: vec3<f32>, lamp: vec3<f32>, mask: u32) -> f32 {
         let r2 = camera.blockers[j * 3u + 2u];
         let a = vec3<f32>(dot(r0.xyz, p) + r0.w, dot(r1.xyz, p) + r1.w, dot(r2.xyz, p) + r2.w);
         // (the skin: 4 cm in the box's measure on each axis)
-        let skin = 1.0 + 0.04 * vec3<f32>(length(r0.xyz), length(r1.xyz), length(r2.xyz));
-        if (all(abs(a) < skin)) {
+        let skin = 0.04 * vec3<f32>(length(r0.xyz), length(r1.xyz), length(r2.xyz));
+        if (all(abs(a) < vec3<f32>(1.0) + skin)) {
+            if (cabins_dark && all(abs(a) < vec3<f32>(1.0) - skin)) {
+                return 0.0;
+            }
             continue;
         }
         let b = vec3<f32>(dot(r0.xyz, lamp) + r0.w, dot(r1.xyz, lamp) + r1.w, dot(r2.xyz, lamp) + r2.w);

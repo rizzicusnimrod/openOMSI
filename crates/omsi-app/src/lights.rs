@@ -443,15 +443,15 @@ fn rear_glow(v: &VehicleInstance, value_of: &dyn Fn(&str) -> f32, volts: f32, ca
     }
     let Some((sum, at, origin, rot, ty)) = best else { return };
     let p = origin + rot.transform_point3(Vec3::new(at.x, behind_tail(ty, at.y), at.z)).as_dvec3();
-    let d = rot.transform_vector3(Vec3::new(0.0, -0.96, -0.28)).normalize_or_zero();
+    let (axis, cone) = rear_glow_aim();
+    let d = rot.transform_vector3(axis).normalize_or_zero();
     lights.push(PointLight {
         position: p,
         radius: REAR_GLOW_REACH,
         color: [1.0, 0.04, 0.02],
         intensity: sum * volts,
         direction: d,
-        // (16 degrees down and 70 out: nothing under the light, the tail, is in the cone)
-        cone: [35f32.to_radians().cos(), 70f32.to_radians().cos()],
+        cone,
         core: 1.0,
         beam: 0.0,
         housed: false,
@@ -459,6 +459,16 @@ fn rear_glow(v: &VehicleInstance, value_of: &dyn Fn(&str) -> f32, volts: f32, ca
         blockers: 0,
         shadow: false,
     });
+}
+
+/// Where the rear lamps' glow (`rear_glow`) shines, in the vehicle's frame: its axis, back
+/// and 34 degrees down, and its cone (the cosines of the inner and the outer edge, 18 and 30
+/// degrees) - the road from half a metre to ten behind, nothing at or over the lamps'
+/// height. Reaching 54 degrees up, it lit the cabin of the car behind: a third brake light
+/// in its rear window.
+fn rear_glow_aim() -> (Vec3, [f32; 2]) {
+    let down = 34f32.to_radians();
+    (Vec3::new(0.0, -down.cos(), -down.sin()), [18f32.to_radians().cos(), 30f32.to_radians().cos()])
 }
 
 /// The `[interiorlight]`s of a vehicle that are on (`Lighting::saloon`): where each is,
@@ -1636,7 +1646,7 @@ pub fn collect(
         let first = scene.lights.len();
         vehicle_lights(v, &mut scene.coronas, &mut scene.lights, night, camera_pos);
         for l in &mut scene.lights[first..] {
-            if l.beam != 0.0 {
+            if stops_at_vehicles(l) {
                 l.blockers = beam_blockers(l, &blockers, i);
             }
         }
@@ -1774,6 +1784,14 @@ fn light_blocker(ty: &omsi_sim::VehicleType, position: DVec3, rotation: glam::Ma
 /// The blockers a headlamp's light stops at (`PointLight::blockers`): not its own vehicle's
 /// (`own`), not one the lamp is in, only those within its reach and ahead of it (a cone of
 /// some 60 degrees round its axis, the boxes' size given).
+/// Whether a vehicle's light stops at the other vehicles (`PointLight::blockers`): its
+/// beams, and in the enhanced picture its small lights too - the brake lamps' glow on the
+/// road, a reversing lamp, the saloon's light out of its windows -, which went through the
+/// car behind and lit its cabin.
+fn stops_at_vehicles(l: &PointLight) -> bool {
+    l.beam != 0.0 || l.mode == LightMode::Enhanced
+}
+
 fn beam_blockers(l: &PointLight, blockers: &[(usize, f64, omsi_render::LightBlocker)], own: usize) -> u32 {
     let axis = l.direction.normalize_or_zero();
     let mut mask = 0u32;

@@ -631,7 +631,8 @@ struct GpuPointLight {
     dir: [f32; 4],
     /// Cosine of the inner cone, the core radius, a headlamp's beam (`PointLight::beam`), the
     /// radius (`pos.w` is 0 on a light only the enhanced path draws, which the vanilla
-    /// shader then passes by).
+    /// shader then passes by - below 0 on a vehicle's small light: minus its vehicles,
+    /// `PointLight::blockers`).
     extra: [f32; 4],
 }
 
@@ -673,8 +674,10 @@ pub struct PointLight {
     pub housed: bool,
     /// Which path draws the light.
     pub mode: LightMode,
-    /// A headlamp's (enhanced path): the vehicles of `Scene::light_blockers` its light stops
-    /// at, one bit each - those ahead of it, never its own.
+    /// A vehicle's light (enhanced path): the vehicles of `Scene::light_blockers` it stops at,
+    /// one bit each - those ahead of it, never its own. A headlamp's lights their bodies; a
+    /// small light's (beam 0: the brake lamps' glow, a reversing lamp) never gets into one
+    /// (blockers.wgsl `lamp_blocked`).
     pub blockers: u32,
     /// A headlamp of the vehicle the camera is at (enhanced path): with the others of that
     /// vehicle it casts shadows from a shadow map of their own (`LampShadow::look`) - the
@@ -13155,10 +13158,15 @@ fn gpu_light(l: &PointLight, p: Vec3) -> GpuPointLight {
     } else {
         [0.0, 0.0, 0.0, -2.0]
     };
-    let vanilla_radius = if l.mode == LightMode::Enhanced {
-        0.0
-    } else {
+    // (a vehicle's small light that only the enhanced path draws - its brake lamps' glow on the
+    // road, a reversing lamp: its vehicles in pos.w, below zero, where the classic shader
+    // passes a light by - blockers.wgsl `lamp_blocked`)
+    let vanilla_radius = if l.mode != LightMode::Enhanced {
         l.radius
+    } else if l.beam == 0.0 && l.blockers & 0xff_ffff != 0 {
+        -((l.blockers & 0xff_ffff) as f32)
+    } else {
+        0.0
     };
     GpuPointLight {
         pos: [p.x, p.y, p.z, vanilla_radius],
@@ -13614,6 +13622,44 @@ fn blocked(blockers: &[LightBlocker], mask: u32, ro: DVec3, from: Vec3, to: Vec3
     false
 }
 
+/// blockers.wgsl `vehicles_block` (for its tests): how much of a lamp's light at `p` gets
+/// past the vehicles of `mask` (`rows`: `blocker_rows`, render-origin relative) on its way
+/// from `lamp`; `cabins_dark`, a point deeper in a box than its skin gets none of it.
+#[cfg(test)]
+fn light_past_vehicles(rows: &[[f32; 4]], mask: u32, p: Vec3, lamp: Vec3, cabins_dark: bool) -> f32 {
+    let mut lit = 1.0f32;
+    let len = p.distance(lamp);
+    let smooth = |x: f32| {
+        let t = (x / 0.3).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    for j in 0..24usize {
+        if mask & (1 << j) == 0 || lit <= 0.0 {
+            continue;
+        }
+        let r: [Vec3; 3] = std::array::from_fn(|k| Vec3::from_slice(&rows[j * 3 + k][..3]));
+        let w: [f32; 3] = std::array::from_fn(|k| rows[j * 3 + k][3]);
+        let a = Vec3::new(r[0].dot(p) + w[0], r[1].dot(p) + w[1], r[2].dot(p) + w[2]);
+        let skin = Vec3::new(r[0].length(), r[1].length(), r[2].length()) * 0.04;
+        if a.abs().cmplt(Vec3::ONE + skin).all() {
+            if cabins_dark && a.abs().cmplt(Vec3::ONE - skin).all() {
+                return 0.0;
+            }
+            continue;
+        }
+        let b = Vec3::new(r[0].dot(lamp) + w[0], r[1].dot(lamp) + w[1], r[2].dot(lamp) + w[2]);
+        let dd = (b - a).to_array().map(|x| if x.abs() < 1e-6 { 1e-6 } else { x });
+        let dd = Vec3::from_array(dd);
+        let (t0, t1) = ((Vec3::NEG_ONE - a) / dd, (Vec3::ONE - a) / dd);
+        let enter = t0.min(t1).max_element().max(0.0);
+        let exit = t0.max(t1).min_element().min(1.0);
+        if exit > enter {
+            lit *= 1.0 - smooth((exit - enter) * len);
+        }
+    }
+    lit
+}
+
 /// A headlamp's intensity towards `t` (unit, from the lamp) for its `beam` mode:
 /// lamp_air.wgsl `headlamp`.
 fn headlamp_profile(t: Vec3, dir: Vec3, mode: f32) -> f32 {
@@ -14057,9 +14103,9 @@ fn fog_lamps_shader_source() -> String {
     .join("\n")
 }
 
-/// `beam_blocked` (blockers.wgsl) for a module whose camera holds no blockers: the light
-/// passes.
-const BEAM_BLOCKED_NONE: &str = "fn beam_blocked(p: vec3<f32>, lamp: vec3<f32>, mask: u32) -> f32 { return 1.0; }\n";
+/// `beam_blocked` and `lamp_blocked` (blockers.wgsl) for a module whose camera holds no
+/// blockers: the light passes.
+const BEAM_BLOCKED_NONE: &str = "fn beam_blocked(p: vec3<f32>, lamp: vec3<f32>, mask: u32) -> f32 { return 1.0; }\nfn lamp_blocked(p: vec3<f32>, lamp: vec3<f32>, mask: u32) -> f32 { return 1.0; }\n";
 
 /// The scene's point lights and their grid as the fog pass reads them (`lamp_air.wgsl`):
 /// the scene shader's declarations.

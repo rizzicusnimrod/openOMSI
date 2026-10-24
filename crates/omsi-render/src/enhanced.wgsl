@@ -320,9 +320,12 @@ fn lamp_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, sf: Surface, thin: bool,
             // as the street.
             e = e * (0.05 + 0.95 * smoothstep(-0.1, 0.3, ld.z));
         }
-        // (a headlamp's light stops at the cars ahead of it: `beam_blocked`)
+        // (a headlamp's light stops at the cars ahead of it: `beam_blocked`; a vehicle's small
+        // lights at the vehicles round it, and never get into one: `lamp_blocked`)
         if (l.extra.z != 0.0 && l.extra.x >= 1.0) {
             e = e * beam_blocked(p, l.pos.xyz, u32(l.extra.x));
+        } else if (l.pos.w < -0.5) {
+            e = e * lamp_blocked(p, l.pos.xyz, u32(-l.pos.w));
         }
         if (e <= 0.0) {
             continue;
