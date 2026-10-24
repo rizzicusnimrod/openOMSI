@@ -1443,6 +1443,13 @@ pub(crate) fn run_offscreen(
                     }
                     renderer.lens = Some(fx);
                 }
+                // (the panes of the vehicle the camera sits in are drawn with it, last, and take
+                // the street behind them from the picture of the frame before - in the window
+                // the last frame, here a picture of long ago: a frame first, as the final
+                // picture has, so that their rain and snow show the street as it is now)
+                if lighting.rain > 0.001 || lighting.wetness > 0.02 || lighting.glass_snow > 0.0 {
+                    renderer.render_to_image(&mut scene, w, h, &cam, &lighting)?;
+                }
                 let pixels = renderer.render_to_image(&mut scene, w, h, &cam, &lighting)?;
                 renderer.lens = None;
                 if crate::cinema::lens_view(&args.view) {

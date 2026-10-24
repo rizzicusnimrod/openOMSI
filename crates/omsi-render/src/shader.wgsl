@@ -1874,7 +1874,7 @@ const GLASS_SNOW_MELT: f32 = 0.5;
 // How much of the light the sheet's water scatters greys the street behind it.
 const SHEET_GREY: f32 = 0.2;
 // The flakes on a pane gather into clumps about this many to a metre (`glass_snow_clumps`).
-const GLASS_SNOW_CLUMPS: f32 = 7.0;
+const GLASS_SNOW_CLUMPS: f32 = 10.0;
 // ... and they let a share of the light behind them through, scattered: lit by the sky
 // alone, at night they were dark specks over the street in the headlamps, like dirt.
 const GLASS_SNOW_THROUGH: f32 = 0.85;
@@ -1905,9 +1905,12 @@ fn glass_snow_clumps(world: vec3<f32>, wet: f32) -> f32 {
         return 0.0;
     }
     let q = vec2<f32>(world.x + world.y, world.z) * GLASS_SNOW_CLUMPS;
-    let n = rain_patches(q) * 0.65 + rain_patches(q * 2.7 + vec2<f32>(3.1, 0.4)) * 0.35;
-    let edge = 0.78 - 0.22 * w;
-    return clamp(smoothstep(edge, edge + 0.06, n) * w * s, 0.0, 1.0);
+    let n = rain_patches(q) * 0.55 + rain_patches(q * 2.7 + vec2<f32>(3.1, 0.4)) * 0.3 + rain_patches(q * 7.3 + vec2<f32>(0.7, 5.9)) * 0.15;
+    // (a clump thins out to its edge, where the flakes lie loose, and is not wholly even)
+    let edge = 0.8 - 0.2 * w;
+    let body = smoothstep(edge, edge + 0.14, n);
+    let grain = 0.8 + 0.2 * rain_patches(q * 19.0 + vec2<f32>(2.3, 8.1));
+    return clamp(body * grain * w * s, 0.0, 1.0);
 }
 
 // The snow on a pane composed (glass_film.rs `glass_snow_alpha`): `flakes` their cover there,

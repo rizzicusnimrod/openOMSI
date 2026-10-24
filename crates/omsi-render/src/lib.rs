@@ -9904,7 +9904,7 @@ impl Renderer {
         let enhanced_view = lighting.enhanced && self.hdr_pass.is_some() && omsi_cfg::env::var_os("OMSI_NO_ENHANCED").is_none();
         let glass_on = with_overlays
             && scene.glass_slot.is_some()
-            && (lighting.rain > 0.001 || lighting.wetness > 0.02)
+            && glass_weather(lighting)
             && omsi_cfg::env::var_os("OMSI_NO_GLASS_PICTURE").is_none();
         // the cinematic camera's or the dashcam's lens (`LensFx`): the window's own picture
         // only, drawn into a texture of its own and laid onto the window by the lens pass
@@ -13544,6 +13544,14 @@ fn lens_lamp_kept(dim: f32, facing: f32, color: [f32; 3]) -> f32 {
     let white = atmosphere::smoothstep(LENS_WHITE[0], LENS_WHITE[1], lo / hi);
     let into = atmosphere::smoothstep(LENS_FACING[0], LENS_FACING[1], facing);
     1.0 - dim * white * into
+}
+
+/// Whether a pane can hold water or snow in this weather, and the rain films want the
+/// picture of the street behind them (`glass_picture`): in the rain, on wet roads, while it
+/// snows or with snow on the glass. (Without it in a snowfall on dry roads, the snow on the
+/// windscreen took the night sky for the street behind: dark specks over the lit road.)
+fn glass_weather(lighting: &Lighting) -> bool {
+    lighting.rain > 0.001 || lighting.wetness > 0.02 || lighting.snowfall > 0.0 || lighting.glass_snow > 0.0
 }
 
 /// `lens_lamp_kept`'s steps (lamp_air.wgsl keeps the same, `LENS_*`): how white a lamp is
