@@ -1082,6 +1082,18 @@ mod tests {
         assert_eq!(Settings::from_text(&off.to_text()).mirror_size, 0);
     }
 
+    /// How much the rain and the snow on the windscreen hide (`glass_obstruction`, per cent):
+    /// 100 as it comes, held between 50 and 150, and kept when saved.
+    #[test]
+    fn the_windscreen_setting_round_trips() {
+        assert_eq!(Settings::default().glass_obstruction, 100);
+        let s = Settings::from_text("glass_obstruction=130\n");
+        assert_eq!(s.glass_obstruction, 130);
+        assert_eq!(Settings::from_text(&s.to_text()).glass_obstruction, 130);
+        assert_eq!(Settings::from_text("glass_obstruction=400\n").glass_obstruction, 150);
+        assert_eq!(Settings::from_text("glass_obstruction=NaN\n").glass_obstruction, 100);
+    }
+
     #[test]
     fn traffic_events_round_trip() {
         let d = Settings::default();
