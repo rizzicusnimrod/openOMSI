@@ -66,6 +66,9 @@ struct Enhanced {
     // the traffic's wear map (road_wear.rs): xy its south-west corner (render-origin
     // relative), z 1 / its side, w 1 when there is one
     wear: vec4<f32>,
+    // x how much a film camera takes the white lamps facing it down (lib.rs
+    // `LensFx::lamp_dim`, 0 none): their beams' light in the air and on the snow and the rain
+    lens: vec4<f32>,
 };
 @group(0) @binding(11) var<uniform> enh: Enhanced;
 @group(0) @binding(13) var s_lin: sampler;

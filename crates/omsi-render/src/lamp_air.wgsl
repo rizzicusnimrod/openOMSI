@@ -176,6 +176,37 @@ fn fog_window(r2: f32, range: f32) -> f32 {
     return (1.0 - q * q) * (1.0 - q * q);
 }
 const AIRLIGHT_CELLS: u32 = 16u;
+// What a film camera keeps of a lamp that faces it (lib.rs `lens_lamp_kept`, the dim in
+// `enh.lens.x`, `LensFx::lamp_dim`): a white lamp shining into its lens is taken down by the
+// dim, the more squarely it faces the camera; coloured lamps and lamps seen from the side
+// as they are.
+const LENS_WHITE_FROM: f32 = 0.35;
+const LENS_WHITE_TO: f32 = 0.7;
+const LENS_FACING_FROM: f32 = 0.2;
+const LENS_FACING_TO: f32 = 0.9;
+fn lens_lamp_kept(dim: f32, facing: f32, color: vec3<f32>) -> f32 {
+    let k = clamp(dim, 0.0, 1.0);
+    let hi = max(max(color.r, color.g), color.b);
+    if (k <= 0.0 || hi <= 0.0) {
+        return 1.0;
+    }
+    let lo = min(min(color.r, color.g), color.b);
+    let white = smoothstep(LENS_WHITE_FROM, LENS_WHITE_TO, lo / hi);
+    let into = smoothstep(LENS_FACING_FROM, LENS_FACING_TO, facing);
+    return 1.0 - k * white * into;
+}
+
+// The same for a light of the grid seen from `eye` (its `dir`, beam mode, place and colour):
+// a lamp with a way it faces, a headlamp or a spot. The cinematic camera filmed the bus from
+// in front at night, and in the fog and the snow its beams' light in the air round the lamps
+// stayed two blinding blobs at the strongest dim.
+fn lens_kept_light(dir: vec4<f32>, beam: f32, pos: vec3<f32>, color: vec3<f32>, eye: vec3<f32>) -> f32 {
+    if (enh.lens.x <= 0.0 || (beam == 0.0 && dir.w <= -1.5)) {
+        return 1.0;
+    }
+    return lens_lamp_kept(enh.lens.x, dot(dir.xyz, normalize(eye - pos)), color);
+}
+
 fn lamp_airlight(c: vec3<f32>, d: vec3<f32>, start: f32, len: f32, jitter: f32) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     let sigma0 = enh.fog.x;
@@ -311,7 +342,8 @@ fn lamp_airlight(c: vec3<f32>, d: vec3<f32>, start: f32, len: f32, jitter: f32) 
                 let sigma = sigma0 * exp(-enh.fog.y * max(xc.z - enh.fog.z, 0.0));
                 let dl = distance(xc, l.pos.xyz);
                 let atten = exp(-layer_depth(sigma0, enh.fog.y, c.z - enh.fog.z, xc.z - enh.fog.z, tc - start) - sigma * dl);
-                sum = sum + l.color.rgb * (l.color.w * strength * acc * half / hh * sigma * atten);
+                let kept = lens_kept_light(l.dir, l.extra.z, l.pos.xyz, l.color.rgb, c);
+                sum = sum + l.color.rgb * (l.color.w * strength * acc * half / hh * sigma * atten * kept);
             }
         }
         t = t_out;
@@ -374,7 +406,9 @@ fn precip_light(x: vec3<f32>, to_eye: vec3<f32>, snow: bool) -> vec3<f32> {
                 // goes on forwards, a flake's every way)
                 let c = dot(-ld, -to_eye);
                 let lobe = select(fog_phase(c), 0.7 * hg_phase(c, 0.3) + 0.3 / (4.0 * PI), snow) * 4.0 * PI;
-                e = e + l.color.rgb * l.color.w * enh.lights.y * k * lobe;
+                // (a film camera's: the lamps facing it taken down, `lens_kept_light`)
+                let kept = lens_kept_light(l.dir, l.extra.z, l.pos.xyz, l.color.rgb, camera.cam_pos.xyz);
+                e = e + l.color.rgb * l.color.w * enh.lights.y * k * lobe * kept;
             }
         }
     }

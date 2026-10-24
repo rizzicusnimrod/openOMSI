@@ -400,6 +400,10 @@ struct EnhancedUniform {
     /// The traffic's wear map (`road_wear`): xy its south-west corner relative to the render
     /// origin, z 1 / its side, w 1 when there is one.
     wear: [f32; 4],
+    /// x how much a film camera takes the white lamps facing it down (`LensFx::lamp_dim`,
+    /// 0 none): lamp_air.wgsl `lens_kept_light` on their beams' light in the air and on the
+    /// snow and the rain.
+    lens: [f32; 4],
 }
 
 /// A lightning flash as the picture shows it this frame (`Lighting::flash`, enhanced only):
@@ -8231,7 +8235,8 @@ impl Renderer {
     /// The enhanced path's light for this frame: the sky (recomputed when the sun or the
     /// weather has moved on), the exposure following it, the sky table and the uniform.
     /// Returns whether the reflection probe is to be drawn this frame.
-    fn prepare_enhanced(&mut self, lighting: &Lighting, cam_rel: Vec3, ro: DVec3, dt: f32, contact: bool) -> bool {
+    /// `lamp_dim`: the view's film camera's (`LensFx::lamp_dim`, 0 for none).
+    fn prepare_enhanced(&mut self, lighting: &Lighting, cam_rel: Vec3, ro: DVec3, dt: f32, contact: bool, lamp_dim: f32) -> bool {
         let (input, sun_visibility) = enhanced_sky_input(lighting, self.city_glow.unwrap_or(1.0));
         // OMSI_DEBUG_RAINBOW: what the rainbow (sky_enhanced.wgsl `rainbow`) is made of
         if omsi_cfg::env::var_os("OMSI_DEBUG_RAINBOW").is_some() {
@@ -8517,6 +8522,7 @@ impl Renderer {
                 }
                 _ => [0.0; 4],
             },
+            lens: [lamp_dim.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.enh_buf, 0, bytemuck::bytes_of(&u));
@@ -10309,7 +10315,7 @@ impl Renderer {
         }
         let probe_redraw = enhanced
             && (lead_view || self.sky_state.is_none())
-            && self.prepare_enhanced(lighting, cam_rel, ro, dt, contact_on);
+            && self.prepare_enhanced(lighting, cam_rel, ro, dt, contact_on, lamp_dim);
         // --- what every pass draws, as batches over one draw list (see `Batch`): the shadow
         // casters of each cascade, the depth prepass and the main pass. The list is built
         // and uploaded before any pass is encoded.
@@ -13529,10 +13535,15 @@ fn lens_lamp_kept(dim: f32, facing: f32, color: [f32; 3]) -> f32 {
     }
     let lo = color[0].min(color[1]).min(color[2]);
     // (a halogen lamp's warm white is white; a yellow fog lamp, an indicator are not)
-    let white = atmosphere::smoothstep(0.35, 0.7, lo / hi);
-    let into = atmosphere::smoothstep(0.2, 0.9, facing);
+    let white = atmosphere::smoothstep(LENS_WHITE[0], LENS_WHITE[1], lo / hi);
+    let into = atmosphere::smoothstep(LENS_FACING[0], LENS_FACING[1], facing);
     1.0 - dim * white * into
 }
+
+/// `lens_lamp_kept`'s steps (lamp_air.wgsl keeps the same, `LENS_*`): how white a lamp is
+/// (its weakest colour against its strongest) and how squarely it faces the lens (cosine).
+const LENS_WHITE: [f32; 2] = [0.35, 0.7];
+const LENS_FACING: [f32; 2] = [0.2, 0.9];
 
 /// Whether a view is drawn with the enhanced shading: with the enhanced graphics on
 /// (`graphics`), the window's picture and the headset's eyes always, the mirrors when they
@@ -13575,6 +13586,18 @@ mod lens_lamp_tests {
         assert_eq!(lens_lamp_kept(0.65, 0.0, WHITE), 1.0);
         assert_eq!(lens_lamp_kept(0.65, -1.0, WHITE), 1.0);
         assert_eq!(lens_lamp_kept(0.65, 1.0, RED), 1.0);
+    }
+
+    /// lamp_air.wgsl's copy of `lens_lamp_kept` takes the same steps.
+    #[test]
+    fn the_shaders_lens_steps_are_these() {
+        let src = include_str!("lamp_air.wgsl");
+        let konst = |name: &str| -> f32 {
+            let line = src.lines().find(|l| l.starts_with(&format!("const {name}: f32 = "))).unwrap_or_else(|| panic!("{name} missing"));
+            line.rsplit("= ").next().unwrap().trim_end_matches(';').parse().unwrap()
+        };
+        assert_eq!([konst("LENS_WHITE_FROM"), konst("LENS_WHITE_TO")], super::LENS_WHITE);
+        assert_eq!([konst("LENS_FACING_FROM"), konst("LENS_FACING_TO")], super::LENS_FACING);
     }
 
     #[test]
@@ -16681,27 +16704,29 @@ mod tests {
         });
         let black = renderer.add_material(&mut scene, None, AlphaMode::Opaque, [0.0, 0.0, 0.0, 1.0], false);
         renderer.add_instance(&mut scene, wall, DVec3::ZERO, Mat4::IDENTITY, vec![black]);
-        // a low beam 12 m ahead, a little to the right, shining at the camera
-        scene.lights = vec![PointLight {
-            position: DVec3::new(0.6, 12.0, -0.3),
+        // a full beam 12 m ahead, a little to the right, shining at the camera
+        let lamp = PointLight {
+            position: DVec3::new(0.6, 12.0, 0.0),
             radius: 60.0,
             color: [1.0, 0.92, 0.8],
-            intensity: 2400.0,
+            // (weak enough that the picture round it does not burn out to white either way)
+            intensity: 60.0,
             direction: Vec3::NEG_Y,
-            beam: 1.0,
+            beam: -1.0,
             mode: LightMode::Enhanced,
             ..Default::default()
-        }];
-        // (fog, snowfall, dim)
-        let mut mean = |fog: f32, snow: f32, dim: f32| {
+        };
+        // (fog, snowfall, dim; the lamp on) at night
+        let mut mean = |fog: f32, snow: f32, dim: f32, on: bool| {
+            scene.lights = if on { vec![lamp] } else { Vec::new() };
             renderer.lens = Some(LensFx { lamp_dim: dim, dof: 0.0, ..Default::default() });
-            let lighting = Lighting { enhanced: true, shadows: false, night: 1.0, fog_density: fog, snowfall: snow, ..Default::default() };
+            let lighting = Lighting { enhanced: true, shadows: false, night: 1.0, sun_dir: Vec3::new(0.0, 0.3, -0.95).normalize(), sun_intensity: 0.0, fog_density: fog, snowfall: snow, ..Default::default() };
             let rgba = renderer.render_to_image(&mut scene, 64, 64, &camera, &lighting).unwrap();
             rgba.chunks_exact(4).map(|p| p[0] as f32 + p[1] as f32 + p[2] as f32).sum::<f32>() / (64.0 * 64.0 * 3.0)
         };
         for (what, fog, snow) in [("fog", 0.02, 0.0), ("snowfall", 0.0, 0.6)] {
-            let clear = [mean(0.0, 0.0, 0.0), mean(0.0, 0.0, 0.9)];
-            let (full, dimmed) = (mean(fog, snow, 0.0) - clear[0], mean(fog, snow, 0.9) - clear[1]);
+            let beam = |m: &mut dyn FnMut(f32, f32, f32, bool) -> f32, dim: f32| m(fog, snow, dim, true) - m(fog, snow, dim, false);
+            let (full, dimmed) = (beam(&mut mean, 0.0), beam(&mut mean, 0.9));
             eprintln!("the beam's light in the {what}: {full:.2} as it is, {dimmed:.2} at a dim of 0.9");
             assert!(full > 2.0, "the beam lights the {what}: {full}");
             assert!(dimmed < full * 0.4, "the dim takes it down in the {what}: {dimmed} of {full}");
