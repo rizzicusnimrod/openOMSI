@@ -108,6 +108,6 @@ failures also on the old code: `spv_dump` needs `SPV_DUMP`, the smoke puff test)
   the pool has any of their sizes.
 - Memory (the RADAR_PRE_LEAK reports of long test runs): a real-time windowed drive of
   the final build (Rennsteig duty, autopilot, traffic 60, 1280x720), private bytes sampled
-  every 30 s, stopped at the user's word after 13.5 min: 5728 MB at 1 min, 5741-5760 MB
+  every 30 s, stopped at the user's word after 13.5 min: 5728 MB at 1 min, 5740-5760 MB
   from 5 to 13.5 min - flat within 30 MB, no growth. (Working set 2.43-2.48 GB.) The
   offscreen `--drive` is no soak: it does not draw in real time (20 game minutes in 80 s).
