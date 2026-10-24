@@ -81,9 +81,11 @@ plain openOMSI's releases. *Settings → Install updates without asking* skips t
   away in daylight.
 * **Windscreen rain with real wipers:** the water on your windscreen builds up drop by drop and
   each blade clears the band it sweeps; it comes back faster standing still, and spray from the
-  car ahead on a wet road wets it too. A soaked pane veils the street between its drops, so
-  the wipers matter. In a snowfall the panes gather snow instead - also when the weather
-  turns to snow during a drive - and the wipers sweep it off.
+  car ahead on a wet road wets it too. On a soaked pane the water between the drops blurs the
+  street into soft, wobbling shapes and street lamps into halos, so the wipers matter. In a
+  snowfall the panes gather snow instead - flakes, clumps of it and melt water between them,
+  also when the weather turns to snow during a drive - and the wipers sweep it off. How much
+  it hides: *Rain and snow on the windscreen* (50-150 %) in the Graphics settings.
 * No light column over low beams in rain, softer lamp-lit fog, and the weather's own cloud
   picture on the sky.
 
