@@ -620,8 +620,11 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
             let e = sh_irradiance(lit_from) / PI + enh.sun.rgb / PI * max(dot(lit_from, camera.sun_dir.xyz), 0.0);
             let behind = rain_behind(in.world, -vn, rain_env_enhanced(-vn, 2.0), 1.0 / max(enh.exposure.x, 1e-6));
             let c = GLASS_SNOW_ALBEDO * e * select(1.0, GLASS_SNOW_INSIDE, in_cab) + behind * GLASS_SNOW_THROUGH;
+            // (clumps of it wholly white, and the street soft through the melt water between)
+            let soft = rain_sheet_behind(in.world, wet, camera.post.y, behind, 1.0 / max(enh.exposure.x, 1e-6));
+            let f = glass_snow_film(cover, glass_snow_clumps(in.world, wet), c, soft, wet);
             let aer = air(-vn, fog_distance(in.world), camera.cam_pos.z - enh.fog.z, in.world.z - enh.fog.z);
-            return vec4<f32>(c * enh.exposure.x * aer.a, cover);
+            return vec4<f32>(f.rgb * enh.exposure.x * aer.a, f.a);
         }
         let g = rain_glass(in.world, in.uv - in.params.zw, in.normal, wet, camera.post.y, in_cab);
         let through = rain_through(g, vn);
@@ -629,7 +632,8 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
         // (the picture behind is as the HDR pass drew it: exposed already)
         let seen = select(vec3<f32>(0.0), rain_behind(in.world, through, rain_env_enhanced(normalize(select(g.out, through, valid)), 2.0), 1.0 / max(enh.exposure.x, 1e-6)), valid);
         let mirrored = rain_env_enhanced(reflect(-vn, g.n), 1.0);
-        let d = rain_light(g, vn, through, mirrored, seen, sh_irradiance(g.out) / PI * 0.9, enh.sun.rgb / PI);
+        let sheet = rain_sheet_behind(in.world, wet, camera.post.y, rain_env_enhanced(-vn, 2.0), 1.0 / max(enh.exposure.x, 1e-6));
+        let d = rain_light(g, vn, through, mirrored, seen, sheet, sh_irradiance(g.out) / PI * 0.9, enh.sun.rgb / PI);
         let aer = air(-normalize(v), fog_distance(in.world), camera.cam_pos.z - enh.fog.z, in.world.z - enh.fog.z);
         // Drops a few pixels across are a pane's sparkle close up; further off each
         // darker rim was a black fleck, and a bus seen from the pavement in the rain wore

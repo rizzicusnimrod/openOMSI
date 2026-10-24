@@ -286,6 +286,7 @@ pub const OPTIONS: &[PageDef] = &[
                 it("wind_sway", "Wind in the trees", "How much trees, bushes and grass move in the wind"),
                 it("seasonal_foliage", "Trees through the year", "Autumn colours, bare winter trees and fresh spring green"),
                 it("lightning", "Lightning and thunder", "Thunderstorms flash and rumble"),
+                it("glass_obstruction", "Rain and snow on the windscreen", "How much the water and snow on the glass hide the road until the wipers pass"),
                 it("grass", "Grass", "Grass on the verges and fields, swaying in the wind"),
                 it("grass_distance", "Grass distance", "How far away grass is drawn; it thins out beyond 45 m"),
             ]),

@@ -531,6 +531,8 @@ pub(crate) fn weather_lighting(
     // [wind] direction (deg) and speed (m/s): the snowfall drifts with it, the plants sway
     lighting.wind = glam::Vec3::new(w.wind.0.to_radians().sin() * w.wind.1, w.wind.0.to_radians().cos() * w.wind.1, 0.0);
     lighting.sway = crate::startup::WIND_SWAY.load(std::sync::atomic::Ordering::Relaxed).min(200) as f32 / 100.0;
+    // (how much the rain and the snow on the windscreen hide: `Settings::glass_obstruction`)
+    lighting.glass_strength = crate::startup::GLASS_OBSTRUCTION.load(std::sync::atomic::Ordering::Relaxed).clamp(50, 150) as f32 / 100.0;
     lighting.gust = gustiness(w);
     // the sun's shafts, and the mist of a calm, damp dawn they show in (omsi-render shafts.rs)
     lighting.shafts = crate::startup::SUN_SHAFTS.load(std::sync::atomic::Ordering::Relaxed).min(3) as u8;

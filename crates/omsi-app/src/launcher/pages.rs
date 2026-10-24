@@ -641,6 +641,12 @@ fn graphics_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, cols: [Rect; 2]) ->
     }
     toggle_setting(ui, s, dirty, c.row(), "Trees through the year", "seasonal_foliage");
     toggle_setting(ui, s, dirty, c.row(), "Lightning and thunder", "lightning");
+    // (how much the rain and the snow on the windscreen hide, in per cent)
+    let mut glass = get(s, "glass_obstruction").as_f64().unwrap_or(100.0) as f32;
+    if ui.slider("s-glass", c.row(), &mut glass, 50.0, 150.0, 10.0, "Rain and snow on the windscreen", &|v| format!("{}%", v.round() as i64)) {
+        s["glass_obstruction"] = json!(((glass / 10.0).round() * 10.0).clamp(50.0, 150.0) as i64);
+        *dirty = 0.3;
+    }
     // (phase two's light and surfaces: the sun's shafts and the grass have levels)
     for (id, key, name, names) in [("s-shafts", "sun_shafts", "Sun shafts", ["Off", "Low", "Medium", "High"]), ("s-grass", "grass", "Grass", ["Off", "Sparse", "Normal", "Dense"])] {
         let mut level = get(s, key).as_f64().unwrap_or(2.0) as f32;
@@ -2740,7 +2746,7 @@ mod settings_tests {
     fn by_tab() -> Vec<Vec<&'static str>> {
         let mut graphics = vec![
             "s-gp-sel", "s-gp-load", "s-gp-del", "s-gp-name", "s-gp-save",
-            "s-preset", "s-graphics", "s-msaa", "s-scale", "s-af", "s-shadow", "set-ssao", "set-shadows", "s-casters", "set-detail_textures", "s-led", "s-led-mip", "s-night", "s-sway", "set-seasonal_foliage", "set-lightning", "s-shafts", "s-grass", "s-grass-dist", "set-ssr", "set-sunlit_cab", "set-relief", "set-road_tracks", "set-own_snowy_roads", "set-mirror_matched", "set-taa", "set-shadow_blobs", "set-reflections", "set-clouds",
+            "s-preset", "s-graphics", "s-msaa", "s-scale", "s-af", "s-shadow", "set-ssao", "set-shadows", "s-casters", "set-detail_textures", "s-led", "s-led-mip", "s-night", "s-sway", "set-seasonal_foliage", "set-lightning", "s-glass", "s-shafts", "s-grass", "s-grass-dist", "set-ssr", "set-sunlit_cab", "set-relief", "set-road_tracks", "set-own_snowy_roads", "set-mirror_matched", "set-taa", "set-shadow_blobs", "set-reflections", "set-clouds",
             "set-fullscreen", "s-res", "set-vsync", "s-fps", "s-view", "s-maxobj", "s-minobj", "s-mirror", "s-mirror-refresh", "s-texmem", "set-texture_compression",
         ];
         if !cfg!(target_os = "macos") {

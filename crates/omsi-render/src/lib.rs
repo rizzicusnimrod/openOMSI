@@ -93,7 +93,8 @@ struct CameraUniform {
     breeze: [f32; 4],
     /// The trees through the year (`Lighting::foliage`, shader.wgsl `seasonal_colour`).
     season: [f32; 4],
-    /// x: the glass films wear snow, not drops (`Lighting::glass_snow`).
+    /// x: the glass films wear snow, not drops (`Lighting::glass_snow`); y how much they hide
+    /// (`Lighting::glass_strength`).
     glass: [f32; 4],
 }
 
@@ -1231,6 +1232,10 @@ pub struct Lighting {
     /// water on the vehicles' panes (`MaterialExtra::rain_film`) show the one or the other
     /// frame by frame, whatever the weather was when the vehicle was loaded.
     pub glass_snow: f32,
+    /// How much the rain and the snow on the panes hide (the windscreen setting, 1 = 100 %,
+    /// 0.5..1.5): the water sheet between the drops, how far it smears the street, the clumps
+    /// of snow and the melt water between them (glass_film.rs, `camera.glass.y`).
+    pub glass_strength: f32,
     /// The weather's wind (m/s, world): the snowfall drifts with it, and the plants sway in
     /// it (shader.wgsl `swayed`).
     pub wind: Vec3,
@@ -1345,6 +1350,7 @@ impl Default for Lighting {
             shadows: true,
             snowfall: 0.0,
             glass_snow: 0.0,
+            glass_strength: 1.0,
             wind: Vec3::ZERO,
             gust: 0.3,
             flash: None,
@@ -10281,7 +10287,7 @@ impl Renderer {
             lamp_fade: std::array::from_fn(|k| lamp_shadows.get(k).map_or(0.0, |l| l.fade)),
             breeze: [lighting.wind.x, lighting.wind.y, lighting.gust.clamp(0.0, 1.0), if sway_off() { 0.0 } else { lighting.sway.clamp(0.0, 4.0) }],
             season: lighting.foliage.map(|v| v.clamp(0.0, 1.0)),
-            glass: [lighting.glass_snow.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
+            glass: [lighting.glass_snow.clamp(0.0, 1.0), lighting.glass_strength.clamp(0.0, 2.0), 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cu));

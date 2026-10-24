@@ -1117,6 +1117,7 @@ fn steps_of(verb: &str) -> Option<Vec<f32>> {
         "led_glow" => (0..16).map(|v| v as f32).collect(),
         "night_brightness" => (2..=40).map(|v| v as f32 * 5.0).collect(),
         "wind_sway" => (0..=20).map(|v| v as f32 * 10.0).collect(),
+        "glass_obstruction" => (5..=15).map(|v| v as f32 * 10.0).collect(),
         "sun_shafts" | "grass" => vec![0.0, 1.0, 2.0, 3.0],
         "grass_distance" => vec![45.0, 80.0, 120.0, 180.0],
         "dashcam_lines" => vec![240.0, 360.0, 480.0, 720.0, 1080.0, 1440.0],
@@ -1278,6 +1279,7 @@ fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
         "led_glow" => s.led_glow as f32,
         "night_brightness" => s.night_brightness as f32,
         "wind_sway" => s.wind_sway as f32,
+        "glass_obstruction" => s.glass_obstruction as f32,
         "sun_shafts" => s.sun_shafts as f32,
         "grass" => s.grass as f32,
         "grass_distance" => s.grass_distance as f32,
@@ -1394,6 +1396,11 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
             app.settings.wind_sway = v.round().clamp(0.0, 200.0) as u8;
             crate::startup::nature_settings(&app.settings);
             Some(("wind_sway", app.settings.wind_sway.to_string()))
+        }
+        "glass_obstruction" => {
+            app.settings.glass_obstruction = v.round().clamp(50.0, 150.0) as u8;
+            crate::startup::nature_settings(&app.settings);
+            Some(("glass_obstruction", app.settings.glass_obstruction.to_string()))
         }
         "sun_shafts" => {
             app.settings.sun_shafts = v.round().clamp(0.0, 3.0) as u8;
@@ -2790,6 +2797,7 @@ fn options_pages(app: &App) -> Vec<Page> {
         switch_row(app, "reflections", "Reflection maps (paint, chrome, glass)", later).filter(|_| !app.settings.ray_tracing()),
         switch_row(app, "clouds", "Clouds", later),
         slider_row(app, "wind_sway", "Wind in the trees", "How much trees, bushes and grass move in the wind: 0% still, 100% as nature has it", &|v| if v < 0.5 { "Still".to_string() } else { format!("{}%", v as i64) }),
+        slider_row(app, "glass_obstruction", "Rain and snow on the windscreen", "How much the water and snow on the glass hide the road until the wipers pass: 100% as it comes", &|v| format!("{}%", v as i64)),
         switch_row(app, "seasonal_foliage", "Trees through the year", "Autumn colours, bare winter trees and fresh spring green where the map has no seasonal trees of its own"),
         switch_row(app, "lightning", "Lightning and thunder", "Thunderstorms flash in the clouds and to the ground, and the thunder follows"),
         slider_row(app, "sun_shafts", "Sun shafts", "Beams of sunlight through the trees and between the houses, in fog and a calm morning's mist", &quality_name),

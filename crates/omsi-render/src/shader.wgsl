@@ -1456,7 +1456,7 @@ struct RainGlass {
     out: vec3<f32>,
     // the fine mist of droplets (0..1)
     mist: f32,
-    // the haze of the water lying between the drops (0..1, `RAIN_HAZE`)
+    // the sheet of water lying between the drops (0..1, `RAIN_SHEET`)
     haze: f32,
 };
 
@@ -1711,8 +1711,10 @@ fn rain_glass(world: vec3<f32>, uv: vec2<f32>, n: vec3<f32>, wet: f32, t: f32, o
     // (seen from further than a millimetre a pixel: their average)
     let mist = mix(wet * wetter * 0.35 * 0.12, grain, smoothstep(0.0015, 0.0006, px));
     g.mist = mist * (1.0 - track) * clamp(wet * 1.4, 0.0, 1.0);
-    // (and the water lying between them: a soaked pane veils the street, not only bends it)
-    g.haze = RAIN_HAZE * clamp(wet, 0.0, 1.0) * (1.0 - track);
+    // (and the water lying between them: a sheet that takes most of the street on a soaked
+    // pane, as soft and wobbling as `rain_sheet_behind` shows it - the windscreen setting's
+    // share of it, `camera.glass.y`)
+    g.haze = min(RAIN_SHEET * clamp(wet, 0.0, 1.0) * max(camera.glass.y, 0.0), SHEET_MAX) * (1.0 - track);
 
     g.cover = best;
     let nz = sqrt(max(1.0 - dot(slope, slope), 0.02));
@@ -1758,14 +1760,49 @@ fn rain_behind(world: vec3<f32>, through: vec3<f32>, fallback: vec3<f32>, scale:
     let ndc = c.xy / c.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     let inside = smoothstep(0.0, 0.06, min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)));
+    // (only a way bent a little out of the line of sight finds the street in the picture: one
+    // bent far round, through a drop's rim, landed on the cab round the glass - the dark
+    // dashboard - and from inside every drop was a black speck; the sky's colours there)
+    let straight = smoothstep(0.82, 0.96, dot(normalize(through), normalize(world - camera.cam_pos.xyz)));
     let seen = finite_or(textureSampleLevel(t_env, s_diffuse, clamp(uv, vec2<f32>(0.001), vec2<f32>(0.999)), 0.0).rgb * scale, fallback);
-    return mix(fallback, seen, inside);
+    return mix(fallback, seen, inside * straight);
+}
+
+// The street behind a sheet of water on the glass at `world` (`wet` how wet the pane is, `t`
+// the time): the clean picture behind the glass (`t_env`, as `rain_behind` reads it) gathered
+// over a disc of `SHEET_BLUR` of its height at the wettest round where this spot shows it,
+// the disc pushed about by the water's slow ripples - a soft, wobbling street, not a sharp one.
+// `fallback` where there is no picture (a mirror's view), `scale` as in `rain_behind`.
+fn rain_sheet_behind(world: vec3<f32>, wet: f32, t: f32, fallback: vec3<f32>, scale: f32) -> vec3<f32> {
+    if (camera.flags.z > -0.5) {
+        return fallback;
+    }
+    let c = camera.view_proj * vec4<f32>(world, 1.0);
+    if (c.w <= 0.05) {
+        return fallback;
+    }
+    let uv = vec2<f32>(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);
+    let k = clamp(wet, 0.0, 1.0) * max(camera.glass.y, 0.0);
+    let dims = vec2<f32>(textureDimensions(t_env));
+    let r = SHEET_BLUR * k * vec2<f32>(dims.y / max(dims.x, 1.0), 1.0);
+    // (the ripples: the water's own slow flow over the glass, a few centimetres across)
+    let q = vec2<f32>(world.x + world.y, world.z) * 14.0 + vec2<f32>(0.0, t * 0.6);
+    let wob = (vec2<f32>(rain_patches(q), rain_patches(q + vec2<f32>(5.2, 1.7))) - 0.5) * r * 1.6;
+    var sum = vec3<f32>(0.0);
+    for (var i = 0; i < 12; i = i + 1) {
+        let a = f32(i) * 2.3999632;
+        let o = vec2<f32>(cos(a), sin(a)) * sqrt((f32(i) + 0.5) / 12.0) * r;
+        let s = textureSampleLevel(t_env, s_diffuse, clamp(uv + wob + o, vec2<f32>(0.001), vec2<f32>(0.999)), 0.0).rgb;
+        sum = sum + finite_or(s * scale, fallback);
+    }
+    return sum / 12.0;
 }
 
 // A drop lit: `refl` what the dome mirrors, `thru` what is seen through it (both
 // radiance), `mist_col` the light the mist scatters, `sun` the sun's strength for the
 // sparkles, `d_thru` the way through (from `rain_through`). Colour and cover.
-fn rain_light(g: RainGlass, v: vec3<f32>, d_thru: vec3<f32>, refl: vec3<f32>, thru: vec3<f32>, mist_col: vec3<f32>, sun: vec3<f32>) -> vec4<f32> {
+// `sheet` the street as the sheet of water between the drops shows it (`rain_sheet_behind`).
+fn rain_light(g: RainGlass, v: vec3<f32>, d_thru: vec3<f32>, refl: vec3<f32>, thru: vec3<f32>, sheet: vec3<f32>, mist_col: vec3<f32>, sun: vec3<f32>) -> vec4<f32> {
     let facing = dot(g.out, v) > 0.0;
     let cosv = clamp(abs(dot(g.n, v)), 0.0, 1.0);
     // (from inside, the dome's inner face mirrors the cab: little of it)
@@ -1785,9 +1822,10 @@ fn rain_light(g: RainGlass, v: vec3<f32>, d_thru: vec3<f32>, refl: vec3<f32>, th
     }
     let a_drop = g.cover * 0.94;
     let a_mist = g.mist * 0.2 * (1.0 - a_drop);
-    // the haze between the drops: what lies behind, greyed by the light the water scatters
+    // the sheet between the drops: the street behind, soft and wobbling, a little greyed by
+    // the light the water scatters
     let a_haze = g.haze * (1.0 - a_drop - a_mist);
-    let haze_col = mix(thru, mist_col, 0.6);
+    let haze_col = mix(sheet, mist_col, SHEET_GREY);
     let a = a_drop + a_mist + a_haze;
     let col = (c * a_drop + mist_col * a_mist + haze_col * a_haze) / max(a, 1e-4);
     return vec4<f32>(col, a);
@@ -1820,13 +1858,23 @@ const GLASS_SNOW_ALBEDO: vec3<f32> = vec3<f32>(0.9, 0.92, 0.95);
 const GLASS_SNOW_INSIDE: f32 = 0.85;
 
 // How much of the view a pane's film takes away (glass_film.rs keeps the same numbers): the
-// haze of a soaked pane between its drops, the drops' density against the first design, the
-// snow's cover against its picture's and the frosty veil it lays over the whole pane. A pane
-// in the rain or the snow was a clear window with a few specks on it.
-const RAIN_HAZE: f32 = 0.22;
+// sheet of water on a soaked pane between its drops and how far it smears the street behind
+// (a share of the picture's height) - never more than SHEET_MAX of the view -, the drops'
+// density against the first design, the snow's cover against its picture's, the frosty veil
+// it lays over the whole pane and the melt water between its flakes. A pane in the rain or
+// the snow was a clear window with a few specks on it. (All at the windscreen setting's
+// 100 %, `camera.glass.y`.)
+const RAIN_SHEET: f32 = 0.78;
+const SHEET_MAX: f32 = 0.95;
+const SHEET_BLUR: f32 = 0.014;
 const RAIN_DROP_DENSITY: f32 = 1.35;
 const GLASS_SNOW_GAIN: f32 = 1.8;
 const GLASS_SNOW_VEIL: f32 = 0.12;
+const GLASS_SNOW_MELT: f32 = 0.5;
+// How much of the light the sheet's water scatters greys the street behind it.
+const SHEET_GREY: f32 = 0.2;
+// The flakes on a pane gather into clumps about this many to a metre (`glass_snow_clumps`).
+const GLASS_SNOW_CLUMPS: f32 = 7.0;
 // ... and they let a share of the light behind them through, scattered: lit by the sky
 // alone, at night they were dark specks over the street in the headlamps, like dirt.
 const GLASS_SNOW_THROUGH: f32 = 0.85;
@@ -1845,6 +1893,31 @@ fn glass_snow_cover(uv: vec2<f32>, wet: f32) -> f32 {
     let s = textureSample(t_diffuse, s_diffuse, uv);
     let w = clamp(wet, 0.0, 1.0);
     return clamp(s.a * material.color.a * w * GLASS_SNOW_GAIN + w * GLASS_SNOW_VEIL, 0.0, 1.0);
+}
+
+// Where the flakes on a pane at `world` have gathered into clumps, wholly white (0..1): none
+// on a pane lightly dusted, a third of it at the snowiest, as many as the windscreen setting
+// says (`camera.glass.y`); the flakes' own picture alone left the street between them clear.
+fn glass_snow_clumps(world: vec3<f32>, wet: f32) -> f32 {
+    let w = clamp(wet, 0.0, 1.0);
+    let s = max(camera.glass.y, 0.0);
+    if (w * s <= 0.0) {
+        return 0.0;
+    }
+    let q = vec2<f32>(world.x + world.y, world.z) * GLASS_SNOW_CLUMPS;
+    let n = rain_patches(q) * 0.65 + rain_patches(q * 2.7 + vec2<f32>(3.1, 0.4)) * 0.35;
+    let edge = 0.78 - 0.22 * w;
+    return clamp(smoothstep(edge, edge + 0.06, n) * w * s, 0.0, 1.0);
+}
+
+// The snow on a pane composed (glass_film.rs `glass_snow_alpha`): `flakes` their cover there,
+// `clumps` the clumps', `c` their colour, `soft` the street through the melt water between
+// them (`rain_sheet_behind`), `wet` the film's water. Colour and the share of the view hidden.
+fn glass_snow_film(flakes: f32, clumps: f32, c: vec3<f32>, soft: vec3<f32>, wet: f32) -> vec4<f32> {
+    let snow = max(flakes, clumps);
+    let melt = min(GLASS_SNOW_MELT * clamp(wet, 0.0, 1.0) * max(camera.glass.y, 0.0), SHEET_MAX);
+    let a = snow + (1.0 - snow) * melt;
+    return vec4<f32>((c * snow + soft * (1.0 - snow) * melt) / max(a, 1e-4), a);
 }
 
 // A pane's normal on the side the weather is - the side facing the eye, turned round from
@@ -1908,12 +1981,15 @@ fn shade_vanilla(in: FsIn, puddle_weight: ptr<function, f32>, eye: vec3<f32>) ->
             var light = (sun + camera.sky_color.rgb * 0.7 + camera.ambient.xyz) * select(1.0, GLASS_SNOW_INSIDE, in_cab);
             light = select(light, srgb_decode(light), camera.sky_color.w > 0.5);
             let behind = rain_behind(in.world, -v, rain_env_vanilla(-v), 1.0);
-            return vec4<f32>(min(GLASS_SNOW_ALBEDO * light + behind * GLASS_SNOW_THROUGH, vec3<f32>(1.5)), cover);
+            let soft = rain_sheet_behind(in.world, in.params.x, camera.post.y, behind, 1.0);
+            let f = glass_snow_film(cover, glass_snow_clumps(in.world, in.params.x), GLASS_SNOW_ALBEDO * light + behind * GLASS_SNOW_THROUGH, soft, in.params.x);
+            return vec4<f32>(min(f.rgb, vec3<f32>(1.5)), f.a);
         }
         let g = rain_glass(in.world, in.uv - in.params.zw, in.normal, in.params.x, camera.post.y, in_cab);
         let through = rain_through(g, v);
         let seen = select(rain_behind(in.world, through, rain_env_vanilla(normalize(through)), 1.0), vec3<f32>(0.0), dot(through, through) < 1e-4);
-        let d = rain_light(g, v, through, rain_env_vanilla(reflect(-v, g.n)), seen, rain_env_vanilla(vec3<f32>(0.0, 0.0, 0.5)) * 0.9, camera.sun_color.rgb * camera.sun_dir.w);
+        let sheet = rain_sheet_behind(in.world, in.params.x, camera.post.y, rain_env_vanilla(-v), 1.0);
+        let d = rain_light(g, v, through, rain_env_vanilla(reflect(-v, g.n)), seen, sheet, rain_env_vanilla(vec3<f32>(0.0, 0.0, 0.5)) * 0.9, camera.sun_color.rgb * camera.sun_dir.w);
         // (fading out with the distance: see enhanced.wgsl)
         let near = 1.0 - smoothstep(5.0, 15.0, distance(in.world, camera.cam_pos.xyz));
         return vec4<f32>(min(d.rgb, vec3<f32>(1.5)), d.a * near);
