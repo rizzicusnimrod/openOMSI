@@ -68,6 +68,7 @@ mod puddles;
 mod quit;
 mod rain;
 mod wipers;
+mod watchdog;
 mod scene;
 mod schedule;
 mod schedule_paper;

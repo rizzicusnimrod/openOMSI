@@ -579,8 +579,12 @@ impl App {
         );
         let scene = renderer.new_scene();
         let show = |w: &Option<Arc<Window>>| {
-            if let Some(w) = w.as_ref().filter(|_| shown_later) {
-                w.set_visible(true);
+            if let Some(w) = w.as_ref() {
+                if shown_later {
+                    w.set_visible(true);
+                }
+                // (from here a stop of the window is logged, `watchdog`)
+                crate::watchdog::watch(w);
             }
         };
         self.window = Some(window);
@@ -603,6 +607,7 @@ impl App {
 
     /// Load the map, vehicle and traffic according to `args`.
     pub(crate) fn load_world_now(&mut self, event_loop: &ActiveEventLoop) {
+        crate::watchdog::at("loading");
         // a joining player loads the host's date, time, weather and season (after the menu)
         if let Some(l) = self.lan.as_mut() {
             lan::adopt_host_world(&mut self.args, l, &mut self.remotes);

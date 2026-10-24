@@ -578,6 +578,8 @@ pub(crate) fn run_offscreen(
                 player.as_ref(),
                 &renderer.options,
             );
+            // (the road ahead in steps between the passes, as in the window)
+            t.populate_ahead_step(&world, &renderer, &mut scene, dt);
             if i % 60 == 0 {
                 // (following a car, the population goes with the camera)
                 let pc = if args.follow.is_some() { view_cam.position } else { center };

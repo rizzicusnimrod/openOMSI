@@ -685,6 +685,20 @@ const LAMPS_IN_SECS: f32 = 2.5;
 /// seen changes slowly.
 const SIGHT_KEEP: f32 = 12.0;
 const SIGHT_TESTS: usize = 6;
+/// The road ahead is filled a step at a time between the population passes
+/// (`Traffic::populate_ahead_step`, every `AHEAD_STEP` s): done all at once in the pass, its
+/// lines of sight and new cars held up a frame for 8-13 ms every two seconds.
+pub(crate) const AHEAD_STEP: f32 = 0.25;
+
+/// (lanes looked at, cars put there) one fill of the road ahead may do: the first, while
+/// the map loads, as many cars as it wants; a step afterwards, its small share.
+fn ahead_limits(initial: bool) -> (usize, usize) {
+    if initial {
+        (SIGHT_TESTS, usize::MAX)
+    } else {
+        (1, 1)
+    }
+}
 
 /// `OMSI_DEBUG_POPULATION`: where the cars came from, counted for a line in the log every
 /// minute.
@@ -881,6 +895,10 @@ pub struct Traffic {
     /// The lanes of the road ahead and whether their start was in sight when last looked at
     /// (and when: `time`), see `SIGHT_KEEP`.
     sight: HashMap<usize, (bool, f32)>,
+    /// What the last population pass asked of the road ahead (centre, street target,
+    /// reach), filled in steps (`populate_ahead_step`), and the time to the next step.
+    ahead_plan: Option<(DVec3, usize, f64)>,
+    ahead_t: f32,
     /// `OMSI_DEBUG_DRIVERS`: what the drivers do, in the log.
     debug_drivers: bool,
     /// `OMSI_DEBUG_RVL`: how fast the cars came into junctions by the rule of the right
@@ -1915,6 +1933,8 @@ impl Traffic {
             debug_population: omsi_cfg::env::var_os("OMSI_DEBUG_POPULATION").is_some(),
             pop_stats: PopStats::default(),
             sight: HashMap::new(),
+            ahead_plan: None,
+            ahead_t: 0.0,
             debug_drivers: omsi_cfg::env::var_os("OMSI_DEBUG_DRIVERS").is_some(),
             rvl_entries: {
                 omsi_sim::traffic::RIGHT_BEFORE_LEFT_CAUTION.store(omsi_cfg::env::var_os("OMSI_NO_RVL_CAUTION").is_none(), std::sync::atomic::Ordering::Relaxed);
@@ -2693,8 +2713,12 @@ impl Traffic {
         // the whole map's population: as dense as around the player, on every street the
         // map has shown so far (sleeping where the player is not)
         self.fill_map(center, street_target);
-        // the road ahead, out to where cars are too small to see
-        self.populate_ahead(world, renderer, scene, center, street_target, reach);
+        // the road ahead, out to where cars are too small to see: at once while the map is
+        // first populated, then in steps between the passes (`populate_ahead_step`)
+        if self.initial {
+            self.populate_ahead(world, renderer, scene, center, street_target, reach, ahead_limits(true));
+        }
+        self.ahead_plan = Some((center, street_target, reach));
         for (kind, target) in [
             (LaneKind::Street, street_target),
             (LaneKind::Air, if has_air { 3 } else { 0 }),
@@ -3117,7 +3141,20 @@ impl Traffic {
     /// `center` comes to. Only the road in sight: filled behind the houses as well, a town
     /// ahead drew twice the cars and cost a millisecond a frame for cars nobody saw (where
     /// nothing is seen, `populate_kind` puts them behind the houses as it always has).
-    fn populate_ahead(&mut self, world: &World, renderer: &Renderer, scene: &mut Scene, center: DVec3, street_target: usize, reach: f64) {
+    /// A step of filling the road ahead (see `AHEAD_STEP`), with what the last population
+    /// pass asked for: called every frame, it does its share every `AHEAD_STEP` s.
+    pub fn populate_ahead_step(&mut self, world: &World, renderer: &Renderer, scene: &mut Scene, dt: f32) {
+        self.ahead_t -= dt;
+        if self.ahead_t > 0.0 || self.mirror {
+            return;
+        }
+        self.ahead_t = AHEAD_STEP;
+        if let Some((center, street_target, reach)) = self.ahead_plan {
+            self.populate_ahead(world, renderer, scene, center, street_target, reach, ahead_limits(false));
+        }
+    }
+
+    fn populate_ahead(&mut self, world: &World, renderer: &Renderer, scene: &mut Scene, center: DVec3, street_target: usize, reach: f64, (sight_tests, cars): (usize, usize)) {
         if reach <= self.spawn_radius || street_target == 0 || self.lights_only || self.types.is_empty() {
             return;
         }
@@ -3146,7 +3183,7 @@ impl Traffic {
             }
         }
         unknown.sort_by(|a, b| b.2.total_cmp(&a.2));
-        for &(i, w, _) in unknown.iter().take(SIGHT_TESTS) {
+        for &(i, w, _) in unknown.iter().take(sight_tests) {
             let seen = !self.occluded(world, &viewer, self.net.lanes[i].start(), 3.0);
             self.sight.insert(i, (seen, self.time));
             if seen {
@@ -3164,6 +3201,8 @@ impl Traffic {
         let ahead_w: f64 = ahead.iter().map(|a| a.1 as f64).sum();
         let target = ((street_target as f64 * ahead_w / near_w).min(street_target as f64 * AHEAD_CAP)).round() as usize;
         let mut count = self.cars.iter().filter(|c| !c.is_bus() && !c.gone && self.ahead_only(c.vehicle.position, center, reach)).count();
+        // (at most `cars` put there now: the rest in the next steps)
+        let target = target.min(count.saturating_add(cars));
         // first the cars sleeping there (the map's own, still on their way)
         let mut i = 0;
         while i < self.dormant.len() && count < target {
@@ -9759,6 +9798,20 @@ mod day_curve_tests {
         // the fork's curves leave the other days alone, and every day (0) is any day
         assert_eq!(at(&d[3..], 0, false, false), None);
         assert_eq!(at(&[(0, curve(0.5))], 6, true, true), Some(0.5));
+    }
+}
+
+#[cfg(test)]
+mod ahead_step_tests {
+    use super::*;
+
+    #[test]
+    fn a_step_of_the_road_ahead_looks_at_one_lane_and_puts_one_car() {
+        assert_eq!(ahead_limits(false), (1, 1));
+        // (the first fill, behind the loading screen, as before)
+        assert_eq!(ahead_limits(true), (SIGHT_TESTS, usize::MAX));
+        // four steps a second: more lanes looked at than the pass's 6 every 2 s
+        assert!(1.0 / AHEAD_STEP >= SIGHT_TESTS as f32 / 2.0);
     }
 }
 

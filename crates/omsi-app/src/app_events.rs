@@ -65,6 +65,7 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        crate::watchdog::at("events");
         match event {
             WindowEvent::CloseRequested => {
                 self.finish_vr_nav_edit();
@@ -530,9 +531,11 @@ impl ApplicationHandler for App {
                     return;
                 }
                 let __t = Instant::now();
+                crate::watchdog::at("streaming");
                 self.drive_streaming();
                 *self.profile.entry("streaming").or_default() += __t.elapsed().as_secs_f64();
                 let __t = Instant::now();
+                crate::watchdog::at("traffic");
                 // (with a triple screen, all of its three panels are in sight)
                 let sight = self.camera.as_ref().zip(self.surface.as_ref())
                     .and_then(|(c, s)| self.sight_extent(c, (s.config.width, s.config.height)));
@@ -572,6 +575,12 @@ impl ApplicationHandler for App {
                         &r.options,
                     );
                     self.populate_t -= dt;
+                    if !self.paused {
+                        let __t5 = Instant::now();
+                        t.populate_ahead_step(w, r, scene, dt);
+                        *self.profile.entry("traffic.populate").or_default() +=
+                            __t5.elapsed().as_secs_f64();
+                    }
                     if self.populate_t <= 0.0 && !self.paused {
                         // come back quickly while there is a backlog of departures to put out
                         self.populate_t = if self
@@ -716,6 +725,7 @@ impl ApplicationHandler for App {
                 // the bus frame, and placing them on the pose of the frame before made everyone
                 // aboard tremble at speed (a quarter of a metre behind the seat, every frame).
                 let __t = Instant::now();
+                crate::watchdog::at("player");
                 self.drag_frame();
                 // the tutorial's pages, once the world is there
                 if self.world.is_some() {
@@ -1411,6 +1421,7 @@ impl ApplicationHandler for App {
                 }
                 *self.profile.entry("player").or_default() += __t.elapsed().as_secs_f64();
                 let __t = Instant::now();
+                crate::watchdog::at("lan");
                 self.tick_lan(dt);
                 // (a stage of its own: a joining player's bus is loaded here, and that frame
                 // was counted as the people's)
@@ -1429,6 +1440,7 @@ impl ApplicationHandler for App {
                 self.tick_on_foot(if self.paused { 0.0 } else { dt });
                 self.sync_remote_walkers();
                 let __t = Instant::now();
+                crate::watchdog::at("humans");
                 let sight = self.camera.as_ref().zip(self.surface.as_ref())
                     .and_then(|(c, s)| self.sight_extent(c, (s.config.width, s.config.height)));
                 if let (Some(h), Some(w), Some(r), Some(scene)) = (
@@ -2041,6 +2053,7 @@ impl ApplicationHandler for App {
                     }
                 }
                 let __t = Instant::now();
+                crate::watchdog::at("lights");
                 // the lamps' cones in fog and falling rain or snow, and new light pictures
                 if let Some(wt) = &self.weather {
                     lights::set_cone_strength(wt.fog.0, precip_of(wt).1, daylight.night);
@@ -2184,6 +2197,7 @@ impl ApplicationHandler for App {
                 }
                 *self.profile.entry("lights+rain").or_default() += __t.elapsed().as_secs_f64();
                 let __t = Instant::now();
+                crate::watchdog::at("scripted");
                 if let (Some(w), Some(r), Some(scene), Some(cam)) = (
                     self.world.as_ref(),
                     self.renderer.as_ref(),
@@ -2338,6 +2352,7 @@ impl ApplicationHandler for App {
                         }
                     }
                     let __t = Instant::now();
+                    crate::watchdog::at("hud");
                     // (the frame's overlays start empty; the notes are the interface's, in
                     // Roboto - OMSI's bitmap font HUD is the start menu's and the offscreen
                     // pictures' only)
@@ -2718,6 +2733,7 @@ impl ApplicationHandler for App {
                     // of the window's size anyway and waits for the GPU as a present would,
                     // so frame times can be measured with the window out of sight.
                     let __t = Instant::now();
+                    crate::watchdog::at("acquire");
                     // OMSI_HIDE_WINDOW=from,to: treat the window as hidden between these
                     // seconds of the session (the frame is acquired and dropped unshown), to
                     // check the hidden-window path without covering the window by hand
@@ -2791,6 +2807,7 @@ impl ApplicationHandler for App {
                         .or(stand_in);
                     if let Some(view) = view {
                         let __t = Instant::now();
+                        crate::watchdog::at("mirrors");
                         // One mirror a turn, in turn, at most MIRROR_RATE pictures a second in
                         // all: a mirror costs half the main picture's CPU time, and at 140 fps
                         // five mirrors were each redrawn 28 times a second, a small picture
@@ -2931,6 +2948,7 @@ impl ApplicationHandler for App {
                         }
                         *self.profile.entry("mirrors").or_default() += __t.elapsed().as_secs_f64();
                         let __t = Instant::now();
+                        crate::watchdog::at("render");
                         #[cfg(windows)]
                         let mut mirrored = false;
                         #[cfg(not(windows))]
@@ -3049,6 +3067,7 @@ impl ApplicationHandler for App {
                             *self.profile.entry("gpu").or_default() += __t.elapsed().as_secs_f64();
                         }
                         let __t = Instant::now();
+                        crate::watchdog::at("present");
                         match frame {
                             Some(frame) => {
                                 // (without V-sync max_fps paces the frames: waiting for the compositor's frame callback cost a missed refresh each slow frame)
@@ -3070,6 +3089,7 @@ impl ApplicationHandler for App {
                         // next submit, so submit nothing to let them go: without it a hidden
                         // window on Ahlheim grew by 100 MB a second (5.6 GB after 55 s).
                         let __t = Instant::now();
+                        crate::watchdog::at("present");
                         r.queue.submit(std::iter::empty::<wgpu::CommandBuffer>());
                         let _ = r.device.poll(wgpu::PollType::Poll);
                         *self.profile.entry("present").or_default() += __t.elapsed().as_secs_f64();
@@ -3108,6 +3128,7 @@ impl ApplicationHandler for App {
                     let vr_active = false;
                     if max_fps > 0 && !vr_active {
                         let __t = Instant::now();
+                        crate::watchdog::at("limiter");
                         if let Some(rest) = std::time::Duration::from_secs_f64(1.0 / max_fps as f64)
                             .checked_sub(now.elapsed())
                         {
